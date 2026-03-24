@@ -31,9 +31,10 @@ import {
 import {
   buildChatItems,
   buildExplorerRows,
+  formatLiveProgressBody,
+  mergeTransientChatItems,
   selectPreferredCodePath,
   clamp,
-  formatLiveProgressBody,
   formatPaperLabel,
   formatThreadLabel,
   normalizePath,
@@ -87,6 +88,9 @@ export default function App() {
   const [composerValue, setComposerValue] = useState("");
   const [pendingChatItems, setPendingChatItems] = useState<ChatItem[]>([]);
   const [pendingChatThreadId, setPendingChatThreadId] = useState<string | null>(null);
+  const [queuedChatPrompts, setQueuedChatPrompts] = useState<
+    Array<{ id: string; prompt: string; threadId: string | null }>
+  >([]);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<MemoryDraft>(emptyMemoryDraft);
@@ -113,6 +117,8 @@ export default function App() {
   const [threadSeenState, setThreadSeenState] = useState<Record<string, string>>({});
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const lastChatScrollKeyRef = useRef("");
+  const busyActionStackRef = useRef<Array<{ id: number; label: string }>>([]);
+  const nextBusyActionIdRef = useRef(0);
   const paperDraftRef = useRef("");
   const paperDirtyRef = useRef(false);
   const paperLoadRequestRef = useRef(0);
@@ -165,36 +171,17 @@ export default function App() {
     () => (isPendingChatVisible(pendingChatThreadId, activeThreadId) ? pendingChatItems : []),
     [activeThreadId, pendingChatItems, pendingChatThreadId]
   );
-  const visibleChatItems = useMemo(() => {
-    const items = [...chatItems, ...visiblePendingChatItems];
-    const liveProgressBody = formatLiveProgressBody(chatProgress);
-
-    if (busyAction && visiblePendingChatItems.length) {
-      items.push({
-        id: `busy:${busyAction}:${visiblePendingChatItems[0]?.id ?? "chat"}`,
-        role: "assistant",
-        variant: "neutral",
-        title: "Lithium",
-        body: liveProgressBody || describeBusyChatState(busyAction),
-        timestamp: new Date().toISOString(),
-        order: items.length,
-        pending: true
-      });
-    } else if (chatProgress?.active && liveProgressBody) {
-      items.push({
-        id: `live-progress:${workspacePath || activeThreadId || "chat"}:${chatProgress.lane}`,
-        role: "assistant",
-        variant: "neutral",
-        title: "Lithium",
-        body: liveProgressBody,
-        timestamp: chatProgress.updatedAt,
-        order: items.length,
-        pending: true
-      });
-    }
-
-    return items;
-  }, [activeThreadId, busyAction, chatItems, chatProgress, visiblePendingChatItems, workspacePath]);
+  const visibleChatItems = useMemo(
+    () =>
+      mergeTransientChatItems(chatItems, visiblePendingChatItems, {
+        busyAction,
+        busyBody: busyAction ? formatLiveProgressBody(chatProgress) || describeBusyChatState(busyAction) : "",
+        chatProgress,
+        workspacePath,
+        activeThreadId
+      }),
+    [activeThreadId, busyAction, chatItems, chatProgress, visiblePendingChatItems, workspacePath]
+  );
   const pdfPreviewPath = useMemo(
     () => resolvePdfPreviewPath(selectedPaperPath, paperWorkbenchFiles),
     [paperWorkbenchFiles, selectedPaperPath]
@@ -304,9 +291,14 @@ export default function App() {
   const inspectorOpen = WORKBENCH_SURFACES_ENABLED && Boolean(selectedInspectorFile);
   const automationRunning = latestAutomationSession?.status === "running";
   const automationInteractive = automationRunning || automationCheckpointPending;
+  const composerAllowWhileBusy = automationInteractive || busyAction === "Running chat";
   const terminalOpen = WORKBENCH_SURFACES_ENABLED && TERMINAL_FEATURE_ENABLED && logsOpen;
-  const composerPlaceholder = automationInteractive ? "Ask for status, or say stop." : "Start with a message.";
+  const composerPlaceholder = composerAllowWhileBusy
+    ? "Ask for status, steer, or say stop."
+    : "Start with a message.";
   const railHeading = resolveRailHeading();
+  const railProjectTitle = surfaceTitle === "Lithium" ? "" : surfaceTitle;
+  const hasRailHeader = Boolean(railProjectTitle || railHeading);
 
   const handleAppCommand = useEffectEvent((command: string) => {
     if (command === "open-workspace") {
@@ -794,14 +786,15 @@ export default function App() {
     const poll = async () => {
       try {
         const inspection = await window.lithium.inspectChatProgress({
-          workspacePath: workspacePath || undefined
+          workspacePath: workspacePath || undefined,
+          threadId: activeThreadId || undefined
         });
 
         if (cancelled) {
           return;
         }
 
-        setChatProgress(inspection);
+        setChatProgress((current) => stabilizeChatProgress(current, inspection));
 
         if (inspection?.active || !inspection) {
           timer = window.setTimeout(() => {
@@ -825,7 +818,7 @@ export default function App() {
         window.clearTimeout(timer);
       }
     };
-  }, [automationRunning, busyAction, hasBridge, pendingChatItems.length, workspacePath]);
+  }, [activeThreadId, automationRunning, busyAction, hasBridge, pendingChatItems.length, workspacePath]);
 
   useEffect(() => {
     if (
@@ -1137,6 +1130,9 @@ export default function App() {
   }
 
   async function withBusy(label: string, work: () => Promise<void>) {
+    const busyActionId = nextBusyActionIdRef.current + 1;
+    nextBusyActionIdRef.current = busyActionId;
+    busyActionStackRef.current = [...busyActionStackRef.current, { id: busyActionId, label }];
     setBusyAction(label);
     setError(null);
 
@@ -1145,7 +1141,8 @@ export default function App() {
     } catch (nextError) {
       setError(toErrorMessage(nextError));
     } finally {
-      setBusyAction(null);
+      busyActionStackRef.current = busyActionStackRef.current.filter((entry) => entry.id !== busyActionId);
+      setBusyAction(busyActionStackRef.current[busyActionStackRef.current.length - 1]?.label ?? null);
     }
   }
 
@@ -1430,11 +1427,20 @@ export default function App() {
   }
 
   async function handleSend(promptOverride?: string) {
+    return await handleSendWithOptions(promptOverride);
+  }
+
+  async function handleSendWithOptions(
+    promptOverride?: string,
+    options: {
+      bypassQueue?: boolean;
+      pendingItemId?: string;
+      targetThreadId?: string | null;
+    } = {}
+  ) {
     const rawPrompt = (promptOverride ?? composerValue).trim();
     const latestBuilderTaskPrompt = resolveLatestTaskPrompt(snapshot.latestTask?.prompt, "");
-    const shouldStartAutomation =
-      !automationInteractive && !/^\/(?:research|build|mixed|plan)\b/i.test(rawPrompt);
-    const targetThreadId = activeThreadId;
+    const targetThreadId = options.targetThreadId ?? activeThreadId;
 
     if (!canSubmitComposerPrompt(rawPrompt, latestBuilderTaskPrompt)) {
       if (/^\/build\s*$/i.test(rawPrompt)) {
@@ -1448,52 +1454,56 @@ export default function App() {
       return;
     }
 
+    const pendingItemId =
+      options.pendingItemId ?? `pending-user:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const pendingThreadId = targetThreadId ?? UNASSIGNED_PENDING_THREAD_ID;
+
+    if (!options.bypassQueue && busyAction === "Running chat" && !automationInteractive) {
+      const pendingItem: ChatItem = {
+        id: pendingItemId,
+        role: "user",
+        variant: "neutral",
+        title: "You",
+        body: rawPrompt,
+        timestamp: new Date().toISOString(),
+        order: chatItems.length + pendingChatItems.length
+      };
+
+      setPendingChatItems((current) => {
+        if (current.some((item) => item.id === pendingItemId)) {
+          return current;
+        }
+
+        return [...current, pendingItem];
+      });
+      setPendingChatThreadId(pendingThreadId);
+      setQueuedChatPrompts((current) => [...current, { id: pendingItemId, prompt: rawPrompt, threadId: targetThreadId }]);
+      setComposerValue("");
+      return;
+    }
+
     const pendingItem: ChatItem = {
-      id: `pending-user:${Date.now()}`,
+      id: pendingItemId,
       role: "user",
       variant: "neutral",
       title: "You",
       body: rawPrompt,
       timestamp: new Date().toISOString(),
-      order: chatItems.length
+      order: chatItems.length + pendingChatItems.length
     };
 
-    setPendingChatItems([pendingItem]);
-    setPendingChatThreadId(targetThreadId ?? UNASSIGNED_PENDING_THREAD_ID);
+    setPendingChatItems((current) => {
+      if (current.some((item) => item.id === pendingItemId)) {
+        return current;
+      }
+
+      return [...current, pendingItem];
+    });
+    setPendingChatThreadId(pendingThreadId);
     setComposerValue("");
 
     await withBusy("Running chat", async () => {
       try {
-        if (shouldStartAutomation) {
-          const createdSnapshot = await window.lithium.createAutomationSession({
-            workspacePath: workspacePath || undefined,
-            threadId: targetThreadId ?? undefined,
-            objective: rawPrompt,
-            mode: "continuous",
-            maxSteps: 64,
-            maxRuntimeMinutes: 24 * 60,
-            maxRetries: 8,
-            paperWriteEnabled: false
-          });
-          const sessionId = createdSnapshot.latestAutomationSession?.id;
-
-          if (!sessionId) {
-            throw new Error("Automation session could not be created.");
-          }
-
-          const nextSnapshot = await window.lithium.startAutomationSession({
-            workspacePath: workspacePath || undefined,
-            sessionId
-          });
-
-          await applySnapshotUpdate(nextSnapshot);
-          setPendingChatItems([]);
-          setPendingChatThreadId(null);
-          setDrawerTab("none");
-          setLogsOpen(false);
-          return;
-        }
-
         if (canUseChatRouter) {
           const nextSnapshot = await window.lithium.sendChatMessage({
             workspacePath: workspacePath || undefined,
@@ -1502,8 +1512,7 @@ export default function App() {
           });
 
           const { files } = await applySnapshotUpdate(nextSnapshot);
-          setPendingChatItems([]);
-          setPendingChatThreadId(null);
+          setPendingChatItems((current) => current.filter((item) => item.id !== pendingItemId));
 
           if (WORKBENCH_SURFACES_ENABLED) {
             const requestedPaperSurface = promptRequestsPaperSurface(rawPrompt);
@@ -1551,7 +1560,6 @@ export default function App() {
           }
 
           setLogsOpen(false);
-          setComposerValue("");
           return;
         }
 
@@ -1565,18 +1573,34 @@ export default function App() {
         });
 
         await applySnapshotUpdate(nextSnapshot);
-        setPendingChatItems([]);
-        setPendingChatThreadId(null);
+        setPendingChatItems((current) => current.filter((item) => item.id !== pendingItemId));
         setDrawerTab("none");
-        setComposerValue("");
       } catch (nextError) {
-        setPendingChatItems([]);
-        setPendingChatThreadId(null);
-        setComposerValue(rawPrompt);
+        setPendingChatItems((current) => current.filter((item) => item.id !== pendingItemId));
+        setComposerValue((current) => (current.trim() ? current : rawPrompt));
         throw nextError;
       }
     });
   }
+
+  useEffect(() => {
+    if (busyAction || !queuedChatPrompts.length) {
+      return;
+    }
+
+    const nextPrompt = queuedChatPrompts[0];
+
+    if (!nextPrompt) {
+      return;
+    }
+
+    setQueuedChatPrompts((current) => current.filter((entry) => entry.id !== nextPrompt.id));
+    void handleSendWithOptions(nextPrompt.prompt, {
+      bypassQueue: true,
+      pendingItemId: nextPrompt.id,
+      targetThreadId: nextPrompt.threadId
+    });
+  }, [busyAction, queuedChatPrompts, activeThreadId, chatItems.length, pendingChatItems.length]);
 
   async function handleStrategistSignIn() {
     if (!hasBridge) {
@@ -2068,8 +2092,17 @@ export default function App() {
       style={workspaceShellStyle}
     >
       <aside className={sidebarCollapsed ? "thread-rail collapsed" : "thread-rail"}>
-        <div className={railHeading ? "thread-rail-header" : "thread-rail-header empty"}>
-          {railHeading ? <div className="explorer-heading">{railHeading}</div> : null}
+        <div className={hasRailHeader ? "thread-rail-header" : "thread-rail-header empty"}>
+          {railProjectTitle ? (
+            <div className="thread-rail-project">
+              <div className="thread-rail-project-name" title={railProjectTitle}>
+                {railProjectTitle}
+              </div>
+              {railHeading ? <div className="thread-rail-project-meta">{railHeading}</div> : null}
+            </div>
+          ) : railHeading ? (
+            <div className="explorer-heading">{railHeading}</div>
+          ) : null}
         </div>
         <div className="thread-rail-body">{renderRailContent()}</div>
         <div className="thread-rail-footer">
@@ -2117,15 +2150,7 @@ export default function App() {
 
       <main className="content-shell">
         <section className={`main-shell surface-${surfaceMode}`}>
-          <header className="surface-header" onDoubleClick={() => void handleToggleFullscreen()}>
-            <div className="surface-leading">
-              <div className="surface-title-block">
-                <div className="surface-title-row">
-                  <div className="surface-title">{surfaceTitle}</div>
-                </div>
-              </div>
-            </div>
-          </header>
+          <div className="surface-header surface-header-ghost" onDoubleClick={() => void handleToggleFullscreen()} />
 
           <section className="surface-main">
             {surfaceMode === "chat" ? (
@@ -2146,6 +2171,7 @@ export default function App() {
                       </div>
                       <div className="chat-composer-wrap">
                         <Composer
+                          allowWhileBusy={composerAllowWhileBusy}
                           attachments={snapshot.activeThreadAttachments}
                           busy={Boolean(busyAction)}
                           canCreateThread={Boolean(workspacePath && projectReady)}
@@ -2407,6 +2433,75 @@ export default function App() {
 
       {error ? <div className="error-toast">{error}</div> : null}
     </div>
+  );
+}
+
+export function stabilizeChatProgress(
+  current: ChatProgressInspection | null,
+  next: ChatProgressInspection | null
+) {
+  if (current && !next) {
+    return current;
+  }
+
+  if (!current || !next) {
+    return next;
+  }
+
+  if (
+    current.threadId === next.threadId &&
+    current.lane === next.lane &&
+    hasMeaningfulChatProgress(current) &&
+    isGenericChatProgress(next)
+  ) {
+    return current;
+  }
+
+  if (
+    current.active === next.active &&
+    current.lane === next.lane &&
+    current.threadId === next.threadId &&
+    current.progressSummary === next.progressSummary &&
+    current.activeCommand === next.activeCommand &&
+    current.progressDetails.length === next.progressDetails.length &&
+    current.progressDetails.every((detail, index) => detail === next.progressDetails[index])
+  ) {
+    return current;
+  }
+
+  return next;
+}
+
+function hasMeaningfulChatProgress(progress: ChatProgressInspection) {
+  const summary = progress.progressSummary.trim();
+  const details = progress.progressDetails
+    .map((detail) => detail.trim())
+    .filter(Boolean);
+
+  if (!summary && !details.length) {
+    return false;
+  }
+
+  return !isGenericChatProgress(progress);
+}
+
+function isGenericChatProgress(progress: ChatProgressInspection) {
+  const summary = progress.progressSummary.trim();
+  const details = progress.progressDetails
+    .map((detail) => detail.trim())
+    .filter(Boolean);
+
+  if (!summary) {
+    return details.length === 0;
+  }
+
+  if (summary !== "Thinking…") {
+    return false;
+  }
+
+  return (
+    details.length === 0 ||
+    details.every((detail) => detail === "Reviewing the latest thread state and choosing the next move.")
   );
 }
 

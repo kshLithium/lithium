@@ -5,9 +5,11 @@ import {
   buildChatItems,
   buildOnboardingChecklist,
   expandCollapsedFolderAncestors,
+  formatLiveProgressBody,
   formatDecisionBody,
   formatBuilderBody,
   handoffItems,
+  mergeTransientChatItems,
   nextUntitledCodePath,
   normalizeNewCodeFilePath,
   resolveThemeMode,
@@ -34,6 +36,138 @@ describe("app utils", () => {
     ).toEqual({
       memory: "Manual thread notes"
     });
+  });
+
+  it("suppresses stale live progress after a newer persisted reply has landed", () => {
+    const items = mergeTransientChatItems(
+      [
+        {
+          id: "assistant:done",
+          role: "assistant",
+          variant: "neutral",
+          title: "Lithium",
+          body: "최신 상태를 정리했습니다.",
+          timestamp: "2026-03-25T10:00:10.000Z",
+          order: 0
+        }
+      ],
+      [],
+      {
+        chatProgress: {
+          active: true,
+          lane: "strategist",
+          threadId: "TH001",
+          progressSummary: "이전 preview",
+          progressDetails: [],
+          activeCommand: null,
+          stdoutTail: "",
+          stderrTail: "",
+          updatedAt: "2026-03-25T10:00:05.000Z"
+        }
+      }
+    );
+
+    expect(items.map((item) => item.id)).toEqual(["assistant:done"]);
+  });
+
+  it("merges fresh live progress into the timeline with a stable id", () => {
+    const items = mergeTransientChatItems(
+      [
+        {
+          id: "user:1",
+          role: "user",
+          variant: "neutral",
+          title: "You",
+          body: "지금 뭐 하고 있어?",
+          timestamp: "2026-03-25T10:00:00.000Z",
+          order: 0
+        }
+      ],
+      [],
+      {
+        workspacePath: "/tmp/workspace",
+        activeThreadId: "TH001",
+        chatProgress: {
+          active: true,
+          lane: "orchestrator",
+          threadId: "TH001",
+          progressSummary: "Thinking…",
+          progressDetails: ["README와 notes를 먼저 읽고 핵심 목표를 다시 정리하는 중입니다."],
+          activeCommand: "cat README.md",
+          stdoutTail: "",
+          stderrTail: "",
+          updatedAt: "2026-03-25T10:00:03.000Z"
+        }
+      }
+    );
+
+    expect(items.at(-1)?.id).toBe("live-progress:TH001:orchestrator");
+    expect(items.at(-1)?.body).toContain("README와 notes를 먼저 읽고 핵심 목표를 다시 정리하는 중입니다.");
+    expect(items.at(-1)?.body).toContain("Command: `cat README.md`");
+  });
+
+  it("keeps the busy pending card id stable across rerenders", () => {
+    const pendingItems = [
+      {
+        id: "user:pending",
+        role: "user" as const,
+        variant: "neutral" as const,
+        title: "You",
+        body: "parameter golf 프로젝트에 대해서 리서치를 진행해줘",
+        timestamp: "2026-03-25T11:00:00.000Z",
+        order: 0,
+        pending: true
+      }
+    ];
+    const progress = {
+      active: true,
+      lane: "strategist" as const,
+      threadId: "TH001",
+      progressSummary: "이제 리스크 쪽을 확인하고 있습니다.",
+      progressDetails: [],
+      activeCommand: null,
+      stdoutTail: "",
+      stderrTail: "",
+      updatedAt: "2026-03-25T11:00:03.000Z"
+    };
+
+    const first = mergeTransientChatItems([], pendingItems, {
+      busyAction: "Researching",
+      busyBody: "이제 리스크 쪽을 확인하고 있습니다.",
+      chatProgress: progress,
+      activeThreadId: "TH001"
+    });
+    const second = mergeTransientChatItems([], pendingItems, {
+      busyAction: "Researching",
+      busyBody: "이제 리스크 쪽을 확인하고 있습니다.",
+      chatProgress: {
+        ...progress,
+        updatedAt: "2026-03-25T11:00:05.000Z"
+      },
+      activeThreadId: "TH001"
+    });
+
+    expect(first.at(-1)?.id).toBe("busy:TH001:Researching");
+    expect(second.at(-1)?.id).toBe("busy:TH001:Researching");
+  });
+
+  it("formats live progress in chronological order with the latest summary last", () => {
+    expect(
+      formatLiveProgressBody({
+        progressSummary: "마지막으로 공식 저장소 해석을 정리하고 있습니다.",
+        progressDetails: [
+          "README와 최근 로그를 먼저 대조했습니다.",
+          "핵심 리스크와 바로 작업축으로 삼을 부분을 분리했습니다."
+        ],
+        activeCommand: null
+      })
+    ).toBe(
+      [
+        "README와 최근 로그를 먼저 대조했습니다.",
+        "핵심 리스크와 바로 작업축으로 삼을 부분을 분리했습니다.",
+        "마지막으로 공식 저장소 해석을 정리하고 있습니다."
+      ].join("\n\n")
+    );
   });
 
   it("summarizes long context packs without dropping the head", () => {
@@ -99,6 +233,262 @@ describe("app utils", () => {
         }
       ])
     ).toBe("experiments/untitled.py");
+  });
+
+  it("prefers persisted conversation entries over reconstructing chat from runs and decisions", () => {
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "Lithium",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/paper/main.tex",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Summary",
+          createdAt: "2026-03-24T00:00:00.000Z",
+          updatedAt: "2026-03-24T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Summary",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z"
+      },
+      conversationEntries: [
+        {
+          id: "M001",
+          threadId: "TH001",
+          role: "user",
+          source: "user",
+          body: "이어서 정리해줘",
+          createdAt: "2026-03-24T00:00:01.000Z"
+        },
+        {
+          id: "M002",
+          threadId: "TH001",
+          role: "assistant",
+          source: "orchestrator",
+          body: "아직 baseline 개선은 확정되지 않았습니다.",
+          createdAt: "2026-03-24T00:00:02.000Z"
+        }
+      ],
+      latestConversationEntry: {
+        id: "M002",
+        threadId: "TH001",
+        role: "assistant",
+        source: "orchestrator",
+        body: "아직 baseline 개선은 확정되지 않았습니다.",
+        createdAt: "2026-03-24T00:00:02.000Z"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [
+        {
+          id: "D001",
+          threadId: "TH001",
+          prompt: "legacy strategist prompt",
+          rawOutput: "Legacy strategist output",
+          summary: "Legacy strategist summary",
+          rationale: "Legacy rationale",
+          model: "gpt-5.4",
+          engine: "browser",
+          status: "completed",
+          command: { command: "npx", args: ["oracle"], cwd: "/tmp/workspace" },
+          stdoutPath: "",
+          stderrPath: "",
+          outputPath: "",
+          createdAt: "2026-03-24T00:00:03.000Z"
+        }
+      ],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [],
+      automationSteps: [],
+      automationCheckpoints: [],
+      latestAutomationSession: null,
+      latestAutomationCheckpoint: null,
+      logs: []
+    };
+
+    expect(buildChatItems(snapshot, []).map((item) => item.body)).toEqual([
+      "이어서 정리해줘",
+      "아직 baseline 개선은 확정되지 않았습니다."
+    ]);
+  });
+
+  it("suppresses a raw checkpoint card when the same pause was already written as a conversation entry", () => {
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "Lithium",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/paper/main.tex",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Summary",
+          createdAt: "2026-03-24T00:00:00.000Z",
+          updatedAt: "2026-03-24T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Summary",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z"
+      },
+      conversationEntries: [
+        {
+          id: "M100",
+          threadId: "TH001",
+          role: "system",
+          source: "checkpoint",
+          body: "한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다.",
+          createdAt: "2026-03-24T00:00:10.000Z",
+          automationSessionId: "AU001",
+          automationCheckpointId: "AC001"
+        }
+      ],
+      latestConversationEntry: {
+        id: "M100",
+        threadId: "TH001",
+        role: "system",
+        source: "checkpoint",
+        body: "한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다.",
+        createdAt: "2026-03-24T00:00:10.000Z",
+        automationSessionId: "AU001",
+        automationCheckpointId: "AC001"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [
+        {
+          id: "AU001",
+          threadId: "TH001",
+          objective: "자동 연구",
+          displayObjective: "자동 연구",
+          mode: "continuous",
+          status: "idle",
+          allowedActions: ["strategize", "experiment-run", "checkpoint"],
+          paperWriteEnabled: false,
+          evidenceMode: "strict",
+          budget: {
+            maxSteps: 8,
+            maxRuntimeMinutes: 60,
+            maxRetries: 2,
+            usedSteps: 1,
+            usedRetries: 0
+          },
+          latestCheckpointId: "AC001",
+          currentStepSummary: "Waiting for your direction.",
+          createdAt: "2026-03-24T00:00:00.000Z",
+          updatedAt: "2026-03-24T00:00:10.000Z"
+        }
+      ],
+      automationSteps: [],
+      automationCheckpoints: [
+        {
+          id: "AC001",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "pending",
+          title: "Checkpoint ready",
+          summary: "tiny exact가 조금 앞섰습니다.",
+          whatChanged: [],
+          evidence: [],
+          risks: [],
+          nextActions: ["full-prefix stronger proxy로 확인"],
+          createdAt: "2026-03-24T00:00:09.000Z",
+          updatedAt: "2026-03-24T00:00:10.000Z"
+        }
+      ],
+      latestAutomationSession: {
+        id: "AU001",
+        threadId: "TH001",
+        objective: "자동 연구",
+        displayObjective: "자동 연구",
+        mode: "continuous",
+        status: "idle",
+        allowedActions: ["strategize", "experiment-run", "checkpoint"],
+        paperWriteEnabled: false,
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 8,
+          maxRuntimeMinutes: 60,
+          maxRetries: 2,
+          usedSteps: 1,
+          usedRetries: 0
+        },
+        latestCheckpointId: "AC001",
+        currentStepSummary: "Waiting for your direction.",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:10.000Z"
+      },
+      latestAutomationCheckpoint: {
+        id: "AC001",
+        sessionId: "AU001",
+        threadId: "TH001",
+        status: "pending",
+        title: "Checkpoint ready",
+        summary: "tiny exact가 조금 앞섰습니다.",
+        whatChanged: [],
+        evidence: [],
+        risks: [],
+        nextActions: ["full-prefix stronger proxy로 확인"],
+        createdAt: "2026-03-24T00:00:09.000Z",
+        updatedAt: "2026-03-24T00:00:10.000Z"
+      },
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, []);
+
+    expect(items.map((item) => item.body)).toEqual(["한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다."]);
   });
 
   it("renders unified assistant labels and the running-state copy", () => {
@@ -256,9 +646,9 @@ describe("app utils", () => {
         activeCommand: "sed -n '1,260p' README.md"
       })
     ).toBe([
-      "I’m checking the repo structure and reading the main docs.",
+      "The routing path is concrete enough that I’m reading the main chat handler.",
       "",
-      "The routing path is concrete enough that I’m reading the main chat handler."
+      "I’m checking the repo structure and reading the main docs."
     ].join("\n"));
   });
 

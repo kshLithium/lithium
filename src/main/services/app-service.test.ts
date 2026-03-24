@@ -174,6 +174,513 @@ describe("AppService", () => {
     expect(snapshot.latestDecision?.summary).toBe("Literature comparison complete.");
   });
 
+  it("lets the orchestrator own direct user-visible chat replies", async () => {
+    const workspace = await createWorkspace();
+    const orchestratorRunner = {
+      runTurn: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-24T13:00:00.000Z",
+        endedAt: "2026-03-24T13:00:03.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: "지금은 공식 baseline보다 좋아졌다고 확정할 단계는 아닙니다.",
+        sessionId: "orch-thread-1",
+        requestedLane: null,
+        delegatedPrompt: ""
+      }))
+    };
+    const routerRunner = {
+      route: vi.fn()
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      routerRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "그래서 지금 점수가 좋아진거야?"
+    });
+
+    expect(routerRunner.route).not.toHaveBeenCalled();
+    expect(orchestratorRunner.runTurn).toHaveBeenCalledTimes(1);
+    expect(snapshot.conversationEntries?.map((entry) => [entry.role, entry.body])).toEqual([
+      ["user", "그래서 지금 점수가 좋아진거야?"],
+      ["assistant", "지금은 공식 baseline보다 좋아졌다고 확정할 단계는 아닙니다."]
+    ]);
+    expect(snapshot.activeThread?.conversationOrchestratorSessionId).toBe("orch-thread-1");
+  });
+
+  it("lets the orchestrator delegate to the strategist and then synthesize the final chat reply", async () => {
+    const workspace = await createWorkspace();
+    const orchestratorRunner = {
+      runTurn: vi
+        .fn()
+        .mockResolvedValueOnce({
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-24T13:10:00.000Z",
+          endedAt: "2026-03-24T13:10:03.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "관련 자료를 먼저 확인하겠습니다.",
+          sessionId: "orch-thread-2",
+          requestedLane: "strategist" as const,
+          delegatedPrompt: "Compare the public leaderboard baselines before claiming improvement.",
+          delegation: {
+            lane: "strategist" as const,
+            prompt: "Compare the public leaderboard baselines before claiming improvement.",
+            model: "gpt-5.4-pro" as const,
+            reasoningIntensity: "extended" as const,
+            attachExplicitWorkspaceFiles: false
+          }
+        })
+        .mockResolvedValueOnce({
+          command: { command: "codex", args: ["exec", "resume"], cwd: workspace },
+          startedAt: "2026-03-24T13:10:04.000Z",
+          endedAt: "2026-03-24T13:10:08.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "아직 공개 baseline보다 낮아졌다고 확정되지는 않았습니다. 먼저 compare-only 평가를 다시 맞춰야 합니다.",
+          sessionId: "orch-thread-2",
+          requestedLane: null,
+          delegatedPrompt: ""
+        })
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-24T13:10:03.000Z",
+        endedAt: "2026-03-24T13:10:04.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: [
+          "공개 baseline과 로컬 결과를 다시 대조하겠습니다.",
+          "",
+          "LITHIUM_HANDOFF",
+          JSON.stringify({
+            machine_summary: "Public baseline comparison needs a fresh eval-only check.",
+            user_message: "아직 공개 baseline보다 좋아졌다고 확정할 수는 없습니다."
+          })
+        ].join("\n")
+      }))
+    };
+    const routerRunner = {
+      route: vi.fn()
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      oracleRunner,
+      routerRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "그래서 상위권 기준으로 이미 좋아진거야?"
+    });
+
+    expect(routerRunner.route).not.toHaveBeenCalled();
+    expect(oracleRunner.consult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "Compare the public leaderboard baselines before claiming improvement.",
+        model: "gpt-5.4-pro",
+        browserThinkingTime: "extended"
+      })
+    );
+    expect(orchestratorRunner.runTurn).toHaveBeenCalledTimes(2);
+    expect(snapshot.latestDecision?.summary).toBe("Public baseline comparison needs a fresh eval-only check.");
+    expect(snapshot.latestConversationEntry?.body).toContain("아직 공개 baseline보다 낮아졌다고 확정되지는 않았습니다.");
+    expect(snapshot.conversationEntries?.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("lets the orchestrator delegate to the builder with a requested profile before synthesizing the reply", async () => {
+    const workspace = await createWorkspace();
+    const orchestratorRunner = {
+      runTurn: vi
+        .fn()
+        .mockResolvedValueOnce({
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-24T13:20:00.000Z",
+          endedAt: "2026-03-24T13:20:02.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "로컬에서 바로 확인하겠습니다.",
+          sessionId: "orch-thread-3",
+          requestedLane: "builder" as const,
+          delegatedPrompt: "Run the local compare-only metric check and summarize the result.",
+          delegation: {
+            lane: "builder" as const,
+            prompt: "Run the local compare-only metric check and summarize the result.",
+            model: "gpt-5.3-codex" as const,
+            reasoningEffort: "high" as const
+          }
+        })
+        .mockResolvedValueOnce({
+          command: { command: "codex", args: ["exec", "resume"], cwd: workspace },
+          startedAt: "2026-03-24T13:20:05.000Z",
+          endedAt: "2026-03-24T13:20:07.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "요청한 builder 프로필로 로컬 compare-only 확인을 마쳤습니다.",
+          sessionId: "orch-thread-3",
+          requestedLane: null,
+          delegatedPrompt: ""
+        })
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-24T13:20:02.000Z",
+        endedAt: "2026-03-24T13:20:05.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: [
+          "Compare-only metric check finished.",
+          "",
+          "LITHIUM_STATUS",
+          JSON.stringify({
+            machine_summary: "The compare-only metric check finished successfully.",
+            user_message: "로컬 compare-only metric check를 마쳤습니다.",
+            result: "success"
+          })
+        ].join("\n")
+      }))
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      codexRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "로컬에서 바로 확인해줘"
+    });
+
+    expect(codexRunner.runTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-5.3-codex",
+        reasoningEffort: "high"
+      })
+    );
+    expect(orchestratorRunner.runTurn).toHaveBeenCalledTimes(2);
+    expect(snapshot.latestRun?.model).toBe("gpt-5.3-codex");
+    expect(snapshot.latestConversationEntry?.body).toContain("builder 프로필");
+  });
+
+  it("lets the orchestrator start a live builder run with the requested profile", async () => {
+    const workspace = await createWorkspace();
+    const repoPath = path.join(workspace, "official");
+    const virtualEnvPath = path.join(repoPath, ".venv");
+
+    await mkdir(repoPath, { recursive: true });
+    await mkdir(path.join(virtualEnvPath, "bin"), { recursive: true });
+    await writeFile(path.join(virtualEnvPath, "bin", "python3"), "", "utf8");
+    execFileSync("git", ["init"], { cwd: repoPath });
+
+    const orchestratorRunner = {
+      runTurn: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-24T13:25:00.000Z",
+        endedAt: "2026-03-24T13:25:01.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: "바로 live 실행을 시작하겠습니다.",
+        sessionId: "orch-thread-4",
+        requestedLane: "builder" as const,
+        delegatedPrompt: "Run the live compare-only check in the repository.",
+        delegation: {
+          lane: "builder" as const,
+          prompt: "Run the live compare-only check in the repository.",
+          executionMode: "live" as const,
+          model: "gpt-5.3-codex" as const,
+          reasoningEffort: "high" as const
+        }
+      }))
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => {
+        throw new Error("runTask should not be used for live orchestrator builder runs");
+      }),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string, ..._rest: unknown[]) =>
+        buildExecutionContextCaptureCommand(cwd, prompt, outputPath)
+      )
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      codexRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "live로 바로 돌려줘"
+    });
+
+    const buildTaskCall = codexRunner.buildTaskCommand.mock.calls[0] ?? [];
+    expect(buildTaskCall[5]).toBe("gpt-5.3-codex");
+    expect(buildTaskCall[6]).toBe("high");
+    expect(orchestratorRunner.runTurn).toHaveBeenCalledTimes(1);
+    expect(snapshot.latestRun?.model).toBe("gpt-5.3-codex");
+    expect(snapshot.latestConversationEntry?.body).toContain("live");
+  });
+
+  it("lets the orchestrator run builder and strategist in parallel and merge their progress into one chat reply", async () => {
+    const workspace = await createWorkspace();
+    let releaseBuilder!: () => void;
+    let releaseStrategist!: () => void;
+    const builderGate = new Promise<void>((resolve) => {
+      releaseBuilder = resolve;
+    });
+    const strategistGate = new Promise<void>((resolve) => {
+      releaseStrategist = resolve;
+    });
+    const orchestratorRunner = {
+      runTurn: vi
+        .fn()
+        .mockResolvedValueOnce({
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-25T03:10:00.000Z",
+          endedAt: "2026-03-25T03:10:02.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "로컬 실행과 공개 리서치를 같이 진행하겠습니다.",
+          sessionId: "orch-thread-par-1",
+          requestedLane: "builder" as const,
+          delegatedPrompt: "Run the cheap local probe.",
+          delegation: {
+            lane: "builder" as const,
+            prompt: "Run the cheap local probe.",
+            executionMode: "sync" as const,
+            model: "gpt-5.3-codex" as const,
+            reasoningEffort: "high" as const
+          },
+          delegations: [
+            {
+              lane: "builder" as const,
+              prompt: "Run the cheap local probe.",
+              executionMode: "sync" as const,
+              model: "gpt-5.3-codex" as const,
+              reasoningEffort: "high" as const
+            },
+            {
+              lane: "strategist" as const,
+              prompt: "Investigate the strongest public comparison point.",
+              model: "gpt-5.4-pro" as const,
+              reasoningIntensity: "extended" as const,
+              attachExplicitWorkspaceFiles: false
+            }
+          ]
+        })
+        .mockResolvedValueOnce({
+          command: { command: "codex", args: ["exec", "resume"], cwd: workspace },
+          startedAt: "2026-03-25T03:10:05.000Z",
+          endedAt: "2026-03-25T03:10:08.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "로컬 probe는 끝냈고, 공개 비교 기준도 같이 정리했습니다. 다음엔 두 결과를 합쳐 stronger proxy를 바로 검증하면 됩니다.",
+          sessionId: "orch-thread-par-1",
+          requestedLane: null,
+          delegatedPrompt: "",
+          delegations: []
+        })
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => {
+        await strategistGate;
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt: "2026-03-25T03:10:02.000Z",
+          endedAt: "2026-03-25T03:10:06.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: [
+            "공개 비교 기준은 Simple Baseline 쪽으로 다시 고정하는 것이 맞습니다.",
+            "",
+            "LITHIUM_HANDOFF",
+            JSON.stringify({
+              machine_summary: "The strongest public comparison point is the Simple Baseline.",
+              user_message: "공개 비교 기준은 Simple Baseline으로 다시 고정했습니다."
+            })
+          ].join("\n")
+        };
+      })
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => {
+        await builderGate;
+        return {
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-25T03:10:02.000Z",
+          endedAt: "2026-03-25T03:10:04.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: [
+            "로컬 probe를 마쳤습니다.",
+            "",
+            "LITHIUM_STATUS",
+            JSON.stringify({
+              machine_summary: "The cheap local probe finished successfully.",
+              user_message: "로컬 probe를 마쳤습니다.",
+              result: "success"
+            })
+          ].join("\n")
+        };
+      })
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      oracleRunner,
+      codexRunner
+    });
+
+    await app.initProject(workspace);
+    const pendingSnapshot = app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "리서치랑 로컬 실험을 같이 진행해줘"
+    });
+
+    await vi.waitFor(() => {
+      expect(oracleRunner.consult).toHaveBeenCalledTimes(1);
+      expect(codexRunner.runTask).toHaveBeenCalledTimes(1);
+    });
+
+    const midProgress = await app.inspectChatProgress({ workspacePath: workspace });
+    expect(midProgress?.active).toBe(true);
+    expect(midProgress?.lane).toBe("orchestrator");
+    expect(midProgress?.progressSummary).toMatch(/Parallel|병렬/);
+    expect(midProgress?.progressDetails.some((detail) => detail.includes("Builder"))).toBe(true);
+    expect(midProgress?.progressDetails.some((detail) => detail.includes("Strategist"))).toBe(true);
+
+    releaseBuilder();
+    releaseStrategist();
+
+    const snapshot = await pendingSnapshot;
+
+    expect(orchestratorRunner.runTurn).toHaveBeenCalledTimes(2);
+    expect(orchestratorRunner.runTurn.mock.calls[1]?.[0]?.prompt).toContain("multiple workers");
+    expect(snapshot.latestConversationEntry?.body).toContain("로컬 probe");
+    expect(snapshot.latestConversationEntry?.body).toContain("공개 비교 기준");
+    expect(snapshot.latestDecision?.summary).toContain("Simple Baseline");
+    expect(snapshot.latestRun?.model).toBe("gpt-5.3-codex");
+  });
+
+  it("defaults orchestrated automation to continuous even if the delegation over-specifies checkpoint mode", async () => {
+    const workspace = await createWorkspace();
+    const orchestratorRunner = {
+      runTurn: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-24T13:30:00.000Z",
+        endedAt: "2026-03-24T13:30:02.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: "이 목표로 자동 연구를 바로 시작하겠습니다.",
+        sessionId: "orch-thread-5",
+        requestedLane: "automation" as const,
+        delegatedPrompt: "Continue the parameter-golf autoresearch from the latest eval checkpoint.",
+        delegation: {
+          lane: "automation" as const,
+          prompt: "Continue the parameter-golf autoresearch from the latest eval checkpoint.",
+          mode: "checkpoint" as const,
+          maxSteps: 7,
+          maxRuntimeMinutes: 90,
+          maxRetries: 5,
+          paperWriteEnabled: true
+        }
+      }))
+    };
+    const oracleRunner = {
+      consult: vi.fn(() => new Promise<never>(() => undefined))
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      oracleRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "자동 연구 계속 이어서"
+    });
+
+    expect(snapshot.latestAutomationSession?.mode).toBe("continuous");
+    expect(snapshot.latestAutomationSession?.budget.maxSteps).toBe(7);
+    expect(snapshot.latestAutomationSession?.budget.maxRuntimeMinutes).toBe(90);
+    expect(snapshot.latestAutomationSession?.budget.maxRetries).toBe(5);
+    expect(snapshot.latestAutomationSession?.paperWriteEnabled).toBe(true);
+    expect(snapshot.latestConversationEntry?.body).toContain("자동 연구");
+  });
+
+  it("keeps checkpoint mode when the user explicitly asks for manual checkpoints", async () => {
+    const workspace = await createWorkspace();
+    const orchestratorRunner = {
+      runTurn: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-24T13:30:00.000Z",
+        endedAt: "2026-03-24T13:30:02.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: "매 단계 체크포인트로 자동 연구를 시작하겠습니다.",
+        sessionId: "orch-thread-5b",
+        requestedLane: "automation" as const,
+        delegatedPrompt: "Run the autoresearch but pause at each checkpoint.",
+        delegation: {
+          lane: "automation" as const,
+          prompt: "Run the autoresearch but pause at each checkpoint.",
+          mode: "checkpoint" as const,
+          maxSteps: 4,
+          maxRuntimeMinutes: 60,
+          maxRetries: 2,
+          paperWriteEnabled: false
+        }
+      }))
+    };
+    const oracleRunner = {
+      consult: vi.fn(() => new Promise<never>(() => undefined))
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      oracleRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "자동 연구를 시작하되 매 단계마다 체크포인트로 멈춰줘"
+    });
+
+    expect(snapshot.latestAutomationSession?.mode).toBe("checkpoint");
+  });
+
   it("writes chat and prompt traces to an append-only jsonl log", async () => {
     const workspace = await createWorkspace();
     const routerRunner = {
@@ -472,6 +979,71 @@ describe("AppService", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
   });
 
+  it("treats natural Korean status requests as automation questions instead of redirect instructions", async () => {
+    const workspace = await createWorkspace();
+    const oracleRunner = {
+      consult: vi.fn(async (): Promise<any> => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt: "2026-03-18T01:10:03.000Z",
+          endedAt: "2026-03-18T01:10:08.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: "SUMMARY: delayed strategist response."
+        };
+      }),
+      terminateSession: vi.fn(async () => undefined)
+    };
+    const app = new AppService(workspace, {
+      oracleRunner,
+      getAppSettings: async () => ({
+        ...DEFAULT_APP_SETTINGS,
+        strategistSessionReady: true
+      })
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf 프로젝트를 길게 자동 연구해줘",
+      mode: "continuous",
+      maxSteps: 12,
+      maxRuntimeMinutes: 30,
+      maxRetries: 4,
+      paperWriteEnabled: false
+    });
+    const sessionId = createdSnapshot.latestAutomationSession?.id;
+
+    await app.startAutomationSession({
+      workspacePath: workspace,
+      sessionId: sessionId as string
+    });
+
+    await vi.waitFor(() => {
+      expect(oracleRunner.consult).toHaveBeenCalledTimes(1);
+    });
+
+    await app.interruptAutomationSession({
+      workspacePath: workspace,
+      sessionId: sessionId as string,
+      instruction: "지금 뭐 하고 있는지 한 줄로만 알려줘",
+      stopNow: false
+    });
+
+    const snapshotAfterInterrupt = await app.getSnapshot(workspace);
+    expect(snapshotAfterInterrupt.latestAutomationSession?.status).toBe("running");
+    expect(snapshotAfterInterrupt.latestAutomationSession?.currentStepSummary).not.toBe(
+      "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다."
+    );
+    expect(snapshotAfterInterrupt.latestAutomationSession?.queuedUserInstruction).toBeUndefined();
+    expect(snapshotAfterInterrupt.latestAutomationCheckpoint?.summary).toContain(
+      "현재 단계 작업을 계속 진행하고 있습니다."
+    );
+  });
+
   it("stops running automation when the user sends a stop-style chat message", async () => {
     const workspace = await createWorkspace();
     let releaseConsult!: () => void;
@@ -637,6 +1209,254 @@ describe("AppService", () => {
     });
   });
 
+  it("lets the automation loop use the orchestrator to launch builder and strategist work in parallel", async () => {
+    const workspace = await createWorkspace();
+    const orchestratorRunner = {
+      runTurn: vi
+        .fn()
+        .mockImplementationOnce(async () => ({
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-25T10:00:00.000Z",
+          endedAt: "2026-03-25T10:00:04.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "공개 비교와 로컬 검증을 병렬로 시작하겠습니다.",
+          sessionId: "orch-auto-1",
+          requestedLane: null,
+          delegatedPrompt: "",
+          delegations: [
+            {
+              lane: "builder" as const,
+              prompt: "Run the cheapest local tiny eval and record metric, command, log path, artifact path, and next action.",
+              executionMode: "sync" as const,
+              model: "gpt-5.4" as const,
+              reasoningEffort: "high" as const
+            },
+            {
+              lane: "strategist" as const,
+              prompt: "Check the public README and records, confirm the best comparison point, and summarize it briefly.",
+              model: "gpt-5.4-pro" as const,
+              reasoningIntensity: "extended" as const,
+              attachExplicitWorkspaceFiles: false
+            }
+          ]
+        }))
+        .mockImplementationOnce(async () => ({
+          command: { command: "codex", args: ["exec", "resume"], cwd: workspace },
+          startedAt: "2026-03-25T10:00:05.000Z",
+          endedAt: "2026-03-25T10:00:07.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage:
+            "metric: tiny val_bpb 2.45094941\ncommand: ./official/run_mlx_eval_only.sh warm38_single_cv9\nlog path: official/logs/warm38_single_cv9_tiny_eval.log\nartifact path: official/artifacts/warm38_single_cv9.pt\nnext action: stronger proxy로 이어갑니다.",
+          sessionId: "orch-auto-1",
+          requestedLane: null,
+          delegatedPrompt: "",
+          delegations: []
+        }))
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-25T10:00:04.000Z",
+        endedAt: "2026-03-25T10:00:06.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: [
+          "공개 기준 비교는 Simple Baseline 1.22436570을 우선 anchor로 보면 됩니다.",
+          "",
+          "LITHIUM_HANDOFF",
+          JSON.stringify({
+            summary: "Keep Simple Baseline 1.22436570 as the public comparison anchor.",
+            user_message: "공개 기준 비교는 Simple Baseline 1.22436570을 우선 anchor로 보면 됩니다.",
+            run_actions: ["Run the cheapest local tiny eval before any heavier proxy."]
+          })
+        ].join("\n")
+      }))
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-25T10:00:04.000Z",
+        endedAt: "2026-03-25T10:00:05.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: [
+          "tiny exact 기준으로 single cv9가 warm38 plain보다 아주 조금 앞섰습니다.",
+          "",
+          "LITHIUM_STATUS",
+          JSON.stringify({
+            summary: "single cv9 tiny exact edged out plain warm38.",
+            user_message: "tiny exact 기준으로 single cv9가 warm38 plain보다 아주 조금 앞섰습니다.",
+            machine_summary: "single cv9 tiny exact edged out plain warm38.",
+            result: "success",
+            files: ["official/artifacts/warm38_single_cv9.pt"],
+            risks: [],
+            paper_actions: [],
+            run_actions: ["Escalate to the stronger proxy next."],
+            success_criteria: [],
+            open_questions: []
+          })
+        ].join("\n")
+      }))
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      oracleRunner,
+      codexRunner,
+      getAppSettings: async () => ({
+        ...DEFAULT_APP_SETTINGS,
+        strategistSessionReady: true
+      })
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf 자동 연구를 시작해줘",
+      mode: "checkpoint",
+      maxSteps: 4,
+      maxRuntimeMinutes: 30,
+      maxRetries: 2,
+      paperWriteEnabled: false
+    });
+
+    await app.startAutomationSession({
+      workspacePath: workspace,
+      sessionId: createdSnapshot.latestAutomationSession!.id
+    });
+
+    await vi.waitFor(async () => {
+      const snapshot = await app.getSnapshot(workspace);
+      expect(snapshot.latestAutomationSession?.status).toBe("idle");
+      expect(snapshot.latestDecision?.summary).toBe(
+        "Keep Simple Baseline 1.22436570 as the public comparison anchor."
+      );
+      expect(snapshot.latestRun?.status).toBe("completed");
+      expect(
+        snapshot.conversationEntries?.some(
+          (entry) => entry.role === "assistant" && entry.body.includes("stronger proxy")
+        )
+      ).toBe(true);
+      expect(snapshot.latestAutomationCheckpoint?.title).toBe("Checkpoint ready");
+      expect(snapshot.latestAutomationSession?.plannerSessionId).toBe("orch-auto-1");
+    });
+
+    expect(orchestratorRunner.runTurn).toHaveBeenCalledTimes(2);
+    expect(oracleRunner.consult).toHaveBeenCalledTimes(1);
+    expect(codexRunner.runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes a running strategist step even when latestStepId points at a different step", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    let releaseStrategist!: () => void;
+    const strategistGate = new Promise<void>((resolve) => {
+      releaseStrategist = resolve;
+    });
+    const oracleRunner = {
+      consult: vi.fn(async () => {
+        await strategistGate;
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt: "2026-03-25T11:00:00.000Z",
+          endedAt: "2026-03-25T11:00:03.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: [
+            "SUMMARY: Retry the stronger proxy after restart.",
+            "NEXT_TASK: Run the stronger proxy again.",
+            "RATIONALE: The stale latestStepId should not block strategist recovery."
+          ].join("\n")
+        };
+      })
+    };
+    const app = new AppService(workspace, { store });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf stronger proxy 검증을 이어가줘",
+      mode: "continuous",
+      maxSteps: 8,
+      maxRuntimeMinutes: 90,
+      maxRetries: 2,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const activeThread = createdSnapshot.activeThread!;
+    const strategistStepAllocation = await store.allocateAutomationStep(workspace);
+    const builderStepAllocation = await store.allocateAutomationStep(workspace);
+    const now = "2026-03-25T11:00:00.000Z";
+
+    await store.writeAutomationStep(workspace, {
+      id: strategistStepAllocation.id,
+      sessionId: session.id,
+      threadId: activeThread.id,
+      kind: "strategize",
+      lane: "strategist",
+      title: "Plan the next bounded research step",
+      prompt: "Retry the stronger proxy after restart.",
+      status: "running",
+      summary: "Step started.",
+      changedFiles: [],
+      evidence: [],
+      checkpointRequired: false,
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.writeAutomationStep(workspace, {
+      id: builderStepAllocation.id,
+      sessionId: session.id,
+      threadId: activeThread.id,
+      kind: "experiment-run",
+      lane: "builder",
+      title: "An older builder step",
+      prompt: "This builder step already finished.",
+      status: "completed",
+      summary: "Completed earlier.",
+      changedFiles: [],
+      evidence: [],
+      checkpointRequired: false,
+      createdAt: "2026-03-25T11:00:01.000Z",
+      updatedAt: "2026-03-25T11:00:02.000Z",
+      completedAt: "2026-03-25T11:00:02.000Z"
+    });
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "running",
+      latestStepId: builderStepAllocation.id,
+      currentStepSummary: "An older builder step",
+      updatedAt: now
+    });
+
+    const restartedApp = new AppService(workspace, { store, oracleRunner });
+    const firstSnapshot = await restartedApp.getSnapshot(workspace);
+
+    expect(firstSnapshot.latestAutomationSession?.status).toBe("running");
+    expect(firstSnapshot.latestAutomationCheckpoint).toBeNull();
+    await vi.waitFor(() => {
+      expect(oracleRunner.consult).toHaveBeenCalledTimes(1);
+    });
+
+    releaseStrategist();
+
+    await vi.waitFor(async () => {
+      const snapshot = await store.getSnapshot(workspace);
+      expect(snapshot.latestDecision?.summary).toBe("Retry the stronger proxy after restart.");
+    });
+  });
+
   it("routes pending automation checkpoint questions to a builder chat reply instead of strategist replanning", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
@@ -792,27 +1612,62 @@ describe("AppService", () => {
     expect(snapshot.latestAutomationSession?.queuedUserInstruction).toBeUndefined();
   });
 
-  it("stops continuous automation for review after exhausting the retry budget", async () => {
+  it("asks the automation advisor and keeps continuous automation moving after exhausting the retry budget", async () => {
     const workspace = await createWorkspace();
     const oracleRunner = {
-      consult: vi.fn(async (): Promise<any> => ({
-        command: { command: "npx", args: ["oracle"], cwd: workspace },
-        startedAt: "2026-03-18T01:10:03.000Z",
-        endedAt: "2026-03-18T01:10:04.000Z",
-        exitCode: 0,
-        timedOut: false,
-        stdout: "",
-        stderr: "",
-        outputText: "SUMMARY: Attempt the next fix."
-      }))
+      consult: vi
+        .fn()
+        .mockImplementationOnce(async (): Promise<any> => {
+          const startedAt = new Date(Date.now() - 2_000).toISOString();
+          const endedAt = new Date(Date.now() - 1_000).toISOString();
+          return {
+            command: { command: "npx", args: ["oracle"], cwd: workspace },
+            startedAt,
+            endedAt,
+            exitCode: 0,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            outputText: "SUMMARY: Attempt the next fix."
+          };
+        })
+        .mockImplementationOnce(async (): Promise<any> => {
+          const startedAt = new Date().toISOString();
+          const endedAt = new Date(Date.now() + 1_000).toISOString();
+          return {
+            command: { command: "npx", args: ["oracle"], cwd: workspace },
+            startedAt,
+            endedAt,
+            exitCode: 0,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            outputText: [
+              "직전 실패를 gpt-5.4-pro 관점에서 다시 검토했고, 더 싼 복구 경로로 바로 이어가겠습니다.",
+              "",
+              "LITHIUM_HANDOFF",
+              JSON.stringify({
+                summary: "Switch to the cheaper recovery path and keep automation moving.",
+                user_message:
+                  "직전 실패를 gpt-5.4-pro 관점에서 다시 검토했고, 더 싼 복구 경로로 바로 이어가겠습니다.",
+                automation_mode: "continue",
+                run_actions: ["Retry the cheaper recovery path immediately."]
+              })
+            ].join("\n")
+          };
+        })
     };
+    let buildInvocationCount = 0;
     const codexRunner = {
       runTask: vi.fn(async () => {
         throw new Error("runTask should not be used in automation live-run tests");
       }),
-      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
-        buildFailedBuilderCommand(cwd, prompt, outputPath)
-      )
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) => {
+        buildInvocationCount += 1;
+        return buildInvocationCount === 1
+          ? buildFailedBuilderCommand(cwd, prompt, outputPath)
+          : buildDelayedBuilderCommand(cwd, prompt, outputPath, 10_000);
+      })
     };
     const app = new AppService(workspace, {
       oracleRunner,
@@ -842,11 +1697,186 @@ describe("AppService", () => {
 
     await vi.waitFor(async () => {
       const snapshot = await app.getSnapshot(workspace);
-      expect(snapshot.latestAutomationSession?.status).toBe("idle");
-      expect(snapshot.latestAutomationSession?.budget.usedRetries).toBe(1);
-      expect(snapshot.latestAutomationCheckpoint?.title).toBe("Automation needs review after a failed run");
-    }, { timeout: 5_000 });
-  });
+      expect(snapshot.latestAutomationSession?.status).toBe("running");
+      expect(snapshot.latestAutomationSession?.budget.usedRetries).toBe(0);
+      expect(snapshot.latestRun?.status).toBe("running");
+      expect(snapshot.latestDecision?.model).toBe("gpt-5.4-pro");
+      expect(snapshot.latestConversationEntry?.body).toContain("더 싼 복구 경로로 바로 이어가겠습니다");
+      expect(snapshot.latestAutomationCheckpoint?.title).not.toBe("Automation needs review after a failed run");
+      expect(oracleRunner.consult).toHaveBeenCalledTimes(2);
+      expect(codexRunner.buildTaskCommand.mock.calls.length).toBeGreaterThanOrEqual(2);
+    }, { timeout: 8_000 });
+
+    await app.interruptAutomationSession({
+      workspacePath: workspace,
+      sessionId: sessionId as string,
+      instruction: "Stop test automation.",
+      stopNow: true
+    });
+  }, 10_000);
+
+  it("keeps continuous automation moving after the step budget is exhausted", async () => {
+    const workspace = await createWorkspace();
+    const oracleRunner = {
+      consult: vi.fn(async (): Promise<any> => {
+        const startedAt = new Date().toISOString();
+        const endedAt = new Date(Date.now() + 1_000).toISOString();
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt,
+          endedAt,
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: [
+            "단계 수 한도에 닿았지만, 더 작은 bounded step으로 바로 이어가겠습니다.",
+            "",
+            "LITHIUM_HANDOFF",
+            JSON.stringify({
+              summary: "Reset the step window and keep automation moving with the next bounded step.",
+              user_message: "단계 수 한도에 닿았지만, 더 작은 bounded step으로 바로 이어가겠습니다.",
+              automation_mode: "continue",
+              run_actions: ["Continue with the next bounded step immediately."]
+            })
+          ].join("\n")
+        };
+      })
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => {
+        throw new Error("runTask should not be used in automation live-run tests");
+      }),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
+        buildDelayedBuilderCommand(cwd, prompt, outputPath, 10_000)
+      )
+    };
+    const app = new AppService(workspace, {
+      oracleRunner,
+      codexRunner,
+      getAppSettings: async () => ({
+        ...DEFAULT_APP_SETTINGS,
+        strategistSessionReady: true
+      })
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "다음 bounded step을 계속 실행해줘",
+      mode: "continuous",
+      maxSteps: 0,
+      maxRuntimeMinutes: 30,
+      maxRetries: 2,
+      paperWriteEnabled: false
+    });
+    const sessionId = createdSnapshot.latestAutomationSession?.id;
+
+    await app.startAutomationSession({
+      workspacePath: workspace,
+      sessionId: sessionId as string
+    });
+
+    await vi.waitFor(async () => {
+      const snapshot = await app.getSnapshot(workspace);
+      expect(snapshot.latestAutomationSession?.status).toBe("running");
+      expect(snapshot.latestAutomationSession?.budget.usedSteps).toBe(0);
+      expect(snapshot.latestRun?.status).toBe("running");
+    }, { timeout: 8_000 });
+
+    await app.interruptAutomationSession({
+      workspacePath: workspace,
+      sessionId: sessionId as string,
+      instruction: "Stop test automation.",
+      stopNow: true
+    });
+  }, 10_000);
+
+  it("keeps continuous automation moving after the runtime budget is exhausted", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const oracleRunner = {
+      consult: vi.fn(async (): Promise<any> => {
+        const startedAt = new Date().toISOString();
+        const endedAt = new Date(Date.now() + 1_000).toISOString();
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt,
+          endedAt,
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: [
+            "실행 시간 한도에 닿았지만, 방향을 다시 정리해서 자동 연구를 계속 이어가겠습니다.",
+            "",
+            "LITHIUM_HANDOFF",
+            JSON.stringify({
+              summary: "Refresh the runtime window and keep automation moving.",
+              user_message:
+                "실행 시간 한도에 닿았지만, 방향을 다시 정리해서 자동 연구를 계속 이어가겠습니다.",
+              automation_mode: "continue",
+              run_actions: ["Continue with the next bounded step immediately."]
+            })
+          ].join("\n")
+        };
+      })
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => {
+        throw new Error("runTask should not be used in automation live-run tests");
+      }),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
+        buildDelayedBuilderCommand(cwd, prompt, outputPath, 10_000)
+      )
+    };
+    const app = new AppService(workspace, {
+      oracleRunner,
+      codexRunner,
+      store,
+      getAppSettings: async () => ({
+        ...DEFAULT_APP_SETTINGS,
+        strategistSessionReady: true
+      })
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "실행 한도를 넘겨도 끊기지 않게 계속 진행해줘",
+      mode: "continuous",
+      maxSteps: 4,
+      maxRuntimeMinutes: 1,
+      maxRetries: 2,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const oldStartedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      startedAt: oldStartedAt,
+      updatedAt: new Date().toISOString()
+    });
+
+    await app.startAutomationSession({
+      workspacePath: workspace,
+      sessionId: session.id
+    });
+
+    await vi.waitFor(async () => {
+      const snapshot = await app.getSnapshot(workspace);
+      expect(snapshot.latestAutomationSession?.status).toBe("running");
+      expect(snapshot.latestRun?.status).toBe("running");
+    }, { timeout: 8_000 });
+
+    await app.interruptAutomationSession({
+      workspacePath: workspace,
+      sessionId: session.id,
+      instruction: "Stop test automation.",
+      stopNow: true
+    });
+  }, 10_000);
 
   it("marks the strategist step failed and surfaces a blocked checkpoint when strategist output is empty", async () => {
     const workspace = await createWorkspace();
@@ -958,15 +1988,21 @@ describe("AppService", () => {
     });
 
     await vi.waitFor(async () => {
+      expect(codexRunner.buildTaskCommand).toHaveBeenCalledTimes(1);
       const snapshot = await app.getSnapshot(workspace);
-      expect(snapshot.latestRun?.status).toBe("completed");
-      expect(snapshot.latestAutomationSession?.status).toBe("idle");
       expect(snapshot.latestAutomationSession?.queuedUserInstruction).toBeUndefined();
     }, { timeout: 5_000 });
 
     const builderPrompt = (codexRunner.buildTaskCommand.mock.calls[0]?.[1] as string) ?? "";
     expect(builderPrompt).toContain("새 redirect instruction");
     expect(builderPrompt).not.toContain("이전 stale instruction");
+
+    await app.interruptAutomationSession({
+      workspacePath: workspace,
+      sessionId: session.id,
+      instruction: "Stop test automation.",
+      stopNow: true
+    });
   });
 
   it("runs live builder tasks from a single nested repository and activates its virtualenv", async () => {
@@ -1191,7 +2227,7 @@ describe("AppService", () => {
     expect(finalMessage).not.toContain("shell_snapshot");
   });
 
-  it("reconciles stale running automation sessions after the app restarts", async () => {
+  it("checkpoints stale non-recoverable automation steps after the app restarts", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
     const app = new AppService(workspace, { store });
@@ -1214,10 +2250,10 @@ describe("AppService", () => {
       id: stepId,
       sessionId: session.id,
       threadId: session.threadId,
-      kind: "strategize",
-      lane: "strategist",
-      title: "Plan the next bounded research step",
-      prompt: "Continue the research automation.",
+      kind: "paper-sync",
+      lane: "writer",
+      title: "Sync manuscript state",
+      prompt: "Refresh the manuscript projection from the latest artifacts.",
       status: "running",
       summary: "Step started.",
       changedFiles: [],
@@ -1231,7 +2267,7 @@ describe("AppService", () => {
       status: "running",
       latestStepId: stepId,
       latestCheckpointId: undefined,
-      currentStepSummary: "Plan the next bounded research step",
+      currentStepSummary: "Sync manuscript state",
       stopReason: undefined,
       endedAt: undefined,
       updatedAt: now
@@ -1240,11 +2276,11 @@ describe("AppService", () => {
     const restartedApp = new AppService(workspace, { store });
     const snapshot = await restartedApp.getSnapshot(workspace);
 
-    expect(snapshot.latestAutomationSession?.status).toBe("idle");
+    expect(snapshot.latestAutomationSession?.status).toBe("running");
     expect(snapshot.latestAutomationSession?.currentStepSummary).toBe(
-      "Automation was interrupted when Lithium restarted. Waiting for your direction."
+      "Automation resumed after Lithium restarted."
     );
-    expect(snapshot.latestAutomationCheckpoint?.title).toBe("Automation interrupted after app restart");
+    expect(snapshot.latestAutomationCheckpoint).toBeNull();
     expect(snapshot.automationSteps?.find((step) => step.id === stepId)?.status).toBe("failed");
   });
 
@@ -1285,6 +2321,7 @@ describe("AppService", () => {
     expect(resumedSnapshot.latestAutomationSession?.currentStepSummary).toBe("Automation resumed.");
     expect(resumedSnapshot.latestAutomationSession?.stopReason).toBeUndefined();
     expect(resumedSnapshot.latestAutomationSession?.endedAt).toBeUndefined();
+    expect(resumedSnapshot.latestAutomationSession?.latestCheckpointId).toBeUndefined();
   });
 
   it("clears stale stop metadata when a checkpoint is approved", async () => {
@@ -1340,6 +2377,7 @@ describe("AppService", () => {
     expect(resumedSnapshot.latestAutomationSession?.status).toBe("running");
     expect(resumedSnapshot.latestAutomationSession?.stopReason).toBeUndefined();
     expect(resumedSnapshot.latestAutomationSession?.endedAt).toBeUndefined();
+    expect(resumedSnapshot.latestAutomationSession?.latestCheckpointId).toBeUndefined();
   });
 
   it("does not treat an app-restart interruption as a fresh builder failure when resuming automation", async () => {
@@ -1694,6 +2732,8 @@ describe("AppService", () => {
           expect(snapshot.latestAutomationCheckpoint?.summary).toContain("builder completed before the process stalled");
           expect(snapshot.latestAutomationCheckpoint?.summary).not.toContain("restarted");
           expect(snapshot.latestAutomationSession?.stopReason).toBeUndefined();
+          expect(snapshot.latestConversationEntry?.role).toBe("system");
+          expect(snapshot.latestConversationEntry?.body).toContain("한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다");
         },
         {
           timeout: 5_000
@@ -1706,6 +2746,157 @@ describe("AppService", () => {
     } finally {
       restoreEnv("LITHIUM_RUN_FINALIZATION_THRESHOLD_MS", previousFinalizationThreshold);
     }
+  });
+
+  it("automatically retries a running automation strategist step after app restart instead of checkpointing", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    let releaseStrategist!: () => void;
+    const strategistGate = new Promise<void>((resolve) => {
+      releaseStrategist = () => {
+        resolve();
+      };
+    });
+    const oracleRunner = {
+      consult: vi.fn(async () => {
+        await strategistGate;
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt: "2026-03-25T00:00:00.000Z",
+          endedAt: "2026-03-25T00:00:05.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: [
+            "SUMMARY: Retry the stronger proxy check.",
+            "NEXT_TASK: Run the stronger proxy eval for warm38 + single cv9.",
+            "RATIONALE: The restart should not block continuous automation."
+          ].join("\n")
+        };
+      })
+    };
+    const app = new AppService(workspace, { store });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf stronger proxy 검증을 계속 진행해줘",
+      mode: "continuous",
+      maxSteps: 8,
+      maxRuntimeMinutes: 90,
+      maxRetries: 2,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const activeThread = createdSnapshot.activeThread!;
+    const stepAllocation = await store.allocateAutomationStep(workspace);
+    const now = "2026-03-25T00:00:00.000Z";
+
+    await store.writeAutomationStep(workspace, {
+      id: stepAllocation.id,
+      sessionId: session.id,
+      threadId: activeThread.id,
+      kind: "strategize",
+      lane: "strategist",
+      title: "Plan the next bounded research step",
+      prompt: "Retry the stronger proxy check for warm38 + single cv9.",
+      status: "running",
+      summary: "Step started.",
+      changedFiles: [],
+      evidence: [],
+      checkpointRequired: false,
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "running",
+      latestStepId: stepAllocation.id,
+      currentStepSummary: "Plan the next bounded research step",
+      updatedAt: now
+    });
+
+    const restartedApp = new AppService(workspace, { store, oracleRunner });
+    const firstSnapshot = await restartedApp.getSnapshot(workspace);
+
+    expect(firstSnapshot.latestAutomationSession?.status).toBe("running");
+    expect(firstSnapshot.latestAutomationCheckpoint).toBeNull();
+    await vi.waitFor(() => {
+      expect(oracleRunner.consult).toHaveBeenCalledTimes(1);
+    });
+
+    const midSnapshot = await store.getSnapshot(workspace);
+    expect(midSnapshot.latestAutomationSession?.status).toBe("running");
+    expect(midSnapshot.latestAutomationCheckpoint).toBeNull();
+    expect(midSnapshot.latestAutomationSession?.stopReason).toBeUndefined();
+    expect(midSnapshot.latestAutomationSession?.latestStepId).not.toBe(stepAllocation.id);
+
+    const steps = await store.listAutomationSteps(workspace);
+    const originalStep = steps.find((step) => step.id === stepAllocation.id);
+    expect(originalStep?.status).toBe("cancelled");
+
+    releaseStrategist();
+
+    await vi.waitFor(async () => {
+      const snapshot = await store.getSnapshot(workspace);
+      expect(snapshot.latestDecision?.summary).toBe("Retry the stronger proxy check.");
+    });
+  });
+
+  it("switches a legacy checkpoint session back to continuous when the user simply says to continue", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const app = new AppService(workspace, { store });
+
+    await app.initProject(workspace);
+    const created = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf 자동 연구를 계속 진행해줘. 체크포인트마다 기준선 유지 여부를 한 줄로만 적어줘.",
+      mode: "checkpoint",
+      maxSteps: 8,
+      maxRuntimeMinutes: 90,
+      maxRetries: 2,
+      paperWriteEnabled: false
+    });
+    const session = created.latestAutomationSession!;
+    const checkpoint = {
+      id: "AC900",
+      sessionId: session.id,
+      threadId: session.threadId,
+      status: "pending" as const,
+      title: "Checkpoint ready",
+      summary: "warm38 + single cv9 tiny exact가 아주 조금 앞섰습니다.",
+      whatChanged: [],
+      evidence: [],
+      risks: [],
+      nextActions: ["full-prefix stronger proxy로 바로 확인"],
+      createdAt: "2026-03-25T09:00:00.000Z",
+      updatedAt: "2026-03-25T09:00:00.000Z"
+    };
+
+    await store.writeAutomationCheckpoint(workspace, checkpoint);
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "idle",
+      latestCheckpointId: checkpoint.id,
+      currentStepSummary: "Waiting for your direction.",
+      updatedAt: "2026-03-25T09:00:00.000Z"
+    });
+
+    vi.spyOn(app as any, "runAutomationLoop").mockResolvedValue(undefined);
+
+    const snapshot = await app.approveAutomationCheckpoint({
+      workspacePath: workspace,
+      sessionId: session.id,
+      checkpointId: checkpoint.id,
+      response: "계속 이어서 자동으로 진행해"
+    });
+
+    expect(snapshot.latestAutomationSession?.mode).toBe("continuous");
+    expect(snapshot.latestAutomationSession?.status).toBe("running");
+    expect(snapshot.latestConversationEntry?.role).toBe("system");
+    expect(snapshot.latestConversationEntry?.body).toContain("routine step에서는 멈추지 않고");
   });
 
   it("terminates detached builder processes even when no live registry handle exists", async () => {
@@ -1893,6 +3084,197 @@ describe("AppService", () => {
     expect(snapshot.latestRun?.prompt).toBe("Update paper/main.tex to reflect the new experiment summary.");
     expect(snapshot.latestRun?.status).toBe("running");
     expect(snapshot.latestRun?.endedAt).toBeUndefined();
+  });
+
+  it("surfaces live orchestrator progress from codex logs and scopes it to the active thread", async () => {
+    const workspace = await createWorkspace();
+    let releaseRun: (() => void) | null = null;
+    const runReleased = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    const orchestratorRunner = {
+      runTurn: vi.fn(async (input: { stdoutPath: string }) => {
+        await mkdir(path.dirname(input.stdoutPath), { recursive: true });
+        await writeFile(
+          input.stdoutPath,
+          [
+            JSON.stringify({
+              type: "item.started",
+              item: {
+                id: "cmd-1",
+                type: "command_execution",
+                command: "cat README.md"
+              }
+            }),
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "msg-1",
+                type: "agent_message",
+                text: "README와 notes를 먼저 읽고 핵심 목표를 정리하고 있습니다."
+              }
+            })
+          ].join("\n"),
+          "utf8"
+        );
+        await runReleased;
+
+        return {
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-25T01:00:00.000Z",
+          endedAt: "2026-03-25T01:00:04.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "README와 notes를 읽었고, 다음 bounded step을 바로 정리하겠습니다.",
+          sessionId: "thread-orchestrator",
+          requestedLane: null,
+          delegatedPrompt: ""
+        };
+      })
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.getSnapshot(workspace);
+    const threadId = snapshot.activeThread?.id;
+
+    expect(threadId).toBeTruthy();
+
+    const pendingSnapshot = app.sendChatMessage({
+      workspacePath: workspace,
+      threadId,
+      prompt: "README와 notes를 보고 지금 상태를 짧게 알려줘"
+    });
+
+    await vi.waitFor(async () => {
+      const progress = await app.inspectChatProgress({
+        workspacePath: workspace,
+        threadId
+      });
+
+      expect(progress?.lane).toBe("orchestrator");
+      expect(progress?.threadId).toBe(threadId);
+      expect(progress?.progressSummary).toBe("README와 notes를 먼저 읽고 핵심 목표를 정리하고 있습니다.");
+      expect(progress?.activeCommand).toBe("cat README.md");
+    });
+
+    expect(
+      await app.inspectChatProgress({
+        workspacePath: workspace,
+        threadId: "TH999"
+      })
+    ).toBeNull();
+
+    const unblock = releaseRun as (() => void) | null;
+
+    if (!unblock) {
+      throw new Error("orchestrator gate was not initialized");
+    }
+
+    (unblock as () => void)();
+    await pendingSnapshot;
+
+    expect(
+      await app.inspectChatProgress({
+        workspacePath: workspace,
+        threadId
+      })
+    ).toBeNull();
+  });
+
+  it("preserves the last meaningful orchestrator progress when the live log tail becomes temporarily unparsable", async () => {
+    const workspace = await createWorkspace();
+    let releaseRun: (() => void) | null = null;
+    const runReleased = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    let stdoutPath = "";
+    const orchestratorRunner = {
+      runTurn: vi.fn(async (input: { stdoutPath: string }) => {
+        stdoutPath = input.stdoutPath;
+        await mkdir(path.dirname(input.stdoutPath), { recursive: true });
+        await writeFile(
+          input.stdoutPath,
+          [
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "msg-1",
+                type: "agent_message",
+                text: "README와 recent logs를 먼저 맞춰 보고 있습니다."
+              }
+            })
+          ].join("\n"),
+          "utf8"
+        );
+        await runReleased;
+
+        return {
+          command: { command: "codex", args: ["exec"], cwd: workspace },
+          startedAt: "2026-03-25T01:10:00.000Z",
+          endedAt: "2026-03-25T01:10:04.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: "README와 recent logs를 읽었고 다음 bounded step을 정리했습니다.",
+          sessionId: "thread-orchestrator",
+          requestedLane: null,
+          delegatedPrompt: ""
+        };
+      })
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.getSnapshot(workspace);
+    const threadId = snapshot.activeThread?.id;
+
+    expect(threadId).toBeTruthy();
+
+    const pendingSnapshot = app.sendChatMessage({
+      workspacePath: workspace,
+      threadId,
+      prompt: "지금 진행 상황을 짧게 알려줘"
+    });
+
+    await vi.waitFor(async () => {
+      const progress = await app.inspectChatProgress({
+        workspacePath: workspace,
+        threadId
+      });
+
+      expect(progress?.progressSummary).toBe("README와 recent logs를 먼저 맞춰 보고 있습니다.");
+    });
+
+    expect(stdoutPath).toBeTruthy();
+    await writeFile(
+      stdoutPath,
+      `{"type":"item.completed","item":{"id":"msg-2","type":"agent_message","text":"${"x".repeat(20_000)}`,
+      "utf8"
+    );
+
+    const fallbackProgress = await app.inspectChatProgress({
+      workspacePath: workspace,
+      threadId
+    });
+
+    expect(fallbackProgress?.progressSummary).toBe("README와 recent logs를 먼저 맞춰 보고 있습니다.");
+
+    const unblock = releaseRun as (() => void) | null;
+
+    if (!unblock) {
+      throw new Error("orchestrator gate was not initialized");
+    }
+
+    unblock();
+    await pendingSnapshot;
   });
 
   it("replaces an active builder run with the latest builder task instead of surfacing a raw error", async () => {

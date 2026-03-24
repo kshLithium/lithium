@@ -5,13 +5,16 @@ import type {
   AttachmentKind,
   AttachmentRecord,
   ArtifactKind,
+  AutomationCycleRecord,
   AutomationCheckpointRecord,
   AutomationSessionRecord,
   AutomationStepRecord,
+  ConversationEntryRecord,
   ContextPackLane,
   DecisionRecord,
   ManuscriptSectionRecord,
   LithiumHandoff,
+  ProjectMemoryLayer,
   ProjectMemoryRecord,
   ProjectRecord,
   ProjectSnapshot,
@@ -58,6 +61,7 @@ const WORKSPACE_INDEX_IGNORED_DIRS = new Set([
 type ProjectPaths = {
   root: string;
   threadsDir: string;
+  conversationEntriesDir: string;
   attachmentRecordsDir: string;
   decisionsDir: string;
   tasksDir: string;
@@ -65,6 +69,7 @@ type ProjectPaths = {
   routesDir: string;
   automationDir: string;
   automationSessionsDir: string;
+  automationCyclesDir: string;
   automationStepsDir: string;
   automationCheckpointsDir: string;
   terminalsDir: string;
@@ -81,6 +86,9 @@ type ProjectPaths = {
   memoryBriefFile: string;
   memoryOpenQuestionsFile: string;
   memorySessionSummaryFile: string;
+  memoryDurableContextFile: string;
+  memoryWorkingContextFile: string;
+  memoryEvidenceContextFile: string;
   memoryPreferencesFile: string;
   workspaceAttachmentsDir: string;
 };
@@ -112,6 +120,7 @@ export class ProjectStore {
     return {
       root,
       threadsDir: path.join(root, "threads"),
+      conversationEntriesDir: path.join(root, "conversation"),
       attachmentRecordsDir: path.join(root, "attachments"),
       decisionsDir: path.join(root, "decisions"),
       tasksDir: path.join(root, "tasks"),
@@ -119,6 +128,7 @@ export class ProjectStore {
       routesDir: path.join(root, "routes"),
       automationDir: path.join(root, "automation"),
       automationSessionsDir: path.join(root, "automation", "sessions"),
+      automationCyclesDir: path.join(root, "automation", "cycles"),
       automationStepsDir: path.join(root, "automation", "steps"),
       automationCheckpointsDir: path.join(root, "automation", "checkpoints"),
       terminalsDir: path.join(root, "terminals"),
@@ -135,6 +145,9 @@ export class ProjectStore {
       memoryBriefFile: path.join(root, "memory", "brief.md"),
       memoryOpenQuestionsFile: path.join(root, "memory", "open-questions.md"),
       memorySessionSummaryFile: path.join(root, "memory", "session-summary.md"),
+      memoryDurableContextFile: path.join(root, "memory", "durable-context.md"),
+      memoryWorkingContextFile: path.join(root, "memory", "working-context.md"),
+      memoryEvidenceContextFile: path.join(root, "memory", "evidence-context.md"),
       memoryPreferencesFile: path.join(root, "memory", "preferences.json"),
       workspaceAttachmentsDir: path.join(workspacePath, "attachments")
     };
@@ -145,11 +158,14 @@ export class ProjectStore {
 
     await mkdir(paths.decisionsDir, { recursive: true });
     await mkdir(paths.threadsDir, { recursive: true });
+    await mkdir(paths.conversationEntriesDir, { recursive: true });
     await mkdir(paths.attachmentRecordsDir, { recursive: true });
     await mkdir(paths.tasksDir, { recursive: true });
     await mkdir(paths.runsDir, { recursive: true });
     await mkdir(paths.routesDir, { recursive: true });
+    await mkdir(paths.automationDir, { recursive: true });
     await mkdir(paths.automationSessionsDir, { recursive: true });
+    await mkdir(paths.automationCyclesDir, { recursive: true });
     await mkdir(paths.automationStepsDir, { recursive: true });
     await mkdir(paths.automationCheckpointsDir, { recursive: true });
     await mkdir(paths.terminalsDir, { recursive: true });
@@ -445,7 +461,14 @@ export class ProjectStore {
 
   async readProjectMemory(workspacePath: string) {
     const paths = this.buildPaths(workspacePath);
-    return this.readJson<ProjectMemoryRecord>(paths.projectMemoryFile);
+    const memory = await this.readJson<ProjectMemoryRecord>(paths.projectMemoryFile);
+
+    if (!memory) {
+      return null;
+    }
+
+    const project = await this.readProject(workspacePath);
+    return normalizeProjectMemoryRecord(memory, project?.name ?? path.basename(workspacePath));
   }
 
   async writeProjectMemory(
@@ -457,17 +480,27 @@ export class ProjectStore {
     const project = (await this.readProject(workspacePath)) ?? (await this.initProject(workspacePath));
     const existing =
       (await this.readProjectMemory(workspacePath)) ?? createDefaultProjectMemory(project.name);
+    const nextLayers = mergeProjectMemoryLayers(existing.layers, patch.layers, {
+      projectBrief: patch.projectBrief,
+      researchGoal: patch.researchGoal,
+      constraints: patch.constraints,
+      openQuestions: patch.openQuestions,
+      activeHypotheses: patch.activeHypotheses,
+      sessionSummary: patch.sessionSummary
+    });
     const merged: ProjectMemoryRecord = {
-      projectBrief: patch.projectBrief ?? existing.projectBrief,
-      researchGoal: patch.researchGoal ?? existing.researchGoal,
-      constraints: patch.constraints ?? existing.constraints,
-      openQuestions: patch.openQuestions ?? existing.openQuestions,
-      activeHypotheses: patch.activeHypotheses ?? existing.activeHypotheses,
-      sessionSummary: patch.sessionSummary ?? existing.sessionSummary,
+      projectBrief: patch.projectBrief ?? nextLayers.narrative.activeStory,
+      researchGoal: patch.researchGoal ?? nextLayers.narrative.northStar,
+      constraints: patch.constraints ?? nextLayers.narrative.constraints,
       preferences: {
         ...existing.preferences,
         ...patch.preferences
       },
+      openQuestions: patch.openQuestions ?? nextLayers.projectModel.openQuestions,
+      activeHypotheses: patch.activeHypotheses ?? nextLayers.projectModel.activeHypotheses,
+      sessionSummary: patch.sessionSummary ?? nextLayers.executionJournal.sessionSummary,
+      layers: nextLayers,
+      memoryMap: mergeProjectMemoryMap(existing.memoryMap, patch.memoryMap, nextLayers),
       updatedAt: new Date().toISOString()
     };
 
@@ -490,11 +523,19 @@ export class ProjectStore {
     const latestContextRunSummary = latestContextRun?.finalMessage
       ? extractFinalSummary(latestContextRun.finalMessage)
       : "none";
+    const latestCycle = snapshot.latestAutomationCycle ?? null;
+    const latestConversationBody = snapshot.latestConversationEntry?.body?.trim() || "";
+    const summaryLanguage = resolveContextLanguage([
+      latestConversationBody,
+      snapshot.latestAutomationSession?.displayObjective || "",
+      snapshot.latestAutomationSession?.objective || ""
+    ]);
 
     const sessionSummary = [
       `Project: ${snapshot.project.name}`,
       `Active Thread: ${snapshot.activeThread?.title || "none"}`,
       `Active attachments: ${snapshot.activeThreadAttachments.length || 0}`,
+      latestConversationBody ? `Latest chat reply: ${truncateInline(latestConversationBody, 220)}` : null,
       snapshot.latestDecision ? `Latest strategist summary: ${latestStrategistSummary || "none"}` : "Latest strategist summary: none",
       latestStrategistReply && !isRedundantInlineSummary(latestStrategistReply, latestStrategistSummary)
         ? `Latest strategist reply: ${latestStrategistReply}`
@@ -503,6 +544,8 @@ export class ProjectStore {
         ? `Latest research run: ${latestContextRun.id} (${latestContextRun.status}, exit ${latestContextRun.exitCode ?? "unknown"})`
         : "Latest research run: none",
       latestContextRun ? `Latest builder summary: ${latestContextRunSummary}` : "Latest builder summary: none",
+      formatAutomationSessionSummary(snapshot.latestAutomationSession, summaryLanguage),
+      formatAutomationCycleSummary(latestCycle, summaryLanguage),
       latestOperationalRun?.finalMessage
         ? `Latest operational issue: ${extractFinalSummary(latestOperationalRun.finalMessage)}`
         : null
@@ -510,7 +553,87 @@ export class ProjectStore {
       .filter((line): line is string => Boolean(line))
       .join("\n");
 
-    return this.writeProjectMemory(workspacePath, { sessionSummary });
+    return this.writeProjectMemory(workspacePath, {
+      sessionSummary,
+      layers: {
+        narrative: {
+          northStar: snapshot.memory.researchGoal,
+          activeStory: snapshot.memory.projectBrief,
+          collaborationContract: snapshot.memory.constraints.slice(0, 6),
+          currentFocus:
+            snapshot.latestAutomationSession?.currentStepSummary ||
+            snapshot.latestAutomationSession?.displayObjective ||
+            snapshot.latestAutomationSession?.objective ||
+            latestConversationBody ||
+            "none",
+          recentDirections: [latestConversationBody].filter(Boolean),
+          constraints: snapshot.memory.constraints
+        },
+        projectModel: {
+          openQuestions: snapshot.memory.openQuestions,
+          activeHypotheses: snapshot.memory.activeHypotheses,
+          stableFacts: [snapshot.project.name, snapshot.memory.projectBrief].filter(Boolean),
+          keyDecisions: [latestStrategistSummary, latestContextRunSummary].filter(Boolean),
+          metrics: [latestContextRun ? `${latestContextRun.id}: ${latestContextRunSummary}` : ""].filter(Boolean),
+          learnedPatterns: [latestCycle?.summary || ""].filter(Boolean)
+        },
+        executionJournal: {
+          sessionSummary,
+          activeAutomationSummary:
+            formatAutomationSessionSummary(snapshot.latestAutomationSession, summaryLanguage) || "none",
+          recentArtifacts: [
+            snapshot.latestDecision?.id || "",
+            latestContextRun?.id || "",
+            latestCycle?.id || ""
+          ].filter(Boolean),
+          recentCommands: [latestContextRun?.command.command || ""].filter(Boolean),
+          recentLogs: logsToLines(snapshot.logs, 3),
+          recoveryNotes: [latestOperationalRun?.finalMessage ? extractFinalSummary(latestOperationalRun.finalMessage) : ""].filter(Boolean)
+        }
+      },
+      memoryMap: {
+        narrative: {
+          summary: [snapshot.memory.projectBrief, snapshot.memory.researchGoal].filter(Boolean).join(" "),
+          bullets: [
+            ...snapshot.memory.constraints.slice(0, 6),
+            ...snapshot.memory.activeHypotheses.slice(0, 6)
+          ].filter(Boolean)
+        },
+        knowledge: {
+          summary: [
+            latestConversationBody ? `Latest chat: ${truncateInline(latestConversationBody, 160)}` : "",
+            formatAutomationSessionSummary(snapshot.latestAutomationSession, summaryLanguage) || "",
+            formatAutomationCycleSummary(latestCycle, summaryLanguage) || ""
+          ]
+            .filter(Boolean)
+            .join(" | "),
+          bullets: [
+            snapshot.latestAutomationSession?.currentStepSummary || "",
+            ...snapshot.memory.openQuestions.slice(0, 4)
+          ].filter(Boolean)
+        },
+        execution: {
+          summary: [
+            latestStrategistSummary ? `Strategist: ${truncateInline(latestStrategistSummary, 140)}` : "",
+            latestContextRun ? `${latestContextRun.id}: ${truncateInline(latestContextRunSummary, 140)}` : "",
+            latestCycle ? `${latestCycle.id}: ${truncateInline(latestCycle.summary, 140)}` : ""
+          ]
+            .filter(Boolean)
+            .join(" | "),
+          bullets: [
+            latestStrategistReply
+              ? `Decision ${snapshot.latestDecision?.id ?? "latest"}: ${truncateInline(latestStrategistReply, 180)}`
+              : "",
+            latestContextRun
+              ? `Run ${latestContextRun.id}: ${truncateInline(latestContextRunSummary, 180)}`
+              : "",
+            latestOperationalRun?.finalMessage
+              ? `Operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 180)}`
+              : ""
+          ].filter(Boolean)
+        }
+      }
+    });
   }
 
   async allocateDecision(workspacePath: string) {
@@ -548,6 +671,15 @@ export class ProjectStore {
     return this.allocateArtifacts(workspacePath, "R", this.buildPaths(workspacePath).runsDir);
   }
 
+  async allocateConversationEntry(workspacePath: string) {
+    const id = await this.nextId(this.buildPaths(workspacePath).conversationEntriesDir, "M");
+
+    return {
+      id,
+      jsonPath: path.join(this.buildPaths(workspacePath).conversationEntriesDir, `${id}.json`)
+    };
+  }
+
   async allocateRouteTrace(workspacePath: string) {
     return this.allocateArtifacts(workspacePath, "Q", this.buildPaths(workspacePath).routesDir);
   }
@@ -558,6 +690,15 @@ export class ProjectStore {
     return {
       id,
       jsonPath: path.join(this.buildPaths(workspacePath).automationSessionsDir, `${id}.json`)
+    };
+  }
+
+  async allocateAutomationCycle(workspacePath: string) {
+    const id = await this.nextId(this.buildPaths(workspacePath).automationCyclesDir, "AY");
+
+    return {
+      id,
+      jsonPath: path.join(this.buildPaths(workspacePath).automationCyclesDir, `${id}.json`)
     };
   }
 
@@ -588,6 +729,11 @@ export class ProjectStore {
     await this.writeJson(jsonPath, decision);
   }
 
+  async readDecision(workspacePath: string, decisionId: string) {
+    const jsonPath = path.join(this.buildPaths(workspacePath).decisionsDir, `${decisionId}.json`);
+    return this.readJson<DecisionRecord>(jsonPath);
+  }
+
   async writeThread(workspacePath: string, thread: ThreadRecord) {
     const jsonPath = path.join(this.buildPaths(workspacePath).threadsDir, `${thread.id}.json`);
     await this.writeJson(jsonPath, thread);
@@ -596,6 +742,11 @@ export class ProjectStore {
   async writeAttachment(workspacePath: string, attachment: AttachmentRecord) {
     const jsonPath = path.join(this.buildPaths(workspacePath).attachmentRecordsDir, `${attachment.id}.json`);
     await this.writeJson(jsonPath, attachment);
+  }
+
+  async writeConversationEntry(workspacePath: string, entry: ConversationEntryRecord) {
+    const jsonPath = path.join(this.buildPaths(workspacePath).conversationEntriesDir, `${entry.id}.json`);
+    await this.writeJson(jsonPath, entry);
   }
 
   async writeTask(workspacePath: string, task: TaskRecord) {
@@ -616,6 +767,11 @@ export class ProjectStore {
   async writeAutomationSession(workspacePath: string, session: AutomationSessionRecord) {
     const jsonPath = path.join(this.buildPaths(workspacePath).automationSessionsDir, `${session.id}.json`);
     await this.writeJson(jsonPath, session);
+  }
+
+  async writeAutomationCycle(workspacePath: string, cycle: AutomationCycleRecord) {
+    const jsonPath = path.join(this.buildPaths(workspacePath).automationCyclesDir, `${cycle.id}.json`);
+    await this.writeJson(jsonPath, cycle);
   }
 
   async writeAutomationStep(workspacePath: string, step: AutomationStepRecord) {
@@ -666,14 +822,34 @@ export class ProjectStore {
     );
   }
 
+  async readAutomationCycle(workspacePath: string, cycleId: string) {
+    const jsonPath = path.join(this.buildPaths(workspacePath).automationCyclesDir, `${cycleId}.json`);
+    const cycle = await this.readJson<AutomationCycleRecord>(jsonPath);
+    return cycle ? normalizeAutomationCycleRecord(cycle) : null;
+  }
+
+  async listAutomationCycles(workspacePath: string) {
+    const paths = this.buildPaths(workspacePath);
+    return (await this.readRecordDirectory<AutomationCycleRecord>(paths.automationCyclesDir)).map(
+      normalizeAutomationCycleRecord
+    );
+  }
+
   async listAutomationSteps(workspacePath: string) {
     const paths = this.buildPaths(workspacePath);
-    return this.readRecordDirectory<AutomationStepRecord>(paths.automationStepsDir);
+    return (await this.readRecordDirectory<AutomationStepRecord>(paths.automationStepsDir)).map(
+      normalizeAutomationStepRecord
+    );
   }
 
   async listAutomationCheckpoints(workspacePath: string) {
     const paths = this.buildPaths(workspacePath);
     return this.readRecordDirectory<AutomationCheckpointRecord>(paths.automationCheckpointsDir);
+  }
+
+  async listConversationEntries(workspacePath: string) {
+    const paths = this.buildPaths(workspacePath);
+    return this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir);
   }
 
   async writeManuscriptSection(workspacePath: string, content: string) {
@@ -727,6 +903,21 @@ export class ProjectStore {
     const workspaceFiles =
       lane === "strategist" ? await this.listWorkspaceFiles(workspacePath) : [];
     const memory = snapshot.memory;
+    const recentConversation = (snapshot.conversationEntries ?? [])
+      .slice(-6)
+      .map((entry) => {
+        const speaker =
+          entry.role === "user" ? "User" : entry.role === "assistant" ? "Assistant" : "System";
+        return `- ${speaker}: ${truncateInline(entry.body, 220)}`;
+      })
+      .join("\n") || "- none";
+    const contextLanguage = resolveContextLanguage([
+      prompt,
+      recentConversation,
+      snapshot.latestConversationEntry?.body || "",
+      snapshot.latestAutomationSession?.displayObjective || "",
+      snapshot.latestAutomationSession?.objective || ""
+    ]);
     const latestStrategistSummary = snapshot.latestDecision?.summary?.trim() || "";
     const latestStrategistReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 420);
     const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
@@ -736,6 +927,7 @@ export class ProjectStore {
       : "none";
     const latestOperationalRun =
       snapshot.latestRun && snapshot.latestRun.id !== latestContextRun?.id ? snapshot.latestRun : null;
+    const latestCycle = snapshot.latestAutomationCycle ?? null;
     const attachmentLines = snapshot.activeThreadAttachments.length
       ? snapshot.activeThreadAttachments
           .slice(0, 8)
@@ -745,14 +937,7 @@ export class ProjectStore {
     const manuscriptExcerpt = snapshot.manuscript?.content
       ? truncateRuntimeExcerpt(snapshot.manuscript.content, 320)
       : "none";
-    const automationState = snapshot.latestAutomationSession
-      ? `Automation: ${snapshot.latestAutomationSession.status} — ${truncateInline(
-          snapshot.latestAutomationSession.currentStepSummary ||
-            snapshot.latestAutomationSession.displayObjective ||
-            snapshot.latestAutomationSession.objective,
-          220
-        )}`
-      : "Automation: none";
+    const automationState = formatAutomationContextState(snapshot.latestAutomationSession, contextLanguage);
     const latestStateLines =
       lane === "strategist"
         ? [
@@ -765,6 +950,7 @@ export class ProjectStore {
               ? `Latest operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 220)}`
               : null,
             automationState,
+            latestCycle ? `Latest automation cycle: ${truncateInline(latestCycle.summary || latestCycle.id, 220)}` : null,
             snapshot.latestTerminalSession?.cwd
               ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
               : "Latest terminal cwd: none",
@@ -785,6 +971,7 @@ export class ProjectStore {
               ? `Latest operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 220)}`
               : null,
             automationState,
+            latestCycle ? `Latest automation cycle: ${truncateInline(latestCycle.summary || latestCycle.id, 220)}` : null,
             snapshot.latestTerminalSession?.cwd
               ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
               : "Latest terminal cwd: none",
@@ -830,7 +1017,10 @@ export class ProjectStore {
             `Active Hypotheses: ${memory.activeHypotheses.join("; ") || "none"}`,
             `Strategist Style: ${truncateInline(memory.preferences.strategistStyle || "none", 160)}`,
             `Builder Style: ${truncateInline(memory.preferences.builderStyle || "none", 160)}`,
-            `Session Summary: ${truncateInline(memory.sessionSummary || "none", 220)}`
+            `Session Summary: ${truncateInline(memory.sessionSummary || "none", 220)}`,
+            `Narrative Memory: ${truncateInline(memory.memoryMap.narrative.summary || "none", 220)}`,
+            `Knowledge Memory: ${truncateInline(memory.memoryMap.knowledge.summary || "none", 220)}`,
+            `Execution Memory: ${truncateInline(memory.memoryMap.execution.summary || "none", 220)}`
           ].join("\n")
         : "No project memory yet.",
       "",
@@ -846,6 +1036,9 @@ export class ProjectStore {
               : "Latest Task Prompt: none"
           ].join("\n")
         : "No active thread yet.",
+      "",
+      "## Recent Conversation",
+      recentConversation,
       "",
       "## Latest State",
       latestStateLines.join("\n"),
@@ -896,6 +1089,13 @@ export class ProjectStore {
     const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
     const latestRunHandoff = deriveRunHandoff(latestContextRun);
     const latestRunChangedFiles = latestContextRun?.changedFiles ?? [];
+    const latestCycle = snapshot.latestAutomationCycle ?? null;
+    const contextLanguage = resolveContextLanguage([
+      prompt,
+      snapshot.latestConversationEntry?.body || "",
+      snapshot.latestAutomationSession?.displayObjective || "",
+      snapshot.latestAutomationSession?.objective || ""
+    ]);
     const manuscriptExcerpt = snapshot.manuscript?.content
       ? snapshot.manuscript.content.slice(0, lane === "paper" ? 1200 : 420)
       : "No manuscript content yet.";
@@ -911,9 +1111,10 @@ export class ProjectStore {
       latestRunChangedFiles.length
         ? `Changed files: ${latestRunChangedFiles.join(", ")}`
         : "Changed files: none",
-      snapshot.latestAutomationSession
-        ? `Automation status: ${snapshot.latestAutomationSession.status}`
-        : "Automation status: none",
+      formatAutomationWorkingSetLine(snapshot.latestAutomationSession, contextLanguage),
+      latestCycle
+        ? `Latest automation cycle: ${latestCycle.id} (${latestCycle.phase}) — ${latestCycle.summary || "none"}`
+        : "Latest automation cycle: none",
       snapshot.activeThreadAttachments.length
         ? `Attachments: ${snapshot.activeThreadAttachments.map((record) => record.relativePath).join(", ")}`
         : "Attachments: none",
@@ -949,7 +1150,10 @@ export class ProjectStore {
               `Builder Style: ${memory.preferences.builderStyle}`,
               `Open Questions: ${memory.openQuestions.join("; ") || "none"}`,
               `Active Hypotheses: ${memory.activeHypotheses.join("; ") || "none"}`,
-              `Session Summary: ${memory.sessionSummary || "none"}`
+              `Session Summary: ${memory.sessionSummary || "none"}`,
+              `Narrative Memory: ${memory.memoryMap.narrative.summary || "none"}`,
+              `Knowledge Memory: ${memory.memoryMap.knowledge.summary || "none"}`,
+              `Execution Memory: ${memory.memoryMap.execution.summary || "none"}`
             ].join("\n")
           : "No project memory yet."
       },
@@ -1064,9 +1268,11 @@ export class ProjectStore {
         latestTerminalSession: null,
         manuscript: null,
         automationSessions: [],
+        automationCycles: [],
         automationSteps: [],
         automationCheckpoints: [],
         latestAutomationSession: null,
+        latestAutomationCycle: null,
         latestAutomationCheckpoint: null,
         logs: []
       };
@@ -1079,6 +1285,9 @@ export class ProjectStore {
     const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
     const attachments = await this.listAttachments(workspacePath);
     const activeThreadAttachments = attachments.filter((record) => record.threadId === activeThreadId);
+    const conversationEntries = (await this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir))
+      .filter((record) => record.threadId === activeThreadId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     const decisions = (await this.readRecordDirectory<DecisionRecord>(paths.decisionsDir))
       .map((record) => normalizeDecisionRecord(record, project.defaultThreadId))
       .filter((record) => record.threadId === activeThreadId);
@@ -1099,9 +1308,14 @@ export class ProjectStore {
         .map(async (record) => this.readTerminalSessionSummary(record))
     );
     const automationSessions = (await this.readRecordDirectory<AutomationSessionRecord>(paths.automationSessionsDir))
+      .map(normalizeAutomationSessionRecord)
+      .filter((record) => record.threadId === activeThreadId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const automationCycles = (await this.readRecordDirectory<AutomationCycleRecord>(paths.automationCyclesDir))
       .filter((record) => record.threadId === activeThreadId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const automationSteps = (await this.readRecordDirectory<AutomationStepRecord>(paths.automationStepsDir))
+      .map(normalizeAutomationStepRecord)
       .filter((record) => record.threadId === activeThreadId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const automationCheckpoints = (
@@ -1136,6 +1350,8 @@ export class ProjectStore {
       threads,
       activeThreadId,
       activeThread,
+      conversationEntries,
+      latestConversationEntry: conversationEntries[conversationEntries.length - 1] ?? null,
       attachments,
       activeThreadAttachments,
       decisions,
@@ -1150,9 +1366,11 @@ export class ProjectStore {
       latestTerminalSession: terminalSessions[0] ?? null,
       manuscript,
       automationSessions,
+      automationCycles,
       automationSteps,
       automationCheckpoints,
       latestAutomationSession: automationSessions[0] ?? null,
+      latestAutomationCycle: automationCycles[0] ?? null,
       latestAutomationCheckpoint: automationCheckpoints[0] ?? null,
       logs
     };
@@ -1288,6 +1506,7 @@ export class ProjectStore {
   private async deleteThreadArtifacts(workspacePath: string, threadId: string) {
     const paths = this.buildPaths(workspacePath);
     const attachmentRecords = await this.readRecordDirectory<AttachmentRecord>(paths.attachmentRecordsDir);
+    const conversationRecords = await this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir);
     const decisionRecords = await this.readRecordDirectory<DecisionRecord>(paths.decisionsDir);
     const taskRecords = await this.readRecordDirectory<TaskRecord>(paths.tasksDir);
     const runRecords = await this.readRecordDirectory<RunRecord>(paths.runsDir);
@@ -1299,6 +1518,9 @@ export class ProjectStore {
         this.removeFileIfExists(path.join(paths.attachmentRecordsDir, `${record.id}.json`)),
         this.removeFileIfExists(path.join(workspacePath, record.relativePath))
       ]),
+      ...conversationRecords
+        .filter((record) => record.threadId === threadId)
+        .map((record) => this.removeFileIfExists(path.join(paths.conversationEntriesDir, `${record.id}.json`))),
       ...decisionRecords.filter((record) => record.threadId === threadId).flatMap((record) => [
         this.removeFileIfExists(path.join(paths.decisionsDir, `${record.id}.json`)),
         this.removeFileIfExists(record.stdoutPath),
@@ -1394,7 +1616,7 @@ export class ProjectStore {
       return [] as T[];
     }
 
-    const entries = (await readdir(directory))
+    const entries = (await readdir(directory).catch(() => [] as string[]))
       .filter((entry) => entry.endsWith(".json"))
       .sort(compareRecordFiles)
       .reverse();
@@ -1491,6 +1713,21 @@ export class ProjectStore {
     await writeFile(paths.memoryBriefFile, renderBrief(memory), "utf8");
     await writeFile(paths.memoryOpenQuestionsFile, renderOpenQuestions(memory), "utf8");
     await writeFile(paths.memorySessionSummaryFile, renderSessionSummary(memory), "utf8");
+    await writeFile(
+      paths.memoryDurableContextFile,
+      renderMemoryLayer("Narrative Memory", memory.memoryMap.narrative),
+      "utf8"
+    );
+    await writeFile(
+      paths.memoryWorkingContextFile,
+      renderMemoryLayer("Knowledge Memory", memory.memoryMap.knowledge),
+      "utf8"
+    );
+    await writeFile(
+      paths.memoryEvidenceContextFile,
+      renderMemoryLayer("Execution Memory", memory.memoryMap.execution),
+      "utf8"
+    );
     await this.writeJson(paths.memoryPreferencesFile, memory.preferences);
   }
 
@@ -1530,18 +1767,44 @@ export class ProjectStore {
 }
 
 function createDefaultProjectMemory(projectName: string): ProjectMemoryRecord {
+  const projectBrief = `${projectName} is the active Lithium workspace.`;
+  const researchGoal = DEFAULT_PROJECT_RESEARCH_GOAL;
+  const constraints = ["Local-first", "Single-user", "Prototype-first"];
+  const openQuestions = ["What is the next concrete experiment or validation step?"];
+  const activeHypotheses: string[] = [];
+  const sessionSummary = "No session summary yet.";
+  const layers = createDefaultProjectMemoryLayers();
+
+  layers.narrative = {
+    ...layers.narrative,
+    northStar: researchGoal,
+    activeStory: projectBrief,
+    constraints
+  };
+  layers.projectModel = {
+    ...layers.projectModel,
+    openQuestions,
+    activeHypotheses
+  };
+  layers.executionJournal = {
+    ...layers.executionJournal,
+    sessionSummary
+  };
+
   return {
-    projectBrief: `${projectName} is the active Lithium workspace.`,
-    researchGoal: DEFAULT_PROJECT_RESEARCH_GOAL,
-    constraints: ["Local-first", "Single-user", "Prototype-first"],
+    projectBrief,
+    researchGoal,
+    constraints,
     preferences: {
       strategistStyle: "Direct, critical, high-level.",
       builderStyle: "Concrete tasks with minimal narration.",
       manuscriptStyle: "Evidence-linked and concise."
     },
-    openQuestions: ["What is the next concrete experiment or validation step?"],
-    activeHypotheses: [],
-    sessionSummary: "No session summary yet.",
+    openQuestions,
+    activeHypotheses,
+    sessionSummary,
+    layers,
+    memoryMap: synthesizeProjectMemoryMapFromLayers(layers),
     updatedAt: new Date().toISOString()
   };
 }
@@ -1580,6 +1843,203 @@ function renderOpenQuestions(memory: ProjectMemoryRecord) {
 
 function renderSessionSummary(memory: ProjectMemoryRecord) {
   return ["# Session Summary", "", memory.sessionSummary || "No session summary yet.", ""].join("\n");
+}
+
+function renderMemoryLayer(title: string, layer: ProjectMemoryLayer) {
+  return [
+    `# ${title}`,
+    "",
+    layer.summary || "No summary yet.",
+    "",
+    "## Key Points",
+    "",
+    ...(layer.bullets.length ? layer.bullets.map((item) => `- ${item}`) : ["- none"]),
+    ""
+  ].join("\n");
+}
+
+function createDefaultProjectMemoryMap(): ProjectMemoryRecord["memoryMap"] {
+  return {
+    narrative: {
+      summary: "No durable context yet.",
+      bullets: []
+    },
+    knowledge: {
+      summary: "No knowledge summary yet.",
+      bullets: []
+    },
+    execution: {
+      summary: "No execution context yet.",
+      bullets: []
+    }
+  } satisfies ProjectMemoryRecord["memoryMap"];
+}
+
+function createDefaultProjectMemoryLayers(): ProjectMemoryRecord["layers"] {
+  return {
+    narrative: {
+      northStar: DEFAULT_PROJECT_RESEARCH_GOAL,
+      activeStory: "No active story yet.",
+      collaborationContract: [],
+      currentFocus: "none",
+      recentDirections: [],
+      constraints: []
+    },
+    projectModel: {
+      openQuestions: ["What is the next concrete experiment or validation step?"],
+      activeHypotheses: [],
+      stableFacts: [],
+      keyDecisions: [],
+      metrics: [],
+      learnedPatterns: []
+    },
+    executionJournal: {
+      sessionSummary: "No session summary yet.",
+      activeAutomationSummary: "No automation running.",
+      recentArtifacts: [],
+      recentCommands: [],
+      recentLogs: [],
+      recoveryNotes: []
+    }
+  } satisfies ProjectMemoryRecord["layers"];
+}
+
+function synthesizeProjectMemoryMapFromLayers(layers: ProjectMemoryRecord["layers"]) {
+  return {
+    narrative: {
+      summary: [layers.narrative.activeStory, layers.narrative.northStar].filter(Boolean).join(" | "),
+      bullets: compactList([
+        ...layers.narrative.constraints,
+        ...layers.narrative.recentDirections,
+        ...layers.narrative.collaborationContract
+      ]).slice(0, 8)
+    },
+    knowledge: {
+      summary: compactList([
+        layers.projectModel.keyDecisions[0] || "",
+        layers.projectModel.metrics[0] || "",
+        layers.projectModel.learnedPatterns[0] || ""
+      ]).join(" | "),
+      bullets: compactList([
+        ...layers.projectModel.openQuestions,
+        ...layers.projectModel.activeHypotheses,
+        ...layers.projectModel.stableFacts
+      ]).slice(0, 8)
+    },
+    execution: {
+      summary: compactList([
+        layers.executionJournal.activeAutomationSummary,
+        layers.executionJournal.sessionSummary
+      ]).join(" | "),
+      bullets: compactList([
+        ...layers.executionJournal.recentArtifacts,
+        ...layers.executionJournal.recentCommands,
+        ...layers.executionJournal.recoveryNotes
+      ]).slice(0, 8)
+    }
+  } satisfies ProjectMemoryRecord["memoryMap"];
+}
+
+function mergeProjectMemoryLayer(
+  existing: ProjectMemoryLayer,
+  patch: Partial<ProjectMemoryLayer> | undefined
+): ProjectMemoryLayer {
+  return {
+    summary: patch?.summary ?? existing.summary,
+    bullets: patch?.bullets ?? existing.bullets
+  };
+}
+
+function mergeProjectMemoryMap(
+  existing: ProjectMemoryRecord["memoryMap"] | undefined,
+  patch: Partial<ProjectMemoryRecord["memoryMap"]> | undefined,
+  layers?: ProjectMemoryRecord["layers"]
+) {
+  const synthesized = synthesizeProjectMemoryMapFromLayers(layers ?? createDefaultProjectMemoryLayers());
+  const base = existing ?? synthesized;
+
+  return {
+    narrative: mergeProjectMemoryLayer(base.narrative ?? synthesized.narrative, patch?.narrative),
+    knowledge: mergeProjectMemoryLayer(base.knowledge ?? synthesized.knowledge, patch?.knowledge),
+    execution: mergeProjectMemoryLayer(base.execution ?? synthesized.execution, patch?.execution)
+  } satisfies ProjectMemoryRecord["memoryMap"];
+}
+
+function mergeProjectMemoryLayers(
+  existing: ProjectMemoryRecord["layers"] | undefined,
+  patch: Partial<ProjectMemoryRecord["layers"]> | undefined,
+  aliases: {
+    projectBrief?: string;
+    researchGoal?: string;
+    constraints?: string[];
+    openQuestions?: string[];
+    activeHypotheses?: string[];
+    sessionSummary?: string;
+  } = {}
+) {
+  const base = existing ?? createDefaultProjectMemoryLayers();
+
+  return {
+    narrative: {
+      ...base.narrative,
+      ...patch?.narrative,
+      northStar: aliases.researchGoal ?? patch?.narrative?.northStar ?? base.narrative.northStar,
+      activeStory: aliases.projectBrief ?? patch?.narrative?.activeStory ?? base.narrative.activeStory,
+      constraints: aliases.constraints ?? patch?.narrative?.constraints ?? base.narrative.constraints
+    },
+    projectModel: {
+      ...base.projectModel,
+      ...patch?.projectModel,
+      openQuestions:
+        aliases.openQuestions ?? patch?.projectModel?.openQuestions ?? base.projectModel.openQuestions,
+      activeHypotheses:
+        aliases.activeHypotheses ??
+        patch?.projectModel?.activeHypotheses ??
+        base.projectModel.activeHypotheses
+    },
+    executionJournal: {
+      ...base.executionJournal,
+      ...patch?.executionJournal,
+      sessionSummary:
+        aliases.sessionSummary ??
+        patch?.executionJournal?.sessionSummary ??
+        base.executionJournal.sessionSummary
+    }
+  } satisfies ProjectMemoryRecord["layers"];
+}
+
+function normalizeProjectMemoryRecord(
+  record: ProjectMemoryRecord,
+  projectName: string
+): ProjectMemoryRecord {
+  const defaults = createDefaultProjectMemory(projectName);
+  const layers = mergeProjectMemoryLayers(record.layers, undefined, {
+    projectBrief: record.projectBrief,
+    researchGoal: record.researchGoal,
+    constraints: record.constraints,
+    openQuestions: record.openQuestions,
+    activeHypotheses: record.activeHypotheses,
+    sessionSummary: record.sessionSummary
+  });
+
+  return {
+    ...defaults,
+    ...record,
+    projectBrief: record.projectBrief || layers.narrative.activeStory,
+    researchGoal: record.researchGoal || layers.narrative.northStar,
+    constraints: record.constraints?.length ? record.constraints : layers.narrative.constraints,
+    openQuestions: record.openQuestions?.length ? record.openQuestions : layers.projectModel.openQuestions,
+    activeHypotheses:
+      record.activeHypotheses?.length ? record.activeHypotheses : layers.projectModel.activeHypotheses,
+    sessionSummary: record.sessionSummary || layers.executionJournal.sessionSummary,
+    layers,
+    memoryMap: mergeProjectMemoryMap(record.memoryMap, undefined, layers),
+    preferences: {
+      ...defaults.preferences,
+      ...record.preferences
+    },
+    updatedAt: record.updatedAt || defaults.updatedAt
+  };
 }
 
 function resolveActiveThreadId(project: ProjectRecord, threads: ThreadRecord[]) {
@@ -1632,7 +2092,34 @@ function normalizeRunRecord(record: RunRecord, defaultThreadId: string): RunReco
 function normalizeAutomationSessionRecord(record: AutomationSessionRecord): AutomationSessionRecord {
   return {
     ...record,
-    status: record.status === "running" ? "running" : "idle"
+    status: record.status === "running" ? "running" : "idle",
+    activeLaneStepIds: Array.isArray(record.activeLaneStepIds) ? record.activeLaneStepIds.filter(Boolean) : []
+  };
+}
+
+function normalizeAutomationCycleRecord(record: AutomationCycleRecord): AutomationCycleRecord {
+  return {
+    ...record,
+    title: record.title || "Automation cycle",
+    status: record.status || "running",
+    activeLaneStepIds: Array.isArray(record.activeLaneStepIds) ? record.activeLaneStepIds.filter(Boolean) : [],
+    completedLaneStepIds: Array.isArray(record.completedLaneStepIds)
+      ? record.completedLaneStepIds.filter(Boolean)
+      : [],
+    laneStates: Array.isArray(record.laneStates) ? record.laneStates : [],
+    startedAt: record.startedAt || record.createdAt
+  };
+}
+
+function normalizeAutomationStepRecord(record: AutomationStepRecord): AutomationStepRecord {
+  return {
+    ...record,
+    workerMode:
+      record.workerMode ?? (record.lane === "controller" ? "planner" : record.lane === "builder" ? "async" : "sync"),
+    startedSideEffects: Array.isArray(record.startedSideEffects) ? record.startedSideEffects.filter(Boolean) : [],
+    completedSideEffects: Array.isArray(record.completedSideEffects)
+      ? record.completedSideEffects.filter(Boolean)
+      : []
   };
 }
 
@@ -1924,6 +2411,141 @@ function truncateInline(value: string, maxLength: number) {
   }
 
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function compactList(values: string[]) {
+  return values.map((value) => value.trim()).filter(Boolean);
+}
+
+function logsToLines(lines: string[] | undefined, maxCount: number) {
+  return (lines ?? []).slice(0, maxCount).filter(Boolean);
+}
+
+function resolveContextLanguage(samples: string[]) {
+  return samples.some(containsHangul) ? "ko" : "en";
+}
+
+function containsHangul(value: string) {
+  return /[\u3131-\u318E\uAC00-\uD7A3]/.test(value);
+}
+
+function formatAutomationContextState(
+  session: ProjectSnapshot["latestAutomationSession"],
+  language: "ko" | "en"
+) {
+  if (!session) {
+    return language === "ko" ? "자동 연구: 없음" : "Automation: none";
+  }
+
+  const summary = humanizeAutomationContextSummary(
+    session.currentStepSummary || session.displayObjective || session.objective,
+    language
+  );
+  const status = formatAutomationStatusToken(session.status, language);
+
+  return language === "ko"
+    ? `자동 연구: ${status} — ${truncateInline(summary, 220)}`
+    : `Automation: ${status} — ${truncateInline(summary, 220)}`;
+}
+
+function formatAutomationWorkingSetLine(
+  session: ProjectSnapshot["latestAutomationSession"],
+  language: "ko" | "en"
+) {
+  if (!session) {
+    return language === "ko" ? "자동 연구 상태: 없음" : "Automation status: none";
+  }
+
+  const status = formatAutomationStatusToken(session.status, language);
+  return language === "ko" ? `자동 연구 상태: ${status}` : `Automation status: ${status}`;
+}
+
+function formatAutomationSessionSummary(
+  session: ProjectSnapshot["latestAutomationSession"],
+  language: "ko" | "en"
+) {
+  if (!session) {
+    return null;
+  }
+
+  const status = formatAutomationStatusToken(session.status, language);
+  const summary = humanizeAutomationContextSummary(
+    session.currentStepSummary || session.displayObjective || session.objective,
+    language
+  );
+
+  return language === "ko"
+    ? `최신 자동 연구 상태: ${status} — ${truncateInline(summary, 220)}`
+    : `Latest automation status: ${status} — ${truncateInline(summary, 220)}`;
+}
+
+function formatAutomationCycleSummary(
+  cycle: ProjectSnapshot["latestAutomationCycle"],
+  language: "ko" | "en"
+) {
+  if (!cycle) {
+    return null;
+  }
+
+  const summary = truncateInline(cycle.summary || "none", 220);
+
+  return language === "ko"
+    ? `최신 자동 연구 cycle: ${cycle.id} (${cycle.phase}) — ${summary}`
+    : `Latest automation cycle: ${cycle.id} (${cycle.phase}) — ${summary}`;
+}
+
+function formatAutomationStatusToken(status: string, language: "ko" | "en") {
+  if (language !== "ko") {
+    return status;
+  }
+
+  if (status === "running") {
+    return "진행 중";
+  }
+
+  if (status === "idle") {
+    return "대기";
+  }
+
+  if (status === "completed") {
+    return "완료";
+  }
+
+  return status;
+}
+
+function humanizeAutomationContextSummary(value: string, language: "ko" | "en") {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return language === "ko" ? "아직 요약이 없습니다." : "No summary yet.";
+  }
+
+  if (language !== "ko") {
+    return trimmed;
+  }
+
+  if (/plan the next bounded research step/i.test(trimmed)) {
+    return "다음 연구 단계를 작게 쪼개서 정리하고 있습니다.";
+  }
+
+  if (/automation started\. planning the next bounded step/i.test(trimmed)) {
+    return "자동 연구를 시작했고 바로 다음 단계를 정리하고 있습니다.";
+  }
+
+  if (/continuing the current step\. the latest instruction will be applied next/i.test(trimmed)) {
+    return "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다.";
+  }
+
+  if (/automation resumed/i.test(trimmed)) {
+    return "이전 상태에서 자동 연구를 다시 이어가고 있습니다.";
+  }
+
+  if (/automation was interrupted when lithium restarted/i.test(trimmed)) {
+    return "앱 재시작 이후 자동 연구를 복구할 준비를 하고 있습니다.";
+  }
+
+  return trimmed;
 }
 
 function classifyAttachmentKind(filePath: string): AttachmentKind {

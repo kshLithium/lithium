@@ -1,6 +1,8 @@
 import path, { basename } from "node:path";
+import { execFile } from "node:child_process";
 import { access, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
+import { createHash } from "node:crypto";
 import {
   coerceStrategistThinkingTime,
   isBuilderModel,
@@ -12,12 +14,18 @@ import type {
   AttachmentImportRequest,
   AutomationCheckpointApprovalRequest,
   AutomationCheckpointRecord,
+  AutomationCycleLaneState,
+  AutomationCyclePhase,
+  AutomationCycleRecord,
+  AutomationCycleStatus,
   AutomationInterruptRequest,
+  AutomationMode,
   AutomationSessionControlRequest,
   AutomationSessionCreateRequest,
   AutomationSessionRecord,
   AutomationStatus,
   AutomationStepKind,
+  AutomationWorkerMode,
   AutomationStepRecord,
   ChatRequest,
   ChatProgressInspection,
@@ -29,6 +37,8 @@ import type {
   BuilderRunInspection,
   BuilderReasoningEffort,
   ContextPackLane,
+  CommandSpec,
+  ConversationEntryRecord,
   DecisionRecord,
   LithiumHandoff,
   PaperSourceTarget,
@@ -78,6 +88,8 @@ import { OracleRunner, normalizeOracleSessionId, resolveOracleLaunchOptions } fr
 import { CodexRunner } from "./codex-runner";
 import { parseCodexProgressLog } from "./codex-progress";
 import { RouterRunner } from "./router-runner";
+import { OrchestratorRunner, type OrchestratorDelegationLane } from "./orchestrator-runner";
+import { type OrchestratorDelegationDirective } from "./orchestrator-directives";
 import { ManuscriptEngine } from "./manuscript-engine";
 import { ChatgptAuthRunner } from "./chatgpt-auth-runner";
 import {
@@ -129,8 +141,10 @@ import { isProcessAlive, readProcessCommand, terminateProcessTree } from "./proc
 
 type AppServiceDependencies = {
   store?: ProjectStore;
+  orchestratorRunner?: Pick<OrchestratorRunner, "runTurn"> | null;
   routerRunner?: Pick<RouterRunner, "route">;
-  oracleRunner?: Pick<OracleRunner, "consult"> & Partial<Pick<OracleRunner, "terminateSession">>;
+  oracleRunner?: Pick<OracleRunner, "consult"> &
+    Partial<Pick<OracleRunner, "startConsult" | "terminateSession">>;
   chatgptAuthRunner?: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   codexRunner?: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
   manuscriptEngine?: Pick<ManuscriptEngine, "updateResults">;
@@ -142,7 +156,9 @@ type AppServiceDependencies = {
 };
 
 type ActiveChatProgress = {
-  lane: "router" | "strategist" | "builder";
+  operationId: string;
+  lane: "orchestrator" | "router" | "strategist" | "builder";
+  threadId: string;
   progressSummary: string;
   progressDetails: string[];
   activeCommand: string | null;
@@ -161,15 +177,48 @@ type AutomationControllerState = {
   activeStrategistSlug: string | null;
 };
 
+type AutomationWorkerDelegation = Extract<
+  OrchestratorDelegationDirective,
+  { lane: "builder" | "strategist" }
+>;
+
+type AutomationDelegatedBuilderResult = {
+  lane: "builder";
+  delegation: Extract<AutomationWorkerDelegation, { lane: "builder" }>;
+  step: AutomationStepRecord;
+  latestRun: RunRecord | null;
+  runStatus: RecordStatus;
+  runSummary: string;
+  runChangedFiles: string[];
+  runEvidence: string[];
+  runRisks: string[];
+  runActions: string[];
+};
+
+type AutomationDelegatedStrategistResult = {
+  lane: "strategist";
+  delegation: Extract<AutomationWorkerDelegation, { lane: "strategist" }>;
+  step: AutomationStepRecord;
+  decision: DecisionRecord | null;
+  pending?: boolean;
+};
+
+type AutomationDelegatedWorkerResult =
+  | AutomationDelegatedBuilderResult
+  | AutomationDelegatedStrategistResult;
+
 export class AppService {
   private static terminalEventUnsubscribe: (() => void) | null = null;
   private selectedWorkspacePath: string;
   private readonly terminatingRunIds = new Set<string>();
   private readonly activeChatProgressByWorkspace = new Map<string, ActiveChatProgress>();
   private readonly automationControllers = new Map<string, AutomationControllerState>();
+  private readonly orchestratorTurnLocks = new Map<string, Promise<void>>();
   private readonly store: ProjectStore;
+  private readonly orchestratorRunner: Pick<OrchestratorRunner, "runTurn"> | null;
   private readonly routerRunner: Pick<RouterRunner, "route">;
-  private readonly oracleRunner: Pick<OracleRunner, "consult"> & Partial<Pick<OracleRunner, "terminateSession">>;
+  private readonly oracleRunner: Pick<OracleRunner, "consult"> &
+    Partial<Pick<OracleRunner, "startConsult" | "terminateSession">>;
   private readonly chatgptAuthRunner: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   private readonly codexRunner: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
   private readonly manuscriptEngine: Pick<ManuscriptEngine, "updateResults">;
@@ -181,6 +230,7 @@ export class AppService {
   constructor(workspacePath: string, dependencies: AppServiceDependencies = {}) {
     this.selectedWorkspacePath = workspacePath.trim();
     this.store = dependencies.store ?? new ProjectStore();
+    this.orchestratorRunner = dependencies.orchestratorRunner ?? null;
     this.routerRunner = dependencies.routerRunner ?? new RouterRunner();
     this.oracleRunner = dependencies.oracleRunner ?? new OracleRunner();
     this.chatgptAuthRunner = dependencies.chatgptAuthRunner ?? new ChatgptAuthRunner();
@@ -421,6 +471,8 @@ export class AppService {
       threadId: activeThread.id,
       objective,
       displayObjective,
+      plannerSessionId: undefined,
+      plannerUpdatedAt: undefined,
       mode: request.mode ?? "continuous",
       status: "idle",
       allowedActions: [
@@ -441,6 +493,9 @@ export class AppService {
         usedSteps: 0,
         usedRetries: 0
       },
+      latestCycleId: undefined,
+      activeCycleId: undefined,
+      activeLaneStepIds: [],
       currentStepSummary: "Automation is ready to begin.",
       lastUserInstruction: request.objective.trim() || undefined,
       queuedUserInstruction: undefined,
@@ -563,10 +618,17 @@ export class AppService {
         approvedAt: stoppedAt,
         activityMessage: `${session.id} automation stop recorded`
       });
+      await this.finalizeAutomationCycle(workspacePath, session, session.activeCycleId, {
+        status: "failed",
+        phase: "reporting",
+        summary: visibleStopInstruction || instruction || "Stopped by the user."
+      });
 
       await this.store.writeAutomationSession(workspacePath, {
         ...session,
         status: "idle",
+        activeCycleId: undefined,
+        activeLaneStepIds: [],
         latestCheckpointId: stopCheckpoint.id,
         currentStepSummary: "Automation stopped by the user.",
         stopReason: visibleStopInstruction || instruction || "Stopped by the user.",
@@ -693,11 +755,25 @@ export class AppService {
       controller.redirectInstruction = response;
     }
 
+    const resumedMode = resolveAutomationConversationMode(
+      session.mode,
+      [response, session.displayObjective ?? ""].filter(Boolean).join("\n")
+    );
     await this.writeRunningAutomationSession(workspacePath, session, {
-      latestCheckpointId: checkpoint.id,
+      mode: resumedMode,
+      latestCheckpointId: undefined,
       currentStepSummary: "Checkpoint approved. Continuing automation.",
       lastUserInstruction: response || session.lastUserInstruction,
       queuedUserInstruction: response || session.queuedUserInstruction
+    });
+    await this.appendAutomationStatusEntry(workspacePath, {
+      session,
+      body: buildAutomationResumeConversationMessage({
+        session,
+        checkpoint,
+        response,
+        mode: resumedMode
+      })
     });
     await this.store.appendPromptLog(workspacePath, {
       kind: "automation.checkpoint.approved",
@@ -817,6 +893,567 @@ export class AppService {
       ),
       displayPrompt
     });
+  }
+
+  private async handleConversationOrchestratorMessage(
+    input: {
+      workspacePath: string;
+      snapshot: ProjectSnapshot;
+      activeThread: ThreadRecord;
+      prompt: string;
+      normalizedPrompt: string;
+    },
+    options: {
+      strategistSessionReady?: boolean;
+    } = {}
+  ) {
+    const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
+    const requestPaths = this.buildConversationOrchestratorRequestPaths(input.workspacePath, input.activeThread.id);
+
+    await this.appendConversationEntry(input.workspacePath, {
+      threadId: input.activeThread.id,
+      role: "user",
+      source: "user",
+      body: input.prompt
+    });
+    await this.store.appendPromptLog(input.workspacePath, {
+      kind: "chat.user",
+      lane: "chat",
+      threadId: input.activeThread.id,
+      prompt: input.prompt,
+      normalizedPrompt: input.normalizedPrompt,
+      orchestrated: true
+    });
+
+    this.setChatProgress(input.workspacePath, {
+      lane: "orchestrator",
+      threadId: input.activeThread.id,
+      progressSummary: "Thinking…",
+      progressDetails: ["Reviewing the latest thread state and choosing the next move."],
+      activeCommand: null,
+      stdoutPath: path.join(path.dirname(requestPaths.builder), "orchestrator.stdout.log"),
+      stderrPath: path.join(path.dirname(requestPaths.builder), "orchestrator.stderr.log")
+    });
+    try {
+      const initialContext = await this.store.buildRuntimeContext(input.workspacePath, input.normalizedPrompt, {
+        lane: "builder"
+      });
+      const firstTurn = await this.runSerializedOrchestratorTurn(
+        input.workspacePath,
+        `chat:${input.activeThread.id}`,
+        async () =>
+          await this.orchestratorRunner!.runTurn({
+            workspacePath: input.workspacePath,
+            sessionId: input.activeThread.conversationOrchestratorSessionId,
+            prompt: input.prompt,
+            runtimeContext: initialContext.content,
+            stdoutPath: path.join(path.dirname(requestPaths.builder), "orchestrator.stdout.log"),
+            stderrPath: path.join(path.dirname(requestPaths.builder), "orchestrator.stderr.log"),
+            outputPath: path.join(path.dirname(requestPaths.builder), "orchestrator.reply.md"),
+            requestPaths,
+            hostKey: `chat:${input.activeThread.id}`,
+            model: appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel,
+            reasoningEffort: "xhigh"
+          })
+      );
+      await this.persistConversationOrchestratorSessionId(
+        input.workspacePath,
+        input.activeThread,
+        firstTurn.sessionId
+      );
+
+      const directReply = sanitizeConversationBody(firstTurn.finalMessage);
+      const firstDelegations = resolveOrchestratorDelegations(firstTurn, input.normalizedPrompt);
+      const automationDelegation = firstDelegations.find(
+        (delegation): delegation is Extract<OrchestratorDelegationDirective, { lane: "automation" }> =>
+          delegation.lane === "automation"
+      );
+      const workerDelegations = firstDelegations.filter(
+        (delegation): delegation is Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }> =>
+          delegation.lane === "builder" || delegation.lane === "strategist"
+      );
+
+      if (automationDelegation) {
+        const automationMode = resolveAutomationConversationMode(
+          automationDelegation.mode,
+          input.prompt
+        );
+        const createdSnapshot = await this.createAutomationSession({
+          workspacePath: input.workspacePath,
+          threadId: input.activeThread.id,
+          objective: automationDelegation.prompt || input.prompt,
+          displayObjective: input.prompt,
+          mode: automationMode,
+          maxSteps: automationDelegation.maxSteps ?? 64,
+          maxRuntimeMinutes: automationDelegation.maxRuntimeMinutes ?? 24 * 60,
+          maxRetries: automationDelegation.maxRetries ?? 8,
+          paperWriteEnabled: automationDelegation.paperWriteEnabled ?? false
+        });
+        const sessionId = createdSnapshot.latestAutomationSession?.id;
+
+        if (!sessionId) {
+          throw new Error("Automation session could not be created.");
+        }
+
+        await this.startAutomationSession({
+          workspacePath: input.workspacePath,
+          sessionId
+        });
+        const reply =
+          directReply ||
+          localizeAutomationStartReply(input.prompt);
+
+        await this.appendConversationEntry(input.workspacePath, {
+          threadId: input.activeThread.id,
+          role: "assistant",
+          source: "automation",
+          body: reply,
+          automationSessionId: sessionId
+        });
+        await this.syncThreadFromArtifacts(input.workspacePath, input.activeThread, {
+          prompt: input.prompt,
+          summary: reply
+        });
+        await this.store.appendActivity(input.workspacePath, `${sessionId} automation started from orchestrator chat`);
+        await this.store.updateSessionSummary(input.workspacePath);
+        return await this.store.getSnapshot(input.workspacePath);
+      }
+
+      if (!workerDelegations.length) {
+        const reply = directReply || "I reviewed the latest workspace state, but I do not have a clearer answer yet.";
+
+        await this.appendConversationEntry(input.workspacePath, {
+          threadId: input.activeThread.id,
+          role: "assistant",
+          source: "orchestrator",
+          body: reply
+        });
+        await this.syncThreadFromArtifacts(input.workspacePath, input.activeThread, {
+          prompt: input.prompt,
+          summary: reply
+        });
+        await this.store.appendActivity(input.workspacePath, "orchestrator answered directly in chat");
+        await this.store.updateSessionSummary(input.workspacePath);
+        return await this.store.getSnapshot(input.workspacePath);
+      }
+
+      this.clearChatProgress(input.workspacePath, input.activeThread.id, "orchestrator");
+
+      const workerTurn = await this.runOrchestratorWorkerTurns(
+        input,
+        workerDelegations,
+        options
+      );
+      if (
+        workerTurn.startedLiveRun &&
+        workerTurn.results.length === 1 &&
+        workerTurn.results[0].lane === "builder"
+      ) {
+        const liveDelegation = workerTurn.results[0].delegation;
+        const reply =
+          directReply ||
+          (liveDelegation
+            ? summarizeLiveWorkerStartForConversation(liveDelegation, workerTurn.snapshot)
+            : summarizeWorkerSnapshotsForConversation(workerDelegations, workerTurn.snapshot));
+        await this.appendConversationEntry(input.workspacePath, {
+          threadId: input.activeThread.id,
+          role: "assistant",
+          source: "orchestrator",
+          body: reply,
+          runId: workerTurn.snapshot.latestRun?.id
+        });
+        await this.syncThreadFromArtifacts(input.workspacePath, input.activeThread, {
+          prompt: input.prompt,
+          summary: reply
+        });
+        await this.store.appendActivity(input.workspacePath, "orchestrator started a live builder run from chat");
+        await this.store.updateSessionSummary(input.workspacePath);
+        return await this.store.getSnapshot(input.workspacePath);
+      }
+      const refreshedThread =
+        workerTurn.snapshot.threads.find((thread) => thread.id === input.activeThread.id) ?? input.activeThread;
+      const followupPrompt =
+        workerDelegations.length === 1
+          ? buildOrchestratorWorkerFollowupPrompt({
+              originalPrompt: input.prompt,
+              lane: workerDelegations[0].lane,
+              workerPrompt: workerDelegations[0].prompt || input.normalizedPrompt,
+              snapshot: workerTurn.snapshot
+            })
+          : buildOrchestratorParallelFollowupPrompt({
+              originalPrompt: input.prompt,
+              delegations: workerDelegations,
+              snapshot: workerTurn.snapshot
+            });
+      const followupContext = await this.store.buildRuntimeContext(
+        input.workspacePath,
+        followupPrompt,
+        {
+          lane: "builder"
+        }
+      );
+      this.setChatProgress(input.workspacePath, {
+        lane: "orchestrator",
+        threadId: input.activeThread.id,
+        progressSummary: "Wrapping up…",
+        progressDetails: ["Turning the worker result into a clean reply for this chat."],
+        activeCommand: null,
+        stdoutPath: path.join(path.dirname(requestPaths.builder), "orchestrator.followup.stdout.log"),
+        stderrPath: path.join(path.dirname(requestPaths.builder), "orchestrator.followup.stderr.log")
+      });
+      const secondTurn = await this.runSerializedOrchestratorTurn(
+        input.workspacePath,
+        `chat:${refreshedThread.id}`,
+        async () =>
+          await this.orchestratorRunner!.runTurn({
+            workspacePath: input.workspacePath,
+            sessionId:
+              refreshedThread.conversationOrchestratorSessionId ||
+              firstTurn.sessionId ||
+              undefined,
+            prompt: followupPrompt,
+            runtimeContext: followupContext.content,
+            stdoutPath: path.join(path.dirname(requestPaths.builder), "orchestrator.followup.stdout.log"),
+            stderrPath: path.join(path.dirname(requestPaths.builder), "orchestrator.followup.stderr.log"),
+            outputPath: path.join(path.dirname(requestPaths.builder), "orchestrator.followup.reply.md"),
+            requestPaths,
+            hostKey: `chat:${refreshedThread.id}`,
+            model: appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel,
+            reasoningEffort: "xhigh"
+          })
+      );
+      await this.persistConversationOrchestratorSessionId(
+        input.workspacePath,
+        refreshedThread,
+        secondTurn.sessionId
+      );
+
+      const reply =
+        sanitizeConversationBody(secondTurn.finalMessage) ||
+        summarizeWorkerSnapshotsForConversation(workerDelegations, workerTurn.snapshot);
+      const relatedDecisionId = workerDelegations.some((delegation) => delegation.lane === "strategist")
+        ? workerTurn.snapshot.latestDecision?.id
+        : undefined;
+      const relatedRunId = workerDelegations.some((delegation) => delegation.lane === "builder")
+        ? workerTurn.snapshot.latestRun?.id
+        : undefined;
+
+      await this.appendConversationEntry(input.workspacePath, {
+        threadId: input.activeThread.id,
+        role: "assistant",
+        source: "orchestrator",
+        body: reply,
+        decisionId: relatedDecisionId,
+        runId: relatedRunId
+      });
+      await this.syncThreadFromArtifacts(input.workspacePath, refreshedThread, {
+        prompt: input.prompt,
+        summary: reply
+      });
+      await this.store.appendActivity(
+        input.workspacePath,
+        `orchestrator completed a ${describeDelegationSetForActivity(workerDelegations)} follow-up in chat`
+      );
+      await this.store.updateSessionSummary(input.workspacePath);
+      return await this.store.getSnapshot(input.workspacePath);
+    } finally {
+      this.clearChatProgress(input.workspacePath, input.activeThread.id, "orchestrator");
+    }
+  }
+
+  private buildConversationOrchestratorRequestPaths(workspacePath: string, threadId: string) {
+    const paths = this.store.buildPaths(workspacePath);
+    const baseDir = path.join(paths.root, "orchestrator", "chat", threadId);
+
+    return {
+      builder: path.join(baseDir, "builder.md"),
+      strategist: path.join(baseDir, "strategist.md"),
+      automation: path.join(baseDir, "automation.md")
+    };
+  }
+
+  private buildAutomationPlannerRequestPaths(workspacePath: string, sessionId: string) {
+    const paths = this.store.buildPaths(workspacePath);
+    const baseDir = path.join(paths.root, "automation", "planner", sessionId);
+
+    return {
+      builder: path.join(baseDir, "builder.md"),
+      strategist: path.join(baseDir, "strategist.md"),
+      automation: path.join(baseDir, "automation.md")
+    };
+  }
+
+  private async appendConversationEntry(
+    workspacePath: string,
+    input: Omit<ConversationEntryRecord, "id" | "createdAt">
+  ) {
+    const allocation = await this.store.allocateConversationEntry(workspacePath);
+    const entry: ConversationEntryRecord = {
+      id: allocation.id,
+      createdAt: new Date().toISOString(),
+      ...input
+    };
+
+    await this.store.writeConversationEntry(workspacePath, entry);
+    return entry;
+  }
+
+  private async appendAutomationStatusEntry(
+    workspacePath: string,
+    input: {
+      session: AutomationSessionRecord;
+      body: string;
+      checkpoint?: AutomationCheckpointRecord;
+      cycleId?: string;
+      stepId?: string;
+    }
+  ) {
+    const body = input.body.trim();
+
+    if (!body) {
+      return null;
+    }
+
+    return await this.appendConversationEntry(workspacePath, {
+      threadId: input.session.threadId,
+      role: "system",
+      source: input.checkpoint ? "checkpoint" : "system",
+      body,
+      automationSessionId: input.session.id,
+      automationCycleId: input.cycleId,
+      automationStepId: input.stepId,
+      automationCheckpointId: input.checkpoint?.id
+    });
+  }
+
+  private async appendAutomationAssistantEntry(
+    workspacePath: string,
+    input: {
+      session: AutomationSessionRecord;
+      body: string;
+      decisionId?: string;
+      runId?: string;
+      cycleId?: string;
+      stepId?: string;
+    }
+  ) {
+    const body = sanitizeConversationBody(input.body);
+
+    if (!body) {
+      return null;
+    }
+
+    return await this.appendConversationEntry(workspacePath, {
+      threadId: input.session.threadId,
+      role: "assistant",
+      source: "automation",
+      body,
+      decisionId: input.decisionId,
+      runId: input.runId,
+      automationSessionId: input.session.id,
+      automationCycleId: input.cycleId,
+      automationStepId: input.stepId
+    });
+  }
+
+  private async persistConversationOrchestratorSessionId(
+    workspacePath: string,
+    thread: ThreadRecord,
+    sessionId: string | null
+  ) {
+    const normalizedSessionId = sessionId?.trim() || "";
+
+    if (!normalizedSessionId || thread.conversationOrchestratorSessionId === normalizedSessionId) {
+      return;
+    }
+
+    await this.store.writeThread(workspacePath, {
+      ...thread,
+      conversationOrchestratorSessionId: normalizedSessionId,
+      conversationOrchestratorUpdatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  private async persistAutomationPlannerSessionId(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    plannerSessionId: string | null
+  ) {
+    const normalizedSessionId = plannerSessionId?.trim() || "";
+
+    if (!normalizedSessionId || session.plannerSessionId === normalizedSessionId) {
+      return session;
+    }
+
+    const nextSession: AutomationSessionRecord = {
+      ...session,
+      plannerSessionId: normalizedSessionId,
+      plannerUpdatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    await this.store.writeAutomationSession(workspacePath, nextSession);
+    return nextSession;
+  }
+
+  private async runSerializedOrchestratorTurn<T>(
+    workspacePath: string,
+    scopeKey: string,
+    task: () => Promise<T>
+  ) {
+    const key = `${workspacePath}::${scopeKey}`;
+    const previous = this.orchestratorTurnLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous
+      .catch(() => undefined)
+      .then(() => current);
+
+    this.orchestratorTurnLocks.set(key, chained);
+
+    await previous.catch(() => undefined);
+
+    try {
+      return await task();
+    } finally {
+      release();
+      void chained.finally(() => {
+        if (this.orchestratorTurnLocks.get(key) === chained) {
+          this.orchestratorTurnLocks.delete(key);
+        }
+      });
+    }
+  }
+
+  private async runOrchestratorWorkerTurn(
+    input: {
+      workspacePath: string;
+      activeThread: ThreadRecord;
+      prompt: string;
+      normalizedPrompt: string;
+    },
+    delegation: Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>,
+    options: {
+      strategistSessionReady?: boolean;
+    } = {}
+  ) {
+    const progressOperationId = delegation.lane;
+
+    if (delegation.lane === "strategist") {
+      this.setChatProgress(input.workspacePath, {
+        lane: "strategist",
+        threadId: input.activeThread.id,
+        progressSummary: "Researching…",
+        progressDetails: ["Collecting the judgment needed before replying in chat."],
+        activeCommand: null,
+        operationId: progressOperationId
+      });
+
+      return {
+        lane: delegation.lane,
+        delegation,
+        startedLiveRun: false,
+        snapshot: await this.consultStrategist(
+          {
+            workspacePath: input.workspacePath,
+            threadId: input.activeThread.id,
+            prompt: delegation.prompt,
+            displayPrompt: input.prompt,
+            model: delegation.model,
+            reasoningIntensity: delegation.reasoningIntensity,
+            attachExplicitWorkspaceFiles: delegation.attachExplicitWorkspaceFiles
+          },
+          {
+            ...options,
+            progressOperationId
+          }
+        )
+      };
+    }
+
+    if (delegation.executionMode === "live") {
+      this.setChatProgress(input.workspacePath, {
+        lane: "builder",
+        threadId: input.activeThread.id,
+        progressSummary: "Starting…",
+        progressDetails: ["Launching a live workspace run under the orchestrator."],
+        activeCommand: null,
+        operationId: progressOperationId
+      });
+
+      return {
+        lane: delegation.lane,
+        delegation,
+        startedLiveRun: true,
+        snapshot: await this.startBuilderTask(
+          {
+            workspacePath: input.workspacePath,
+            threadId: input.activeThread.id,
+            prompt: delegation.prompt,
+            displayPrompt: input.prompt,
+            model: delegation.model,
+            reasoningEffort: delegation.reasoningEffort
+          },
+          {
+            progressOperationId
+          }
+        )
+      };
+    }
+
+    this.setChatProgress(input.workspacePath, {
+      lane: "builder",
+      threadId: input.activeThread.id,
+      progressSummary: "Working…",
+      progressDetails: ["Running the concrete workspace step before replying in chat."],
+      activeCommand: null,
+      operationId: progressOperationId
+    });
+
+    return {
+      lane: delegation.lane,
+      delegation,
+      startedLiveRun: false,
+      snapshot: await this.runBuilderTask(
+        {
+          workspacePath: input.workspacePath,
+          threadId: input.activeThread.id,
+          prompt: delegation.prompt,
+          displayPrompt: input.prompt,
+          model: delegation.model,
+          reasoningEffort: delegation.reasoningEffort
+        },
+        {
+          progressOperationId
+        }
+      )
+    };
+  }
+
+  private async runOrchestratorWorkerTurns(
+    input: {
+      workspacePath: string;
+      activeThread: ThreadRecord;
+      prompt: string;
+      normalizedPrompt: string;
+    },
+    delegations: Array<Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>>,
+    options: {
+      strategistSessionReady?: boolean;
+    } = {}
+  ) {
+    const results = await Promise.all(
+      delegations.map((delegation) => this.runOrchestratorWorkerTurn(input, delegation, options))
+    );
+
+    return {
+      results,
+      startedLiveRun: results.some((result) => result.startedLiveRun),
+      snapshot: await this.store.getSnapshot(input.workspacePath)
+    };
   }
 
   async importAttachments(request: AttachmentImportRequest): Promise<ProjectSnapshot> {
@@ -969,6 +1606,19 @@ export class AppService {
       }
     }
 
+    if (this.orchestratorRunner) {
+      return await this.handleConversationOrchestratorMessage(
+        {
+          workspacePath,
+          snapshot,
+          activeThread,
+          prompt: request.prompt,
+          normalizedPrompt
+        },
+        options
+      );
+    }
+
     const routePaths = await this.store.allocateRouteTrace(workspacePath);
 
     await this.store.appendPromptLog(workspacePath, {
@@ -983,6 +1633,7 @@ export class AppService {
     try {
       this.setChatProgress(workspacePath, {
         lane: "router",
+        threadId: activeThread.id,
         progressSummary: "Routing your message.",
         progressDetails: ["Choosing whether this should go to the strategist or the builder."],
         activeCommand: null
@@ -1037,6 +1688,7 @@ export class AppService {
         if (finalRoute === "builder") {
           this.setChatProgress(workspacePath, {
             lane: "builder",
+            threadId: activeThread.id,
             progressSummary: "Starting the builder task.",
             progressDetails: [route.decision.reasonShort || "The router chose the builder lane."],
             activeCommand: null
@@ -1060,6 +1712,7 @@ export class AppService {
 
           this.setChatProgress(workspacePath, {
             lane: "builder",
+            threadId: activeThread.id,
             progressSummary: "Starting the builder follow-up from the strategist context.",
             progressDetails: [
               route.decision.reasonShort || "The router chose strategist first, then builder."
@@ -1127,7 +1780,7 @@ export class AppService {
 
       return await this.store.getSnapshot(workspacePath);
     } finally {
-      this.clearChatProgress(workspacePath);
+      this.clearChatProgress(workspacePath, activeThread.id, "router");
     }
   }
 
@@ -1136,18 +1789,23 @@ export class AppService {
     options: {
       strategistSessionReady?: boolean;
       manageProgress?: boolean;
+      progressOperationId?: string;
     } = {}
   ): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
     const manageProgress = options.manageProgress ?? true;
+    const progressOperationId = options.progressOperationId?.trim() || "strategist";
     const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
+    let progressThreadId = request.threadId?.trim() || "pending-thread";
 
     if (manageProgress) {
       this.setChatProgress(workspacePath, {
         lane: "strategist",
+        threadId: progressThreadId,
         progressSummary: "Thinking…",
         progressDetails: [],
-        activeCommand: null
+        activeCommand: null,
+        operationId: progressOperationId
       });
     }
 
@@ -1156,9 +1814,11 @@ export class AppService {
       if (manageProgress) {
         this.setChatProgress(workspacePath, {
           lane: "strategist",
+          threadId: progressThreadId,
           progressSummary: "Thinking…",
           progressDetails: [],
-          activeCommand: null
+          activeCommand: null,
+          operationId: progressOperationId
         });
       }
 
@@ -1173,12 +1833,18 @@ export class AppService {
       if (!activeThread) {
         throw new Error("No active thread is available.");
       }
+      if (manageProgress && progressThreadId && progressThreadId !== activeThread.id) {
+        this.clearChatProgress(workspacePath, progressThreadId, progressOperationId);
+      }
+      progressThreadId = activeThread.id;
       const decisionPaths = await this.store.allocateDecision(workspacePath);
-      const strategistSessionSlug = buildStrategistOracleSessionId(
+      const strategistSessionSlug =
+        request.sessionSlug?.trim() || buildStrategistOracleSessionId(workspacePath, activeThread.id);
+      const activeProgressSlug = this.getLatestChatProgressEntry(
         workspacePath,
-        activeThread.id
-      );
-      const activeProgressSlug = this.activeChatProgressByWorkspace.get(workspacePath)?.oracleSessionSlug;
+        activeThread.id,
+        "strategist"
+      )?.oracleSessionSlug;
       const strategistSlugsToTerminate = Array.from(
         new Set([activeProgressSlug, strategistSessionSlug].filter((value): value is string => Boolean(value)))
       );
@@ -1237,12 +1903,14 @@ export class AppService {
       if (manageProgress) {
         this.setChatProgress(workspacePath, {
           lane: "strategist",
+          threadId: activeThread.id,
           progressSummary: "Thinking…",
           progressDetails: [],
           activeCommand: null,
           oracleSessionSlug: strategistSessionSlug,
           stdoutPath: decisionPaths.stdoutPath,
-          stderrPath: decisionPaths.stderrPath
+          stderrPath: decisionPaths.stderrPath,
+          operationId: progressOperationId
         });
       }
       const result = await this.oracleRunner.consult({
@@ -1261,12 +1929,14 @@ export class AppService {
       if (manageProgress) {
         this.setChatProgress(workspacePath, {
           lane: "strategist",
+          threadId: activeThread.id,
           progressSummary: "Finishing…",
           progressDetails: [],
           activeCommand: null,
           oracleSessionSlug: result.sessionId ?? strategistSessionSlug,
           stdoutPath: decisionPaths.stdoutPath,
-          stderrPath: decisionPaths.stderrPath
+          stderrPath: decisionPaths.stderrPath,
+          operationId: progressOperationId
         });
       }
 
@@ -1331,154 +2001,190 @@ export class AppService {
       return await this.store.getSnapshot(workspacePath);
     } finally {
       if (manageProgress) {
-        this.clearChatProgress(workspacePath);
+        this.clearChatProgress(workspacePath, progressThreadId || undefined, progressOperationId);
       }
     }
   }
 
-  async runBuilderTask(request: BuilderRequest): Promise<ProjectSnapshot> {
+  async runBuilderTask(
+    request: BuilderRequest,
+    options: {
+      manageProgress?: boolean;
+      progressOperationId?: string;
+    } = {}
+  ): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
+    const manageProgress = options.manageProgress ?? true;
+    const progressOperationId = options.progressOperationId?.trim() || "builder";
+    let progressThreadId = request.threadId?.trim() || "pending-thread";
     await this.reconcileStaleBuilderRuns(workspacePath);
-    const project = await this.store.initProject(workspacePath, {
-      name: await this.resolveProjectName(workspacePath)
-    });
-    if (request.threadId) {
-      await this.store.selectThread(workspacePath, request.threadId);
-    }
-    const snapshot = await this.store.getSnapshot(workspacePath);
-    const activeThread = snapshot.activeThread;
-    if (!activeThread) {
-      throw new Error("No active thread is available.");
-    }
-    const prompt = request.prompt.trim() || snapshot.latestTask?.prompt || "";
-    const displayPrompt = request.displayPrompt?.trim() || prompt;
+    try {
+      const project = await this.store.initProject(workspacePath, {
+        name: await this.resolveProjectName(workspacePath)
+      });
+      if (request.threadId) {
+        await this.store.selectThread(workspacePath, request.threadId);
+      }
+      const snapshot = await this.store.getSnapshot(workspacePath);
+      const activeThread = snapshot.activeThread;
+      if (!activeThread) {
+        throw new Error("No active thread is available.");
+      }
+      progressThreadId = activeThread.id;
+      const prompt = request.prompt.trim() || snapshot.latestTask?.prompt || "";
+      const displayPrompt = request.displayPrompt?.trim() || prompt;
 
-    if (!prompt) {
-      throw new Error("No builder task is available yet. Enter a task prompt or create one from the latest context.");
-    }
+      if (!prompt) {
+        throw new Error("No builder task is available yet. Enter a task prompt or create one from the latest context.");
+      }
 
-    const existingTask =
-      snapshot.tasks.find((task) => task.prompt.trim() === prompt && task.status === "pending") ??
-      null;
-    const task =
-      existingTask ??
-      ({
-        id: (await this.store.allocateTask(workspacePath)).id,
-        threadId: activeThread.id,
-        sourceDecisionId: snapshot.latestDecision?.id,
-        title: prompt.slice(0, 80) || "Lithium builder task",
+      const existingTask =
+        snapshot.tasks.find((task) => task.prompt.trim() === prompt && task.status === "pending") ??
+        null;
+      const task =
+        existingTask ??
+        ({
+          id: (await this.store.allocateTask(workspacePath)).id,
+          threadId: activeThread.id,
+          sourceDecisionId: snapshot.latestDecision?.id,
+          title: prompt.slice(0, 80) || "Lithium builder task",
+          prompt,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        } satisfies TaskRecord);
+
+      if (!existingTask) {
+        await this.store.writeTask(workspacePath, task);
+      }
+
+      const runPaths = await this.store.allocateRun(workspacePath);
+      const builderContext = await this.prepareModelContext({
+        workspacePath,
         prompt,
-        status: "pending",
-        createdAt: new Date().toISOString(),
+        lane: "builder",
+        snapshot,
+        artifactId: runPaths.id
+      });
+      const executionContext = await resolveWorkspaceCommandContext(workspacePath);
+      const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
+      const builderModel = resolveBuilderModel(request.model, project.codexModel);
+      const builderReasoningEffort = resolveBuilderReasoningEffort(
+        request.reasoningEffort,
+        appSettings.builderReasoningEffort
+      );
+      await this.store.appendPromptLog(workspacePath, {
+        kind: "builder.request",
+        threadId: activeThread.id,
+        prompt,
+        displayPrompt,
+        model: builderModel,
+        reasoningEffort: builderReasoningEffort,
+        runtimeContext: builderContext.runtimeContext,
+        artifactContext: builderContext.artifactContext
+      });
+      if (manageProgress) {
+        this.setChatProgress(workspacePath, {
+          lane: "builder",
+          threadId: activeThread.id,
+          progressSummary: "Working…",
+          progressDetails: ["Running the concrete workspace step before replying in chat."],
+          activeCommand: null,
+          stdoutPath: runPaths.stdoutPath,
+          stderrPath: runPaths.stderrPath,
+          operationId: progressOperationId
+        });
+      }
+      const result = await this.codexRunner.runTask({
+        workspacePath,
+        commandCwd: executionContext.commandCwd,
+        prompt,
+        runtimeContext: builderContext.runtimeContext,
+        artifactContext: builderContext.artifactContext,
+        model: builderModel,
+        reasoningEffort: builderReasoningEffort,
+        promptLanguage: appSettings.autopilotPromptLanguage,
+        stdoutPath: runPaths.stdoutPath,
+        stderrPath: runPaths.stderrPath,
+        outputPath: runPaths.outputPath,
+        env: executionContext.env
+      });
+      const changedFiles = mergeChangedFiles(
+        parseChangedFilesFromFinalMessage(result.finalMessage),
+        await collectGitChangedFiles(workspacePath)
+      );
+      const handoff = parseBuilderOutput(result.finalMessage);
+      const status = inferFinalRunStatus({
+        exitCode: result.exitCode,
+        finalMessage: result.finalMessage,
+        timedOut: result.timedOut
+      });
+
+      await this.store.writeRun(workspacePath, {
+        id: runPaths.id,
+        threadId: activeThread.id,
+        taskId: task.id,
+        prompt,
+        displayPrompt,
+        model: builderModel,
+        status,
+        exitCode: result.exitCode,
+        pid: null,
+        command: result.command,
+        stdoutPath: runPaths.stdoutPath,
+        stderrPath: runPaths.stderrPath,
+        finalMessagePath: runPaths.outputPath,
+        finalMessage: result.finalMessage,
+        handoff,
+        changedFiles,
+        contextPackPath: builderContext.contextPackPath,
+        finalization: "auto",
+        createdAt: result.startedAt,
+        startedAt: result.startedAt,
+        endedAt: result.endedAt
+      });
+
+      await this.store.writeTask(workspacePath, {
+        ...task,
+        status,
         updatedAt: new Date().toISOString()
-      } satisfies TaskRecord);
+      });
+      await this.syncThreadFromArtifacts(workspacePath, activeThread, {
+        prompt: displayPrompt,
+        summary: extractRunSummary(result.finalMessage)
+      });
+      await this.store.appendPromptLog(workspacePath, {
+        kind: "builder.response",
+        threadId: activeThread.id,
+        runId: runPaths.id,
+        model: builderModel,
+        status,
+        finalMessage: result.finalMessage,
+        changedFiles,
+        summary: handoffMachineSummary(handoff) || handoff.summary
+      });
+      await this.store.appendActivity(workspacePath, `${runPaths.id} finished with status ${status}`);
+      await this.store.updateSessionSummary(workspacePath);
+      await this.syncRemoteChangedFiles(workspacePath, changedFiles);
 
-    if (!existingTask) {
-      await this.store.writeTask(workspacePath, task);
+      return await this.store.getSnapshot(workspacePath);
+    } finally {
+      if (manageProgress) {
+        this.clearChatProgress(workspacePath, progressThreadId || undefined, progressOperationId);
+      }
     }
-
-    const runPaths = await this.store.allocateRun(workspacePath);
-    const builderContext = await this.prepareModelContext({
-      workspacePath,
-      prompt,
-      lane: "builder",
-      snapshot,
-      artifactId: runPaths.id
-    });
-    const executionContext = await resolveWorkspaceCommandContext(workspacePath);
-    const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
-    const builderModel = resolveBuilderModel(request.model, project.codexModel);
-    const builderReasoningEffort = resolveBuilderReasoningEffort(
-      request.reasoningEffort,
-      appSettings.builderReasoningEffort
-    );
-    await this.store.appendPromptLog(workspacePath, {
-      kind: "builder.request",
-      threadId: activeThread.id,
-      prompt,
-      displayPrompt,
-      model: builderModel,
-      reasoningEffort: builderReasoningEffort,
-      runtimeContext: builderContext.runtimeContext,
-      artifactContext: builderContext.artifactContext
-    });
-    const result = await this.codexRunner.runTask({
-      workspacePath,
-      commandCwd: executionContext.commandCwd,
-      prompt,
-      runtimeContext: builderContext.runtimeContext,
-      artifactContext: builderContext.artifactContext,
-      model: builderModel,
-      reasoningEffort: builderReasoningEffort,
-      promptLanguage: appSettings.autopilotPromptLanguage,
-      stdoutPath: runPaths.stdoutPath,
-      stderrPath: runPaths.stderrPath,
-      outputPath: runPaths.outputPath,
-      env: executionContext.env
-    });
-    const changedFiles = mergeChangedFiles(
-      parseChangedFilesFromFinalMessage(result.finalMessage),
-      await collectGitChangedFiles(workspacePath)
-    );
-    const handoff = parseBuilderOutput(result.finalMessage);
-    const status = inferFinalRunStatus({
-      exitCode: result.exitCode,
-      finalMessage: result.finalMessage,
-      timedOut: result.timedOut
-    });
-
-    await this.store.writeRun(workspacePath, {
-      id: runPaths.id,
-      threadId: activeThread.id,
-      taskId: task.id,
-      prompt,
-      displayPrompt,
-      model: builderModel,
-      status,
-      exitCode: result.exitCode,
-      pid: null,
-      command: result.command,
-      stdoutPath: runPaths.stdoutPath,
-      stderrPath: runPaths.stderrPath,
-      finalMessagePath: runPaths.outputPath,
-      finalMessage: result.finalMessage,
-      handoff,
-      changedFiles,
-      contextPackPath: builderContext.contextPackPath,
-      finalization: "auto",
-      createdAt: result.startedAt,
-      startedAt: result.startedAt,
-      endedAt: result.endedAt
-    });
-
-    await this.store.writeTask(workspacePath, {
-      ...task,
-      status,
-      updatedAt: new Date().toISOString()
-    });
-    await this.syncThreadFromArtifacts(workspacePath, activeThread, {
-      prompt: displayPrompt,
-      summary: extractRunSummary(result.finalMessage)
-    });
-    await this.store.appendPromptLog(workspacePath, {
-      kind: "builder.response",
-      threadId: activeThread.id,
-      runId: runPaths.id,
-      model: builderModel,
-      status,
-      finalMessage: result.finalMessage,
-      changedFiles,
-      summary: handoffMachineSummary(handoff) || handoff.summary
-    });
-    await this.store.appendActivity(workspacePath, `${runPaths.id} finished with status ${status}`);
-    await this.store.updateSessionSummary(workspacePath);
-    await this.syncRemoteChangedFiles(workspacePath, changedFiles);
-
-    return await this.store.getSnapshot(workspacePath);
   }
 
-  async startBuilderTask(request: BuilderRequest): Promise<ProjectSnapshot> {
+  async startBuilderTask(
+    request: BuilderRequest,
+    options: {
+      manageProgress?: boolean;
+      progressOperationId?: string;
+    } = {}
+  ): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
+    const manageProgress = options.manageProgress ?? true;
+    const progressOperationId = options.progressOperationId?.trim() || "builder";
     await this.reconcileStaleBuilderRuns(workspacePath);
     const project = await this.store.initProject(workspacePath, {
       name: await this.resolveProjectName(workspacePath)
@@ -1609,6 +2315,18 @@ export class AppService {
       outputPath: runPaths.outputPath,
       env: executionContext.env
     });
+    if (manageProgress) {
+      this.setChatProgress(workspacePath, {
+        lane: "builder",
+        threadId: activeThread.id,
+        progressSummary: "Starting…",
+        progressDetails: ["Launching a live workspace run under the orchestrator."],
+        activeCommand: null,
+        stdoutPath: runPaths.stdoutPath,
+        stderrPath: runPaths.stderrPath,
+        operationId: progressOperationId
+      });
+    }
 
     await this.store.writeRun(workspacePath, {
       id: runPaths.id,
@@ -1751,36 +2469,69 @@ export class AppService {
       return null;
     }
 
-    const progress = this.activeChatProgressByWorkspace.get(workspacePath);
+    const progressEntries = this.listChatProgressEntries(workspacePath, request.threadId);
 
-    if (!progress) {
+    if (!progressEntries.length) {
       return null;
     }
 
-    const [stdoutTail, stderrTail, oracleLogTail, liveOracleProgress] = await Promise.all([
+    const inspections = await Promise.all(
+      progressEntries.map((progress) => this.inspectSingleChatProgressEntry(workspacePath, progress))
+    );
+
+    if (inspections.length === 1) {
+      return inspections[0];
+    }
+
+    return combineParallelChatProgressInspections(inspections);
+  }
+
+  private async inspectSingleChatProgressEntry(
+    workspacePath: string,
+    progress: ActiveChatProgress
+  ): Promise<ChatProgressInspection> {
+    const [stdoutTail, stderrTail, oracleLogTail, liveOracleProgress, latestTouchedAt] = await Promise.all([
       progress.stdoutPath ? readTailText(progress.stdoutPath) : Promise.resolve(""),
       progress.stderrPath ? readTailText(progress.stderrPath) : Promise.resolve(""),
       progress.oracleSessionSlug ? readOracleSessionTail(progress.oracleSessionSlug) : Promise.resolve(""),
-      progress.oracleSessionSlug ? readLiveOracleSessionProgress(progress.oracleSessionSlug) : Promise.resolve(null)
+      progress.oracleSessionSlug ? readLiveOracleSessionProgress(progress.oracleSessionSlug) : Promise.resolve(null),
+      resolveChatProgressTouchedAt(progress)
     ]);
     const oracleProgress = extractOracleSessionProgress(oracleLogTail);
     const strategistProgress = progress.lane === "strategist";
     const strategistLiveProgress = mergeStrategistLiveProgress(liveOracleProgress, oracleProgress);
+    const codexProgress = strategistProgress ? null : parseCodexProgressLog(stdoutTail);
+    const hasCodexNarration = Boolean(codexProgress?.progressSummary || codexProgress?.progressDetails.length);
+    const progressSummary = strategistProgress
+      ? strategistLiveProgress.progressSummary || progress.progressSummary
+      : codexProgress?.progressSummary || progress.progressSummary;
+    const progressDetails = strategistProgress
+      ? strategistLiveProgress.progressDetails
+      : mergeProgressDetails(
+          codexProgress?.progressDetails ?? [],
+          mergeProgressDetails(
+            extractProgressTailDetails(stdoutTail, stderrTail),
+            hasCodexNarration ? [] : progress.progressDetails
+          )
+        ).filter((detail) => detail !== progressSummary);
 
-    return {
+    const inspection = {
       active: true,
       lane: progress.lane,
-      progressSummary: strategistProgress
-        ? strategistLiveProgress.progressSummary || progress.progressSummary
-        : progress.progressSummary,
-      progressDetails: strategistProgress
-        ? strategistLiveProgress.progressDetails
-        : mergeProgressDetails(progress.progressDetails, extractProgressTailDetails(stdoutTail, stderrTail)),
-      activeCommand: progress.activeCommand,
+      threadId: progress.threadId,
+      progressSummary,
+      progressDetails,
+      activeCommand: strategistProgress
+        ? progress.activeCommand
+        : codexProgress?.activeCommand ?? progress.activeCommand,
       stdoutTail,
       stderrTail,
-      updatedAt: progress.updatedAt
-    };
+      updatedAt: latestTouchedAt || progress.updatedAt
+    } satisfies ChatProgressInspection;
+
+    this.rememberObservedChatProgress(workspacePath, progress, inspection);
+
+    return inspection;
   }
 
   async terminateBuilderRun(request: BuilderRunControlRequest): Promise<ProjectSnapshot> {
@@ -2526,7 +3277,12 @@ export class AppService {
       return;
     }
 
+    const runningSteps =
+      snapshot.automationSteps
+        ?.filter((step) => step.sessionId === session.id && step.status === "running")
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt)) ?? [];
     const latestStep =
+      runningSteps[0] ??
       snapshot.automationSteps?.find((step) => step.id === session.latestStepId) ??
       snapshot.automationSteps?.find((step) => step.sessionId === session.id) ??
       null;
@@ -2543,7 +3299,12 @@ export class AppService {
       return;
     }
 
+    const refreshedRunningSteps =
+      refreshedSnapshot.automationSteps
+        ?.filter((step) => step.sessionId === refreshedSession.id && step.status === "running")
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt)) ?? [];
     const refreshedStep =
+      refreshedRunningSteps[0] ??
       refreshedSnapshot.automationSteps?.find((step) => step.id === refreshedSession.latestStepId) ??
       refreshedSnapshot.automationSteps?.find((step) => step.sessionId === refreshedSession.id) ??
       null;
@@ -2551,14 +3312,41 @@ export class AppService {
       ? refreshedSnapshot.runs.find((run) => run.id === refreshedStep.runId) ?? null
       : null;
 
-    if (
-      refreshedStep?.status === "running" &&
-      refreshedStep.lane === "builder" &&
-      refreshedStep.runId &&
-      refreshedRun
-    ) {
+    if (refreshedRunningSteps.some((step) => step.lane === "builder")) {
       await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
-        currentStepSummary: "Resuming the in-flight builder step after Lithium restarted."
+        currentStepSummary:
+          refreshedRunningSteps.some((step) => step.lane === "strategist")
+            ? "Resuming the in-flight builder and strategist work after Lithium restarted."
+            : "Resuming the in-flight builder step after Lithium restarted."
+      });
+      void this.runAutomationLoop(workspacePath, refreshedSession.id);
+      return;
+    }
+
+    if (refreshedRunningSteps.some((step) => step.lane === "strategist")) {
+      await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
+        currentStepSummary: "Resuming the in-flight strategist step after Lithium restarted."
+      });
+      void this.runAutomationLoop(workspacePath, refreshedSession.id);
+      return;
+    }
+
+    if (refreshedSession.mode === "continuous") {
+      for (const runningStep of refreshedRunningSteps) {
+        if (runningStep.lane === "builder" || runningStep.lane === "strategist") {
+          continue;
+        }
+
+        await this.completeAutomationStep(workspacePath, refreshedSession, runningStep, {
+          status: "failed",
+          summary: `Automation resumed after Lithium restarted while "${runningStep.title}" was still marked in progress.`,
+          changedFiles: [],
+          evidence: [runningStep.id]
+        });
+      }
+
+      await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
+        currentStepSummary: "Automation resumed after Lithium restarted."
       });
       void this.runAutomationLoop(workspacePath, refreshedSession.id);
       return;
@@ -2578,15 +3366,30 @@ export class AppService {
       risks: [interruptedSummary],
       nextActions: ["Resume automation to continue from the latest saved state."]
     });
+    await this.finalizeAutomationCycle(workspacePath, refreshedSession, refreshedSession.activeCycleId, {
+      status: "paused",
+      phase: "reporting",
+      summary: interruptedSummary
+    });
 
     await this.store.writeAutomationSession(workspacePath, {
       ...refreshedSession,
       status: "idle",
+      activeCycleId: undefined,
+      activeLaneStepIds: [],
       latestCheckpointId: checkpoint.id,
       currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
       stopReason: interruptedSummary,
       endedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
+    });
+    await this.appendAutomationStatusEntry(workspacePath, {
+      session: refreshedSession,
+      checkpoint,
+      body: buildAutomationCheckpointConversationMessage({
+        session: refreshedSession,
+        checkpoint
+      })
     });
   }
 
@@ -2920,6 +3723,8 @@ export class AppService {
       ...session,
       ...patch,
       status: "running",
+      activeLaneStepIds: patch.activeLaneStepIds ?? session.activeLaneStepIds ?? [],
+      latestCheckpointId: patch.latestCheckpointId,
       stopReason: undefined,
       endedAt: undefined,
       updatedAt: patch.updatedAt ?? new Date().toISOString()
@@ -2956,31 +3761,291 @@ export class AppService {
     return created;
   }
 
+  private async createAutomationCycle(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    input: {
+      title: string;
+      objective: string;
+      plannerPrompt: string;
+      summary?: string;
+      plannerReply?: string;
+      plannerSessionId?: string;
+    }
+  ) {
+    const allocation = await this.store.allocateAutomationCycle(workspacePath);
+    const now = new Date().toISOString();
+    const cycle: AutomationCycleRecord = {
+      id: allocation.id,
+      sessionId: session.id,
+      threadId: session.threadId,
+      title: input.title,
+      objective: input.objective,
+      plannerPrompt: input.plannerPrompt,
+      plannerReply: input.plannerReply,
+      plannerSessionId: input.plannerSessionId,
+      status: "running",
+      phase: "planning",
+      summary: input.summary ?? input.title,
+      laneStates: [],
+      activeLaneStepIds: [],
+      completedLaneStepIds: [],
+      createdAt: now,
+      updatedAt: now,
+      startedAt: now
+    };
+
+    await this.store.writeAutomationCycle(workspacePath, cycle);
+    await this.writeRunningAutomationSession(workspacePath, session, {
+      latestCycleId: cycle.id,
+      activeCycleId: cycle.id,
+      activeLaneStepIds: [],
+      currentStepSummary: input.summary ?? input.title,
+      updatedAt: now
+    });
+
+    return cycle;
+  }
+
+  private async ensureAutomationCycle(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    input: {
+      title: string;
+      objective: string;
+      plannerPrompt: string;
+      summary?: string;
+    }
+  ) {
+    if (session.activeCycleId) {
+      const existing = await this.readAutomationCycle(workspacePath, session.activeCycleId);
+
+      if (existing) {
+        return existing;
+      }
+    }
+
+    return await this.createAutomationCycle(workspacePath, session, input);
+  }
+
+  private async readAutomationCycle(workspacePath: string, cycleId: string) {
+    const cycles = await this.store.listAutomationCycles(workspacePath);
+    return cycles.find((record) => record.id === cycleId) ?? null;
+  }
+
+  private async writeAutomationCycle(
+    workspacePath: string,
+    cycle: AutomationCycleRecord,
+    patch: Partial<AutomationCycleRecord>
+  ) {
+    const nextCycle: AutomationCycleRecord = {
+      ...cycle,
+      ...patch,
+      updatedAt: patch.updatedAt ?? new Date().toISOString()
+    };
+
+    await this.store.writeAutomationCycle(workspacePath, nextCycle);
+    return nextCycle;
+  }
+
+  private buildCycleLaneStatesFromDelegations(
+    delegations: AutomationWorkerDelegation[]
+  ): AutomationCycleLaneState[] {
+    const now = new Date().toISOString();
+
+    return delegations.map((delegation) => ({
+      lane: delegation.lane,
+      title:
+        delegation.lane === "builder"
+          ? "Run the next builder execution branch"
+          : "Run the next strategist research branch",
+      status: "pending",
+      workerMode:
+        delegation.lane === "builder"
+          ? delegation.executionMode === "live"
+            ? "live"
+            : delegation.executionMode === "sync"
+            ? "sync"
+            : "async"
+          : "async",
+      summary:
+        delegation.lane === "builder"
+          ? "Waiting for the next builder branch to start."
+          : "Waiting for the next strategist branch to start.",
+      updatedAt: now
+    }));
+  }
+
+  private async updateAutomationCycleLaneState(
+    workspacePath: string,
+    cycleId: string | undefined,
+    lane: AutomationStepRecord["lane"],
+    patch: Partial<AutomationCycleLaneState>
+  ) {
+    if (!cycleId) {
+      return null;
+    }
+
+    const cycle = await this.readAutomationCycle(workspacePath, cycleId);
+
+    if (!cycle) {
+      return null;
+    }
+
+    const laneStates = cycle.laneStates.slice();
+    const index = laneStates.findIndex((entry) => entry.lane === lane);
+    const baseState: AutomationCycleLaneState =
+      index >= 0
+        ? laneStates[index]
+        : {
+            lane,
+            title: patch.title ?? lane,
+            status: "pending",
+            workerMode: patch.workerMode ?? "async",
+            summary: patch.summary ?? "",
+            updatedAt: new Date().toISOString()
+          };
+    const nextState: AutomationCycleLaneState = {
+      ...baseState,
+      ...patch,
+      updatedAt: patch.updatedAt ?? new Date().toISOString()
+    };
+
+    if (index >= 0) {
+      laneStates[index] = nextState;
+    } else {
+      laneStates.push(nextState);
+    }
+
+    return await this.writeAutomationCycle(workspacePath, cycle, { laneStates });
+  }
+
+  private async finalizeAutomationCycle(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    cycleId: string | undefined,
+    input: {
+      status: AutomationCycleStatus;
+      phase?: AutomationCyclePhase;
+      summary: string;
+    }
+  ) {
+    if (!cycleId) {
+      return null;
+    }
+
+    const cycle = await this.readAutomationCycle(workspacePath, cycleId);
+
+    if (!cycle) {
+      return null;
+    }
+
+    const completedAt =
+      input.status === "completed" || input.status === "failed" || input.status === "paused"
+        ? new Date().toISOString()
+        : cycle.completedAt;
+    const nextCycle = await this.writeAutomationCycle(workspacePath, cycle, {
+      status: input.status,
+      phase: input.phase ?? cycle.phase,
+      summary: input.summary,
+      completedAt
+    });
+
+    if (session.activeCycleId === cycleId && input.status !== "running") {
+      await this.store.writeAutomationSession(workspacePath, {
+        ...session,
+        activeCycleId: undefined,
+        activeLaneStepIds: [],
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    return nextCycle;
+  }
+
+  private buildAutomationStepIdempotencyKey(
+    session: AutomationSessionRecord,
+    input: {
+      cycleId?: string;
+      kind: AutomationStepKind;
+      lane: AutomationStepRecord["lane"];
+      title: string;
+      prompt: string;
+    }
+  ) {
+    return createHash("sha1")
+      .update(
+        [
+          session.id,
+          input.cycleId ?? "no-cycle",
+          input.kind,
+          input.lane,
+          input.title.trim(),
+          input.prompt.trim()
+        ].join("\n")
+      )
+      .digest("hex")
+      .slice(0, 20);
+  }
+
+  private async listRunningAutomationSteps(
+    workspacePath: string,
+    sessionId: string,
+    lane?: AutomationStepRecord["lane"]
+  ) {
+    const steps = await this.store.listAutomationSteps(workspacePath);
+
+    return steps
+      .filter((step) => step.sessionId === sessionId && step.status === "running")
+      .filter((step) => !lane || step.lane === lane)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  private async findLatestRunningAutomationStep(
+    workspacePath: string,
+    sessionId: string,
+    lane: AutomationStepRecord["lane"]
+  ) {
+    return (await this.listRunningAutomationSteps(workspacePath, sessionId, lane))[0] ?? null;
+  }
+
+  private async findRecoverableAutomationStep(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    lane: AutomationStepRecord["lane"]
+  ) {
+    const runningSteps = await this.listRunningAutomationSteps(workspacePath, session.id, lane);
+    const activeIds = new Set(session.activeLaneStepIds ?? []);
+    const activeCycleId = session.activeCycleId?.trim() || "";
+
+    return (
+      runningSteps.find(
+        (step) =>
+          activeIds.has(step.id) ||
+          (activeCycleId && step.cycleId === activeCycleId)
+      ) ??
+      runningSteps[0] ??
+      null
+    );
+  }
+
   private async resumeInFlightAutomationBuilderStep(
     workspacePath: string,
     session: AutomationSessionRecord,
     controller: AutomationControllerState
   ) {
-    const stepId = session.latestStepId;
+    const builderStep = await this.findRecoverableAutomationStep(workspacePath, session, "builder");
 
-    if (!stepId) {
+    const runId = builderStep?.runId ?? builderStep?.resumeCursor ?? "";
+
+    if (!builderStep || builderStep.status !== "running" || builderStep.lane !== "builder" || !runId) {
       return {
         handled: false,
         shouldStopLoop: false
       };
     }
 
-    const steps = await this.store.listAutomationSteps(workspacePath);
-    const builderStep = steps.find((record) => record.id === stepId);
-
-    if (!builderStep || builderStep.status !== "running" || builderStep.lane !== "builder" || !builderStep.runId) {
-      return {
-        handled: false,
-        shouldStopLoop: false
-      };
-    }
-
-    const run = await this.store.readRun(workspacePath, builderStep.runId).catch(() => null);
+    const run = await this.store.readRun(workspacePath, runId).catch(() => null);
 
     if (!run) {
       return {
@@ -3054,10 +4119,833 @@ export class AppService {
     };
   }
 
+  private async resumeInFlightAutomationStrategistStep(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    controller: AutomationControllerState
+  ) {
+    const strategistStep = await this.findRecoverableAutomationStep(workspacePath, session, "strategist");
+
+    if (!strategistStep || strategistStep.status !== "running" || strategistStep.lane !== "strategist") {
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    const strategistSlug =
+      strategistStep.resumeCursor?.trim() ||
+      buildAutomationStrategistSessionSlug(workspacePath, session, null, strategistStep);
+
+    if (!/resuming the in-flight strategist step/i.test(session.currentStepSummary)) {
+      await this.writeRunningAutomationSession(workspacePath, session, {
+        currentStepSummary: "Resuming the in-flight strategist step after Lithium restarted."
+      });
+    }
+
+    const activeOracleProcess = await inspectActiveOracleProcessBySlug(strategistSlug);
+
+    if (activeOracleProcess) {
+      controller.activeStrategistSlug = strategistSlug;
+
+      try {
+        const recoveredDecision = await this.waitForRecoveredStrategistDecision(
+          workspacePath,
+          session,
+          strategistStep,
+          controller,
+          strategistSlug,
+          activeOracleProcess
+        );
+
+        if (recoveredDecision) {
+          await this.completeAutomationStep(workspacePath, session, strategistStep, {
+            status: "completed",
+            summary: recoveredDecision.summary || "Recovered the interrupted strategist step.",
+            decisionId: recoveredDecision.id,
+            changedFiles: [],
+            evidence: recoveredDecision.summary ? [recoveredDecision.summary] : []
+          });
+
+          return {
+            handled: true,
+            shouldStopLoop: false
+          };
+        }
+      } finally {
+        controller.activeStrategistSlug = null;
+      }
+    }
+
+    await this.completeAutomationStep(workspacePath, session, strategistStep, {
+      status: "cancelled",
+      summary: "Step started.",
+      changedFiles: [],
+      evidence: []
+    });
+
+    const recoveryInstruction =
+      session.queuedUserInstruction?.trim() ||
+      buildInterruptedStrategistRecoveryInstruction(session, strategistStep);
+    controller.redirectInstruction = recoveryInstruction;
+
+    await this.writeRunningAutomationSession(workspacePath, session, {
+      currentStepSummary: "Retrying the interrupted strategist step after Lithium restarted."
+    });
+
+    return {
+      handled: true,
+      shouldStopLoop: false
+    };
+  }
+
+  private async runAutomationOrchestratorCycle(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    controller: AutomationControllerState,
+    snapshot: ProjectSnapshot,
+    redirectInstruction: string,
+    appSettings: AppSettings
+  ) {
+    if (!this.orchestratorRunner) {
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    const activeThread =
+      snapshot.threads.find((thread) => thread.id === session.threadId) ??
+      snapshot.activeThread;
+
+    if (!activeThread) {
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    const requestPaths = this.buildAutomationPlannerRequestPaths(workspacePath, session.id);
+    const planningPrompt = buildAutomationOrchestratorPrompt({
+      session,
+      redirectInstruction,
+      languagePreference: appSettings.autopilotPromptLanguage,
+      snapshot
+    });
+    const cycle = await this.createAutomationCycle(workspacePath, session, {
+      title: "Plan and launch the next bounded automation cycle",
+      objective: redirectInstruction || session.displayObjective || session.objective,
+      plannerPrompt: planningPrompt,
+      plannerSessionId: session.plannerSessionId,
+      summary: "Choosing the next bounded automation cycle."
+    });
+    const planningStep = await this.createAutomationStep(workspacePath, session, {
+      cycleId: cycle.id,
+      kind: "strategize",
+      lane: "controller",
+      workerMode: "sync",
+      title: "Plan and launch the next bounded automation cycle",
+      prompt: planningPrompt
+    });
+    const requestDir = path.dirname(requestPaths.builder);
+
+    this.setChatProgress(workspacePath, {
+      lane: "orchestrator",
+      threadId: activeThread.id,
+      progressSummary: "Planning…",
+      progressDetails: ["Choosing the next bounded automation move and whether to fan work out in parallel."],
+      activeCommand: null,
+      stdoutPath: path.join(requestDir, "orchestrator.automation.stdout.log"),
+      stderrPath: path.join(requestDir, "orchestrator.automation.stderr.log"),
+      operationId: "automation-orchestrator"
+    });
+
+    let planningTurn: Awaited<ReturnType<NonNullable<typeof this.orchestratorRunner>["runTurn"]>>;
+
+    try {
+      const planningContext = await this.store.buildRuntimeContext(workspacePath, planningPrompt, {
+        lane: "builder"
+      });
+      planningTurn = await this.runSerializedOrchestratorTurn(
+        workspacePath,
+        `planner:${session.id}`,
+        async () =>
+          await this.orchestratorRunner!.runTurn({
+            workspacePath,
+            sessionId: session.plannerSessionId,
+            prompt: planningPrompt,
+            runtimeContext: planningContext.content,
+            stdoutPath: path.join(requestDir, "orchestrator.automation.stdout.log"),
+            stderrPath: path.join(requestDir, "orchestrator.automation.stderr.log"),
+            outputPath: path.join(requestDir, "orchestrator.automation.reply.md"),
+            requestPaths,
+            hostKey: `planner:${session.id}`,
+            model: appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel,
+            reasoningEffort: "xhigh"
+          })
+      );
+    } finally {
+      this.clearChatProgress(workspacePath, activeThread.id, "automation-orchestrator");
+    }
+
+    let activeSession = await this.requireAutomationSession(workspacePath, session.id);
+    activeSession = await this.persistAutomationPlannerSessionId(
+      workspacePath,
+      activeSession,
+      planningTurn.sessionId
+    );
+
+    const planningReply = sanitizeConversationBody(planningTurn.finalMessage);
+    const delegations = resolveOrchestratorDelegations(
+      planningTurn,
+      redirectInstruction.trim() || session.objective
+    );
+    const automationDelegation = delegations.find(
+      (delegation): delegation is Extract<OrchestratorDelegationDirective, { lane: "automation" }> =>
+        delegation.lane === "automation"
+    );
+    const workerDelegations = delegations.filter(
+      (delegation): delegation is AutomationWorkerDelegation =>
+        delegation.lane === "builder" || delegation.lane === "strategist"
+    );
+
+    const plannerSummary =
+      planningReply ||
+      summarizeAutomationPlannerResult(workerDelegations, automationDelegation) ||
+      "The automation planner did not launch a concrete worker step.";
+
+    await this.completeAutomationStep(workspacePath, activeSession, planningStep, {
+      status: automationDelegation || workerDelegations.length ? "completed" : "failed",
+      summary: plannerSummary,
+      changedFiles: [],
+      evidence: planningReply ? [planningReply] : []
+    });
+    await this.writeAutomationCycle(workspacePath, cycle, {
+      plannerReply: planningReply || undefined,
+      plannerSessionId: activeSession.plannerSessionId,
+      summary: plannerSummary,
+      phase: workerDelegations.length ? "workers" : "planning",
+      laneStates: this.buildCycleLaneStatesFromDelegations(workerDelegations)
+    });
+
+    if (controller.redirectInstruction.trim() === redirectInstruction) {
+      controller.redirectInstruction = "";
+    }
+
+    if (redirectInstruction && activeSession.queuedUserInstruction?.trim() === redirectInstruction) {
+      activeSession = await this.writeRunningAutomationSession(workspacePath, activeSession, {
+        queuedUserInstruction: undefined
+      });
+    }
+
+    if (automationDelegation && !workerDelegations.length) {
+      const pauseSummary =
+        planningReply ||
+        automationDelegation.prompt.trim() ||
+        "Automation paused because the planner identified a true review boundary.";
+
+      await this.appendAutomationAssistantEntry(workspacePath, {
+        session: activeSession,
+        body: pauseSummary,
+        cycleId: cycle.id,
+        stepId: planningStep.id
+      });
+      await this.syncThreadFromArtifacts(workspacePath, activeThread, {
+        prompt: redirectInstruction || activeSession.displayObjective || activeSession.objective,
+        summary: pauseSummary
+      });
+      await this.finalizeAutomationCycle(workspacePath, activeSession, cycle.id, {
+        status: "paused",
+        phase: "reporting",
+        summary: pauseSummary
+      });
+      await this.pauseAutomationWithCheckpoint(workspacePath, {
+        session: activeSession,
+        title:
+          "Checkpoint ready",
+        summary: pauseSummary,
+        whatChanged: [],
+        evidence: [],
+        risks: ["The planner identified a review boundary that needs attention."],
+        nextActions: [
+          automationDelegation.prompt.trim() || "Review the planner note and choose the next direction."
+        ],
+        currentStepSummary: "Waiting for your direction.",
+        stopReason: pauseSummary
+      });
+      return {
+        handled: true,
+        shouldStopLoop: true
+      };
+    }
+
+    if (!workerDelegations.length) {
+      await this.finalizeAutomationCycle(workspacePath, activeSession, cycle.id, {
+        status: "failed",
+        phase: "planning",
+        summary: plannerSummary
+      });
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    activeSession = await this.writeRunningAutomationSession(workspacePath, activeSession, {
+      latestCycleId: cycle.id,
+      activeCycleId: cycle.id,
+      currentStepSummary: summarizeAutomationDelegationCycle(
+        workerDelegations,
+        redirectInstruction || activeSession.displayObjective || activeSession.objective
+      )
+    });
+
+    const workerTurn = await this.runAutomationDelegatedWorkerTurns(
+      workspacePath,
+      activeSession,
+      cycle,
+      controller,
+      workerDelegations,
+      redirectInstruction,
+      appSettings
+    );
+    const refreshedSnapshot = workerTurn.snapshot;
+    const refreshedThread =
+      refreshedSnapshot.threads.find((thread) => thread.id === activeThread.id) ?? activeThread;
+    const followupPrompt = buildAutomationOrchestratorFollowupPrompt({
+      objective: redirectInstruction || activeSession.displayObjective || activeSession.objective,
+      delegations: workerDelegations,
+      snapshot: refreshedSnapshot
+    });
+
+    this.setChatProgress(workspacePath, {
+      lane: "orchestrator",
+      threadId: refreshedThread.id,
+      progressSummary: "Reporting…",
+      progressDetails: ["Turning the latest worker results into a short automation update for chat."],
+      activeCommand: null,
+      stdoutPath: path.join(requestDir, "orchestrator.automation.followup.stdout.log"),
+      stderrPath: path.join(requestDir, "orchestrator.automation.followup.stderr.log"),
+      operationId: "automation-orchestrator"
+    });
+
+    let followupTurn: Awaited<ReturnType<NonNullable<typeof this.orchestratorRunner>["runTurn"]>>;
+
+    try {
+      const followupContext = await this.store.buildRuntimeContext(workspacePath, followupPrompt, {
+        lane: "builder"
+      });
+      followupTurn = await this.runSerializedOrchestratorTurn(
+        workspacePath,
+        `planner:${session.id}`,
+        async () =>
+          await this.orchestratorRunner!.runTurn({
+            workspacePath,
+            sessionId:
+              activeSession.plannerSessionId ||
+              planningTurn.sessionId ||
+              session.plannerSessionId,
+            prompt: followupPrompt,
+            runtimeContext: followupContext.content,
+            stdoutPath: path.join(requestDir, "orchestrator.automation.followup.stdout.log"),
+            stderrPath: path.join(requestDir, "orchestrator.automation.followup.stderr.log"),
+            outputPath: path.join(requestDir, "orchestrator.automation.followup.reply.md"),
+            requestPaths,
+            hostKey: `planner:${session.id}`,
+            model: appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel,
+            reasoningEffort: "xhigh"
+          })
+      );
+    } finally {
+      this.clearChatProgress(workspacePath, refreshedThread.id, "automation-orchestrator");
+    }
+
+    activeSession = await this.persistAutomationPlannerSessionId(
+      workspacePath,
+      activeSession,
+      followupTurn.sessionId
+    );
+
+    const followupReply =
+      sanitizeConversationBody(followupTurn.finalMessage) ||
+      summarizeWorkerSnapshotsForConversation(workerDelegations, refreshedSnapshot);
+    const relatedDecisionId = workerTurn.results.some((result) => result.lane === "strategist")
+      ? refreshedSnapshot.latestDecision?.id
+      : undefined;
+    const relatedRunId = workerTurn.results.some((result) => result.lane === "builder")
+      ? refreshedSnapshot.latestRun?.id
+      : undefined;
+
+    await this.appendAutomationAssistantEntry(workspacePath, {
+      session: activeSession,
+      body: followupReply,
+      decisionId: relatedDecisionId,
+      runId: relatedRunId,
+      cycleId: cycle.id
+    });
+    await this.syncThreadFromArtifacts(workspacePath, refreshedThread, {
+      prompt: redirectInstruction || activeSession.displayObjective || activeSession.objective,
+      summary: followupReply
+    });
+    await this.store.appendActivity(
+      workspacePath,
+      `${session.id} automation completed an orchestrated ${describeDelegationSetForActivity(workerDelegations)} cycle`
+    );
+
+    const builderResult = workerTurn.results.find(
+      (result): result is AutomationDelegatedBuilderResult => result.lane === "builder"
+    );
+
+    if (builderResult) {
+      const resumedSession = await this.requireAutomationSession(workspacePath, session.id);
+      const shouldStopLoop = await this.applyAutomationBuilderOutcome(workspacePath, {
+        session: resumedSession,
+        cycle,
+        controller,
+        builderStep: builderResult.step,
+        latestDecision: refreshedSnapshot.latestDecision,
+        latestRun: builderResult.latestRun,
+        redirectInstruction,
+        runStatus: builderResult.runStatus,
+        runSummary: builderResult.runSummary,
+        runChangedFiles: builderResult.runChangedFiles,
+        runEvidence: builderResult.runEvidence,
+        runRisks: builderResult.runRisks,
+        runActions: builderResult.runActions
+      });
+
+      return {
+        handled: true,
+        shouldStopLoop
+      };
+    }
+
+    const resumedSession = await this.requireAutomationSession(workspacePath, session.id);
+    const nextUsedSteps = resumedSession.budget.usedSteps + 1;
+
+    if (controller.pauseRequested || resumedSession.mode === "checkpoint") {
+      await this.finalizeAutomationCycle(workspacePath, resumedSession, cycle.id, {
+        status: "paused",
+        phase: "reporting",
+        summary:
+          refreshedSnapshot.latestDecision?.summary ||
+          followupReply ||
+          "The latest strategist cycle finished."
+      });
+      await this.pauseAutomationWithCheckpoint(workspacePath, {
+        session: resumedSession,
+        title: controller.pauseRequested ? "Automation paused after the latest step" : "Checkpoint ready",
+        summary:
+          refreshedSnapshot.latestDecision?.summary ||
+          followupReply ||
+          "The latest strategist cycle finished.",
+        whatChanged: [],
+        evidence: refreshedSnapshot.latestDecision?.summary ? [refreshedSnapshot.latestDecision.summary] : [],
+        risks: refreshedSnapshot.latestDecision?.handoff?.risks ?? [],
+        nextActions:
+          refreshedSnapshot.latestDecision?.handoff?.runActions?.length ||
+          refreshedSnapshot.latestDecision?.handoff?.openQuestions?.length
+            ? [
+                ...(refreshedSnapshot.latestDecision?.handoff?.runActions ?? []),
+                ...(refreshedSnapshot.latestDecision?.handoff?.openQuestions ?? [])
+              ]
+            : ["Review the latest research update and continue the next bounded step."],
+        currentStepSummary:
+          controller.pauseRequested
+            ? "Stopped after finishing the current step."
+            : "Waiting for your direction.",
+        budget: {
+          ...resumedSession.budget,
+          usedSteps: nextUsedSteps
+        }
+      });
+      controller.pauseRequested = false;
+      controller.stopRequested = false;
+      return {
+        handled: true,
+        shouldStopLoop: true
+      };
+    }
+
+    await this.finalizeAutomationCycle(workspacePath, resumedSession, cycle.id, {
+      status: "completed",
+      phase: "reporting",
+      summary:
+        refreshedSnapshot.latestDecision?.summary ||
+        followupReply ||
+        "The latest automation cycle finished."
+    });
+    await this.writeRunningAutomationSession(workspacePath, resumedSession, {
+      currentStepSummary: "Continuing after the latest strategist guidance.",
+      budget: {
+        ...resumedSession.budget,
+        usedSteps: nextUsedSteps
+      }
+    });
+    await this.store.updateSessionSummary(workspacePath);
+
+    return {
+      handled: true,
+      shouldStopLoop: false
+    };
+  }
+
+  private async runAutomationDelegatedWorkerTurns(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    cycle: AutomationCycleRecord,
+    controller: AutomationControllerState,
+    delegations: AutomationWorkerDelegation[],
+    redirectInstruction: string,
+    appSettings: AppSettings
+  ) {
+    const results = await Promise.all(
+      delegations.map((delegation) =>
+        this.runAutomationDelegatedWorkerTurn(
+          workspacePath,
+          session,
+          cycle,
+          controller,
+          delegation,
+          redirectInstruction,
+          appSettings
+        )
+      )
+    );
+
+    return {
+      results,
+      snapshot: await this.store.getSnapshot(workspacePath)
+    };
+  }
+
+  private async startAutomationStrategistLane(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    cycle: AutomationCycleRecord,
+    strategistStep: AutomationStepRecord,
+    delegation: Extract<AutomationWorkerDelegation, { lane: "strategist" }>,
+    displayPrompt: string,
+    appSettings: AppSettings,
+    progressOperationId: string
+  ) {
+    const project = await this.store.initProject(workspacePath, {
+      name: await this.resolveProjectName(workspacePath)
+    });
+    await this.store.selectThread(workspacePath, session.threadId);
+    const snapshot = await this.store.getSnapshot(workspacePath);
+    const activeThread =
+      snapshot.threads.find((thread) => thread.id === session.threadId) ?? snapshot.activeThread;
+
+    if (!activeThread) {
+      throw new Error("No active thread is available.");
+    }
+
+    const decisionPaths = await this.store.allocateDecision(workspacePath);
+    const strategistSlug = buildAutomationStrategistSessionSlug(
+      workspacePath,
+      session,
+      cycle,
+      strategistStep
+    );
+    const strategistContextFingerprint = buildStrategistContextFingerprint(snapshot);
+    const strategistContext = await this.prepareModelContext({
+      workspacePath,
+      prompt: delegation.prompt,
+      lane: "strategist",
+      snapshot,
+      artifactId: decisionPaths.id
+    });
+    const attachStrategistRuntimeContext = shouldAttachStrategistRuntimeContext(
+      snapshot,
+      strategistContextFingerprint
+    );
+    const workspaceFiles = await this.store.listWorkspaceFiles(workspacePath);
+    const explicitlyMentionedWorkspaceFiles =
+      delegation.attachExplicitWorkspaceFiles === false
+        ? []
+        : resolveExplicitStrategistWorkspaceFiles(delegation.prompt, workspacePath, workspaceFiles);
+    const strategistAttachments = snapshot.activeThreadAttachments
+      .filter((record) => record.sizeBytes <= 10 * 1024 * 1024)
+      .slice(0, 8)
+      .map((record) => path.join(workspacePath, record.relativePath));
+    const strategistFiles = Array.from(
+      new Set([
+        attachStrategistRuntimeContext ? strategistContext.runtimeContextPath : undefined,
+        ...explicitlyMentionedWorkspaceFiles,
+        ...strategistAttachments
+      ].filter((value): value is string => Boolean(value)))
+    ).filter((filePath) => isSupportedStrategistUploadPath(filePath));
+    const strategistModel = delegation.model ?? project.oracleModel;
+    const strategistReasoningIntensity = coerceStrategistThinkingTime(
+      strategistModel,
+      delegation.reasoningIntensity ?? appSettings.strategistReasoningIntensity
+    );
+
+    await this.store.appendPromptLog(workspacePath, {
+      kind: "strategist.request",
+      threadId: activeThread.id,
+      prompt: delegation.prompt,
+      displayPrompt: `[Autopilot] ${displayPrompt}`,
+      model: strategistModel,
+      reasoningIntensity: strategistReasoningIntensity,
+      oracleSessionSlug: strategistSlug,
+      files: strategistFiles,
+      runtimeContext: strategistContext.runtimeContext,
+      contextPackPath: strategistContext.contextPackPath
+    });
+
+    this.setChatProgress(workspacePath, {
+      lane: "strategist",
+      threadId: activeThread.id,
+      progressSummary: "Researching…",
+      progressDetails: ["Keeping a longer strategist branch running in the background."],
+      activeCommand: null,
+      oracleSessionSlug: strategistSlug,
+      stdoutPath: decisionPaths.stdoutPath,
+      stderrPath: decisionPaths.stderrPath,
+      operationId: progressOperationId
+    });
+
+    if (!this.oracleRunner.startConsult) {
+      throw new Error("Async strategist execution requires oracle startConsult support.");
+    }
+
+    const started = await this.oracleRunner.startConsult({
+      workspacePath,
+      prompt: delegation.prompt,
+      model: strategistModel,
+      browserThinkingTime: strategistReasoningIntensity,
+      files: strategistFiles,
+      stdoutPath: decisionPaths.stdoutPath,
+      stderrPath: decisionPaths.stderrPath,
+      outputPath: decisionPaths.outputPath,
+      slug: strategistSlug,
+      strategistSessionReady: appSettings.strategistSessionReady
+    });
+
+    if (started.chromePath) {
+      await this.store.initProject(workspacePath, {
+        name: await this.resolveProjectName(workspacePath),
+        oracleChromePath: started.chromePath
+      });
+    }
+
+    const updatedStep: AutomationStepRecord = {
+      ...strategistStep,
+      resumeCursor: strategistSlug,
+      startedSideEffects: Array.from(
+        new Set(
+          [
+            ...(strategistStep.startedSideEffects ?? []),
+            `oracle-session:${strategistSlug}`,
+            `decision-artifacts:${decisionPaths.id}`
+          ].filter(Boolean)
+        )
+      ),
+      updatedAt: new Date().toISOString()
+    };
+    await this.store.writeAutomationStep(workspacePath, updatedStep);
+    await this.updateAutomationCycleLaneState(workspacePath, cycle.id, strategistStep.lane, {
+      stepId: strategistStep.id,
+      workerMode: "async",
+      summary: "Strategist research is running in the background.",
+      resumeCursor: strategistSlug,
+      updatedAt: updatedStep.updatedAt
+    });
+    await this.store.appendActivity(
+      workspacePath,
+      `${session.id} started async strategist lane ${strategistStep.id} (${strategistSlug})`
+    );
+
+    return {
+      step: updatedStep,
+      strategistSlug
+    };
+  }
+
+  private async runAutomationDelegatedWorkerTurn(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    cycle: AutomationCycleRecord,
+    controller: AutomationControllerState,
+    delegation: AutomationWorkerDelegation,
+    redirectInstruction: string,
+    appSettings: AppSettings
+  ): Promise<AutomationDelegatedWorkerResult> {
+    const displayPrompt = redirectInstruction || session.displayObjective || session.objective;
+    const progressOperationId = `automation-${delegation.lane}`;
+
+    if (delegation.lane === "strategist") {
+      let strategistStep = await this.createAutomationStep(workspacePath, session, {
+        cycleId: cycle.id,
+        kind: "literature-search",
+        lane: "strategist",
+        workerMode: "async",
+        title: "Run the next strategist research branch",
+        prompt: delegation.prompt
+      });
+      const strategistDisplayPrompt = `[Autopilot] ${displayPrompt}`;
+      const strategistSlug = buildAutomationStrategistSessionSlug(workspacePath, session, cycle, strategistStep);
+      let strategistSnapshot: ProjectSnapshot;
+
+      strategistStep = {
+        ...strategistStep,
+        resumeCursor: strategistSlug,
+        startedSideEffects: [`oracle-session:${strategistSlug}`],
+        updatedAt: new Date().toISOString()
+      };
+      await this.store.writeAutomationStep(workspacePath, strategistStep);
+      await this.updateAutomationCycleLaneState(workspacePath, cycle.id, strategistStep.lane, {
+        resumeCursor: strategistSlug,
+        updatedAt: strategistStep.updatedAt
+      });
+
+      controller.activeStrategistSlug = strategistSlug;
+
+      try {
+        strategistSnapshot = await this.consultStrategist(
+          {
+            workspacePath,
+            threadId: session.threadId,
+            prompt: delegation.prompt,
+            displayPrompt: strategistDisplayPrompt,
+            attachExplicitWorkspaceFiles: delegation.attachExplicitWorkspaceFiles,
+            sessionSlug: strategistSlug,
+            model: delegation.model,
+            reasoningIntensity: delegation.reasoningIntensity
+          },
+          {
+            strategistSessionReady: appSettings.strategistSessionReady,
+            progressOperationId
+          }
+        );
+      } finally {
+        controller.activeStrategistSlug = null;
+      }
+
+      const decision = strategistSnapshot.latestDecision ?? null;
+
+      await this.completeAutomationStep(workspacePath, session, strategistStep, {
+        status: decision ? "completed" : "failed",
+        summary: decision?.summary || "The strategist branch did not return a concrete summary.",
+        resumeCursor: strategistSlug,
+        completedSideEffects: decision?.id ? [`decision:${decision.id}`] : [],
+        decisionId: decision?.id,
+        changedFiles: [],
+        evidence: decision?.summary ? [decision.summary] : []
+      });
+
+      return {
+        lane: delegation.lane,
+        delegation,
+        step: strategistStep,
+        decision
+      };
+    }
+
+    let builderStep = await this.createAutomationStep(workspacePath, session, {
+      cycleId: cycle.id,
+      kind: inferAutomationBuilderStepKind(delegation.prompt),
+      lane: "builder",
+      workerMode:
+        delegation.executionMode === "live"
+          ? "live"
+          : delegation.executionMode === "sync"
+          ? "sync"
+          : "async",
+      title: "Run the next builder execution branch",
+      prompt: delegation.prompt
+    });
+    let latestRun: RunRecord | null = null;
+    let runStatus: RecordStatus = "failed";
+    let runSummary = "";
+    let runChangedFiles: string[] = [];
+    let runEvidence: string[] = [];
+    let runRisks: string[] = [];
+    let runActions: string[] = [];
+
+    try {
+      const builderRequest = {
+        workspacePath,
+        threadId: session.threadId,
+        prompt: delegation.prompt,
+        displayPrompt: `[autopilot] ${displayPrompt}`,
+        model: delegation.model,
+        reasoningEffort: delegation.reasoningEffort
+      } satisfies BuilderRequest;
+
+      const builderSnapshot =
+        delegation.executionMode === "sync"
+          ? await this.runBuilderTask(builderRequest, {
+              progressOperationId
+            })
+          : await this.startBuilderTask(builderRequest, {
+              progressOperationId
+            });
+      const runId = builderSnapshot.latestRun?.id ?? null;
+      if (runId) {
+        builderStep = {
+          ...builderStep,
+          runId,
+          resumeCursor: runId,
+          startedSideEffects: [`run:${runId}`],
+          updatedAt: new Date().toISOString()
+        };
+        await this.store.writeAutomationStep(workspacePath, builderStep);
+        await this.updateAutomationCycleLaneState(workspacePath, cycle.id, builderStep.lane, {
+          resumeCursor: runId,
+          updatedAt: builderStep.updatedAt
+        });
+      }
+      const completedSnapshot =
+        delegation.executionMode === "sync"
+          ? builderSnapshot
+          : runId
+          ? ((controller.activeRunId = runId),
+            await this.waitForAutomationRun(workspacePath, runId, controller))
+          : await this.store.getSnapshot(workspacePath);
+
+      controller.activeRunId = null;
+      latestRun =
+        (runId
+          ? completedSnapshot.runs.find((record) => record.id === runId)
+          : completedSnapshot.latestRun) ??
+        (completedSnapshot.latestRun?.id === runId ? completedSnapshot.latestRun : null);
+      runStatus = latestRun?.status ?? "failed";
+      runSummary = handoffMachineSummary(latestRun?.handoff) || extractRunSummary(latestRun?.finalMessage ?? "");
+      runChangedFiles = latestRun?.changedFiles ?? [];
+      runEvidence = buildAutomationEvidence(latestRun);
+      runRisks = latestRun?.handoff?.risks ?? [];
+      runActions = latestRun?.handoff?.runActions ?? [];
+    } catch (error) {
+      controller.activeRunId = null;
+      runStatus = "failed";
+      runSummary = error instanceof Error ? error.message : String(error);
+      runEvidence = runSummary ? [runSummary] : [];
+      runRisks = runSummary ? [runSummary] : [];
+      runActions = [];
+    }
+
+    return {
+      lane: delegation.lane,
+      delegation,
+      step: builderStep,
+      latestRun,
+      runStatus,
+      runSummary,
+      runChangedFiles,
+      runEvidence,
+      runRisks,
+      runActions
+    };
+  }
+
   private async applyAutomationBuilderOutcome(
     workspacePath: string,
     input: {
       session: AutomationSessionRecord;
+      cycle?: AutomationCycleRecord | null;
       controller: AutomationControllerState;
       builderStep: AutomationStepRecord;
       latestDecision: DecisionRecord | null;
@@ -3073,6 +4961,7 @@ export class AppService {
   ) {
     const {
       session,
+      cycle,
       controller,
       builderStep,
       latestDecision,
@@ -3087,17 +4976,23 @@ export class AppService {
     } = input;
 
     if (controller.stopRequested) {
-      await this.completeAutomationStep(workspacePath, builderStep, {
+      await this.completeAutomationStep(workspacePath, session, builderStep, {
         status: "cancelled",
         summary: "Stopped by the user.",
+        completedSideEffects: latestRun?.id ? [`run:${latestRun.id}`] : [],
         runId: latestRun?.id,
         changedFiles: [],
         evidence: []
       });
+      await this.finalizeAutomationCycle(workspacePath, session, cycle?.id ?? builderStep.cycleId, {
+        status: "failed",
+        phase: "reporting",
+        summary: "Stopped by the user."
+      });
       return true;
     }
 
-    await this.completeAutomationStep(workspacePath, builderStep, {
+    await this.completeAutomationStep(workspacePath, session, builderStep, {
       status:
         runStatus === "completed"
           ? "completed"
@@ -3105,6 +5000,7 @@ export class AppService {
           ? "cancelled"
           : "failed",
       summary: runSummary || "Builder run finished without a usable summary.",
+      completedSideEffects: latestRun?.id ? [`run:${latestRun.id}`] : [],
       runId: latestRun?.id,
       changedFiles: runChangedFiles,
       evidence: runEvidence
@@ -3112,8 +5008,10 @@ export class AppService {
 
     if (session.paperWriteEnabled && runStatus === "completed") {
       const paperStep = await this.createAutomationStep(workspacePath, session, {
+        cycleId: cycle?.id ?? builderStep.cycleId,
         kind: "paper-sync",
         lane: "writer",
+        workerMode: "sync",
         title: "Sync manuscript state",
         prompt: "Update manuscript projections from the latest decision and run."
       });
@@ -3133,9 +5031,10 @@ export class AppService {
         }
       }
 
-      await this.completeAutomationStep(workspacePath, paperStep, {
+      await this.completeAutomationStep(workspacePath, session, paperStep, {
         status: "completed",
         summary: paperSummary,
+        completedSideEffects: manuscriptSnapshot.manuscript ? [`manuscript:${manuscriptSnapshot.manuscript.path}`] : [],
         changedFiles: manuscriptSnapshot.manuscript ? [manuscriptSnapshot.manuscript.path] : [],
         evidence: latestRun?.id ? [latestRun.id] : []
       });
@@ -3149,12 +5048,10 @@ export class AppService {
       decision: latestDecision,
       run: latestRun
     });
-    const needsCheckpoint =
-      controller.pauseRequested ||
-      session.mode === "checkpoint" ||
-      (runFailed && (retryBudgetExhausted || requiresUserCheckpoint));
+    const pauseRequested = controller.pauseRequested || session.mode === "checkpoint";
+    const requiresReviewBranch = runFailed && (retryBudgetExhausted || requiresUserCheckpoint);
 
-    if (runFailed && !needsCheckpoint) {
+    if (runFailed && !pauseRequested && !requiresReviewBranch) {
       await this.createAutomationCheckpoint(workspacePath, session, {
         title: "Automation update",
         summary: summarizeAutomationFailureRecovery({
@@ -3187,8 +5084,102 @@ export class AppService {
       });
     }
 
-    if (needsCheckpoint) {
-      const checkpoint = await this.createAutomationCheckpoint(workspacePath, session, {
+    if (requiresReviewBranch && session.mode === "continuous") {
+      const continuation = await this.consultAutomationContinuationAdvisor(workspacePath, {
+        session,
+        reason: "failed-run",
+        latestDecision,
+        latestRun,
+        redirectInstruction,
+        runStatus,
+        runSummary,
+        runRisks,
+        runActions
+      });
+
+      if (continuation.shouldPause) {
+        await this.finalizeAutomationCycle(workspacePath, session, cycle?.id ?? builderStep.cycleId, {
+          status: "paused",
+          phase: "reporting",
+          summary:
+            continuation.decision?.summary ||
+            continuation.userMessage ||
+            runSummary ||
+            latestDecision?.summary ||
+            "The latest automation cycle finished."
+        });
+        await this.pauseAutomationWithCheckpoint(workspacePath, {
+          session,
+          title: "Automation needs review after a failed run",
+          summary:
+            continuation.decision?.summary ||
+            continuation.userMessage ||
+            runSummary ||
+            latestDecision?.summary ||
+            "The latest automation cycle finished.",
+          whatChanged: runChangedFiles,
+          evidence: runEvidence,
+          risks: [
+            ...(latestDecision?.handoff?.risks ?? []),
+            ...(continuation.decision?.handoff?.risks ?? []),
+            ...runRisks
+          ],
+          nextActions:
+            continuation.decision?.handoff?.runActions?.length ||
+            continuation.decision?.handoff?.openQuestions?.length ||
+            runActions.length ||
+            latestDecision?.handoff?.runActions.length
+              ? [
+                  ...(continuation.decision?.handoff?.runActions ?? []),
+                  ...(continuation.decision?.handoff?.openQuestions ?? []),
+                  ...(latestDecision?.handoff?.runActions ?? []),
+                  ...runActions
+                ]
+              : [continuation.decision?.summary || "Review the latest research note and decide the next move."],
+          currentStepSummary: "Waiting for your direction.",
+          budget: {
+            ...session.budget,
+            usedSteps: nextUsedSteps,
+            usedRetries: nextUsedRetries
+          }
+        });
+        controller.pauseRequested = false;
+        controller.stopRequested = false;
+        return true;
+      }
+
+      await this.continueAutomationAfterAdvisor(workspacePath, {
+        sessionId: session.id,
+        fallbackSession: session,
+        decision: continuation.decision,
+        userMessage: continuation.userMessage,
+        currentStepSummaryFallback: runFailed
+          ? `Recovering after ${latestRun?.id ?? "the latest failed cycle"}.`
+          : `Continuing after ${latestRun?.id ?? "the latest cycle"}.`,
+        budget: {
+          ...session.budget,
+          usedSteps: nextUsedSteps,
+          usedRetries: 0
+        }
+      });
+      await this.finalizeAutomationCycle(workspacePath, session, cycle?.id ?? builderStep.cycleId, {
+        status: runFailed ? "failed" : "completed",
+        phase: "reporting",
+        summary: runSummary || latestDecision?.summary || "Continuing after the latest automation cycle."
+      });
+      controller.pauseRequested = false;
+      controller.stopRequested = false;
+      return false;
+    }
+
+    if (pauseRequested) {
+      await this.finalizeAutomationCycle(workspacePath, session, cycle?.id ?? builderStep.cycleId, {
+        status: "paused",
+        phase: "reporting",
+        summary: runSummary || latestDecision?.summary || "The latest automation cycle finished."
+      });
+      await this.pauseAutomationWithCheckpoint(workspacePath, {
+        session,
         title:
           runFailed
             ? "Automation needs review after a failed run"
@@ -3206,18 +5197,12 @@ export class AppService {
         nextActions:
           runActions.length || latestDecision?.handoff?.runActions.length
             ? [
-                ...latestDecision?.handoff?.runActions ?? [],
+                ...(latestDecision?.handoff?.runActions ?? []),
                 ...runActions
               ]
             : latestDecision?.handoff?.openQuestions?.length
             ? latestDecision.handoff.openQuestions
-            : [latestDecision?.summary || "Review the latest research note and decide the next move."]
-      });
-
-      await this.store.writeAutomationSession(workspacePath, {
-        ...session,
-        status: "idle",
-        latestCheckpointId: checkpoint.id,
+            : [latestDecision?.summary || "Review the latest research note and decide the next move."],
         currentStepSummary:
           controller.pauseRequested
             ? "Stopped after finishing the current step."
@@ -3226,14 +5211,18 @@ export class AppService {
           ...session.budget,
           usedSteps: nextUsedSteps,
           usedRetries: nextUsedRetries
-        },
-        updatedAt: new Date().toISOString()
+        }
       });
       controller.pauseRequested = false;
       controller.stopRequested = false;
       return true;
     }
 
+    await this.finalizeAutomationCycle(workspacePath, session, cycle?.id ?? builderStep.cycleId, {
+      status: runFailed ? "failed" : "completed",
+      phase: "reporting",
+      summary: runSummary || latestDecision?.summary || "The latest automation cycle finished."
+    });
     await this.writeRunningAutomationSession(workspacePath, session, {
       currentStepSummary: runFailed
         ? `Recovering after ${latestRun?.id ?? "the latest failed cycle"}.`
@@ -3248,6 +5237,344 @@ export class AppService {
     return false;
   }
 
+  private async consultAutomationContinuationAdvisor(
+    workspacePath: string,
+    input: {
+      session: AutomationSessionRecord;
+      reason: "failed-run" | "runtime-budget" | "step-budget" | "controller-failure";
+      latestDecision?: DecisionRecord | null;
+      latestRun?: RunRecord | null;
+      latestCheckpoint?: AutomationCheckpointRecord | null;
+      redirectInstruction?: string;
+      runStatus?: RecordStatus;
+      runSummary?: string;
+      runRisks?: string[];
+      runActions?: string[];
+      failureMessage?: string;
+    }
+  ) {
+    const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
+    const cycle = await this.ensureAutomationCycle(workspacePath, input.session, {
+      title: "Resolve the next branch and keep automation moving",
+      objective: input.redirectInstruction?.trim() || input.session.displayObjective || input.session.objective,
+      plannerPrompt: buildAutomationContinuationAdvisorPrompt({
+        session: input.session,
+        reason: input.reason,
+        languagePreference: appSettings.autopilotPromptLanguage,
+        latestDecision: input.latestDecision,
+        latestRun: input.latestRun,
+        latestCheckpoint: input.latestCheckpoint,
+        redirectInstruction: input.redirectInstruction ?? "",
+        runStatus: input.runStatus,
+        runSummary: input.runSummary ?? "",
+        runRisks: input.runRisks ?? [],
+        runActions: input.runActions ?? [],
+        failureMessage: input.failureMessage ?? ""
+      }),
+      summary: "Resolving the next automation branch."
+    });
+    const strategizeStep = await this.createAutomationStep(workspacePath, input.session, {
+      cycleId: cycle.id,
+      kind: "strategize",
+      lane: "strategist",
+      workerMode: "async",
+      title: "Resolve the next branch and keep automation moving",
+      prompt: cycle.plannerPrompt
+    });
+    const strategistSessionSlug = buildAutomationStrategistSessionSlug(
+      workspacePath,
+      input.session,
+      cycle,
+      strategizeStep
+    );
+    const strategistDisplayPrompt = `[Autopilot] ${input.session.displayObjective ?? input.session.objective}`;
+    let strategistSnapshot: ProjectSnapshot;
+
+    await this.store.writeAutomationStep(workspacePath, {
+      ...strategizeStep,
+      resumeCursor: strategistSessionSlug,
+      startedSideEffects: [`oracle-session:${strategistSessionSlug}`],
+      updatedAt: new Date().toISOString()
+    });
+
+    this.getAutomationController(workspacePath, input.session.id).activeStrategistSlug = strategistSessionSlug;
+
+    try {
+      strategistSnapshot = await this.consultStrategist(
+        {
+          workspacePath,
+          threadId: input.session.threadId,
+          prompt: strategizeStep.prompt,
+          displayPrompt: strategistDisplayPrompt,
+          attachExplicitWorkspaceFiles: false,
+          sessionSlug: strategistSessionSlug,
+          model: "gpt-5.4-pro",
+          reasoningIntensity: "heavy"
+        },
+        {
+          strategistSessionReady: appSettings.strategistSessionReady
+        }
+      );
+    } finally {
+      this.getAutomationController(workspacePath, input.session.id).activeStrategistSlug = null;
+    }
+
+    const decision = strategistSnapshot.latestDecision ?? null;
+
+    await this.completeAutomationStep(workspacePath, input.session, strategizeStep, {
+      status: decision ? "completed" : "failed",
+      summary: decision?.summary || "The automation advisor did not return a concrete summary.",
+      resumeCursor: strategistSessionSlug,
+      completedSideEffects: decision?.id ? [`decision:${decision.id}`] : [],
+      decisionId: decision?.id,
+      changedFiles: [],
+      evidence: decision?.summary ? [decision.summary] : []
+    });
+
+    return {
+      decision,
+      userMessage: resolveAutomationAdvisorUserMessage(
+        input.session,
+        decision,
+        buildAutomationAdvisorFallbackMessage(input.session, input.reason)
+      ),
+      shouldPause: shouldRequireAutomationCheckpoint({
+        decision,
+        run: null
+      })
+    };
+  }
+
+  private async continueAutomationAfterAdvisor(
+    workspacePath: string,
+    input: {
+      sessionId: string;
+      fallbackSession: AutomationSessionRecord;
+      decision: DecisionRecord | null;
+      userMessage: string;
+      currentStepSummaryFallback: string;
+      budget?: AutomationSessionRecord["budget"];
+      startedAt?: string;
+    }
+  ) {
+    const session =
+      (await this.store.readAutomationSession(workspacePath, input.sessionId).catch(() => null)) ??
+      input.fallbackSession;
+    const currentStepSummary =
+      summarizeAutomationAdvisorCurrentStep(input.decision) || input.currentStepSummaryFallback;
+
+    await this.writeRunningAutomationSession(workspacePath, session, {
+      latestCheckpointId: undefined,
+      currentStepSummary,
+      budget: input.budget ?? session.budget,
+      startedAt: input.startedAt ?? session.startedAt
+    });
+
+    if (input.userMessage.trim()) {
+      await this.appendAutomationStatusEntry(workspacePath, {
+        session,
+        body: input.userMessage
+      });
+    }
+
+    await this.store.updateSessionSummary(workspacePath);
+  }
+
+  private async pauseAutomationWithCheckpoint(
+    workspacePath: string,
+    input: {
+      session: AutomationSessionRecord;
+      title: string;
+      summary: string;
+      whatChanged: string[];
+      evidence: string[];
+      risks: string[];
+      nextActions: string[];
+      currentStepSummary: string;
+      stopReason?: string;
+      budget?: AutomationSessionRecord["budget"];
+    }
+  ) {
+    const checkpoint = await this.createAutomationCheckpoint(workspacePath, input.session, {
+      title: input.title,
+      summary: input.summary,
+      whatChanged: input.whatChanged,
+      evidence: input.evidence,
+      risks: input.risks,
+      nextActions: input.nextActions
+    });
+    await this.finalizeAutomationCycle(workspacePath, input.session, input.session.activeCycleId, {
+      status: "paused",
+      phase: "reporting",
+      summary: input.summary
+    });
+
+    await this.store.writeAutomationSession(workspacePath, {
+      ...input.session,
+      status: "idle",
+      activeCycleId: undefined,
+      activeLaneStepIds: [],
+      latestCheckpointId: checkpoint.id,
+      currentStepSummary: input.currentStepSummary,
+      stopReason: input.stopReason,
+      budget: input.budget ?? input.session.budget,
+      endedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    await this.appendAutomationStatusEntry(workspacePath, {
+      session: input.session,
+      checkpoint,
+      cycleId: input.session.activeCycleId,
+      body: buildAutomationCheckpointConversationMessage({
+        session: input.session,
+        checkpoint
+      })
+    });
+    await this.store.updateSessionSummary(workspacePath);
+    return checkpoint;
+  }
+
+  private async waitForRecoveredStrategistDecision(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    strategistStep: AutomationStepRecord,
+    controller: AutomationControllerState,
+    strategistSlug: string,
+    oracleProcess: ActiveOracleProcess
+  ) {
+    const artifacts = deriveDecisionArtifactsFromOutputPath(oracleProcess.outputPath);
+
+    if (!artifacts) {
+      return null;
+    }
+
+    while (true) {
+      if (controller.stopRequested) {
+        await this.oracleRunner.terminateSession?.(strategistSlug).catch(() => undefined);
+        return null;
+      }
+
+      const strategistOutput = await readTextFile(artifacts.outputPath).catch(() => "");
+      const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
+
+      if (strategistOutput.trim() && !strategistOutputIssue) {
+        const existingDecision = await this.store.readDecision(workspacePath, artifacts.id).catch(() => null);
+
+        if (existingDecision) {
+          return existingDecision;
+        }
+
+        const snapshot = await this.store.getSnapshot(workspacePath);
+        const activeThread =
+          snapshot.threads.find((thread) => thread.id === session.threadId) ?? snapshot.activeThread;
+
+        if (!activeThread) {
+          throw new Error("No active thread is available.");
+        }
+
+        const strategistModel = oracleProcess.model ?? snapshot.project?.oracleModel ?? "gpt-5.4";
+        const decision = this.buildDecisionRecord({
+          id: artifacts.id,
+          threadId: session.threadId,
+          prompt: strategistStep.prompt,
+          displayPrompt: `[Autopilot] ${session.displayObjective ?? session.objective}`,
+          inputFiles: oracleProcess.files,
+          model: strategistModel,
+          rawOutput: strategistOutput,
+          command: oracleProcess.command,
+          stdoutPath: artifacts.stdoutPath,
+          stderrPath: artifacts.stderrPath,
+          outputPath: artifacts.outputPath,
+          contextPackPath: undefined,
+          startedAt: strategistStep.createdAt,
+          exitCode: 0
+        });
+
+        await this.store.writeDecision(workspacePath, decision);
+        await this.store.appendPromptLog(workspacePath, {
+          kind: "strategist.response",
+          threadId: session.threadId,
+          decisionId: decision.id,
+          model: strategistModel,
+          oracleSessionSlug: strategistSlug,
+          summary: decision.summary,
+          rationale: decision.rationale,
+          rawOutput: decision.rawOutput
+        });
+        await this.syncThreadFromArtifacts(workspacePath, activeThread, {
+          prompt: session.displayObjective ?? session.objective,
+          summary: handoffUserMessage(decision.handoff) || decision.summary
+        });
+        await this.store.appendActivity(workspacePath, `${decision.id} saved as research context`);
+        await this.store.updateSessionSummary(workspacePath);
+        return decision;
+      }
+
+      if (!(await isProcessAlive(oracleProcess.pid))) {
+        break;
+      }
+
+      await sleep(900);
+    }
+
+    const strategistOutput = await readTextFile(artifacts.outputPath).catch(() => "");
+    const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
+
+    if (!strategistOutput.trim() || strategistOutputIssue) {
+      return null;
+    }
+
+    const existingDecision = await this.store.readDecision(workspacePath, artifacts.id).catch(() => null);
+    if (existingDecision) {
+      return existingDecision;
+    }
+
+    const snapshot = await this.store.getSnapshot(workspacePath);
+    const activeThread =
+      snapshot.threads.find((thread) => thread.id === session.threadId) ?? snapshot.activeThread;
+
+    if (!activeThread) {
+      throw new Error("No active thread is available.");
+    }
+
+    const strategistModel = oracleProcess.model ?? snapshot.project?.oracleModel ?? "gpt-5.4";
+    const decision = this.buildDecisionRecord({
+      id: artifacts.id,
+      threadId: session.threadId,
+      prompt: strategistStep.prompt,
+      displayPrompt: `[Autopilot] ${session.displayObjective ?? session.objective}`,
+      inputFiles: oracleProcess.files,
+      model: strategistModel,
+      rawOutput: strategistOutput,
+      command: oracleProcess.command,
+      stdoutPath: artifacts.stdoutPath,
+      stderrPath: artifacts.stderrPath,
+      outputPath: artifacts.outputPath,
+      contextPackPath: undefined,
+      startedAt: strategistStep.createdAt,
+      exitCode: 0
+    });
+
+    await this.store.writeDecision(workspacePath, decision);
+    await this.store.appendPromptLog(workspacePath, {
+      kind: "strategist.response",
+      threadId: session.threadId,
+      decisionId: decision.id,
+      model: strategistModel,
+      oracleSessionSlug: strategistSlug,
+      summary: decision.summary,
+      rationale: decision.rationale,
+      rawOutput: decision.rawOutput
+    });
+    await this.syncThreadFromArtifacts(workspacePath, activeThread, {
+      prompt: session.displayObjective ?? session.objective,
+      summary: handoffUserMessage(decision.handoff) || decision.summary
+    });
+    await this.store.appendActivity(workspacePath, `${decision.id} saved as research context`);
+    await this.store.updateSessionSummary(workspacePath);
+    return decision;
+  }
+
   private async runAutomationLoop(workspacePath: string, sessionId: string) {
     const controller = this.getAutomationController(workspacePath, sessionId);
 
@@ -3256,6 +5583,7 @@ export class AppService {
     }
 
     controller.running = true;
+    let shouldRestartAfterFailure = false;
 
     try {
       while (true) {
@@ -3272,9 +5600,16 @@ export class AppService {
               .catch(() => undefined);
             controller.activeStrategistSlug = null;
           }
+          await this.finalizeAutomationCycle(workspacePath, session, session.activeCycleId, {
+            status: "failed",
+            phase: "reporting",
+            summary: "Interrupted by the user."
+          });
           await this.store.writeAutomationSession(workspacePath, {
             ...session,
             status: "idle",
+            activeCycleId: undefined,
+            activeLaneStepIds: [],
             latestCheckpointId: undefined,
             currentStepSummary: "Automation stopped by the user.",
             stopReason: "Interrupted by the user.",
@@ -3298,48 +5633,157 @@ export class AppService {
           continue;
         }
 
+        const resumedStrategistStep = await this.resumeInFlightAutomationStrategistStep(
+          workspacePath,
+          session,
+          controller
+        );
+
+        if (resumedStrategistStep.handled) {
+          if (resumedStrategistStep.shouldStopLoop) {
+            return;
+          }
+
+          continue;
+        }
+
+        const snapshot = await this.store.getSnapshot(workspacePath);
+
         if (
           session.startedAt &&
           Date.now() - new Date(session.startedAt).getTime() >
             session.budget.maxRuntimeMinutes * 60 * 1000
         ) {
-          const checkpoint = await this.createAutomationCheckpoint(workspacePath, session, {
+          if (session.mode === "continuous") {
+            const runtimeContinuation = await this.consultAutomationContinuationAdvisor(
+              workspacePath,
+              {
+                session,
+                reason: "runtime-budget",
+                latestDecision: snapshot.latestDecision,
+                latestRun: snapshot.latestRun,
+                latestCheckpoint: snapshot.latestAutomationCheckpoint
+              }
+            );
+
+            if (runtimeContinuation.shouldPause) {
+              await this.pauseAutomationWithCheckpoint(workspacePath, {
+                session,
+                title: "Checkpoint ready",
+                summary:
+                  runtimeContinuation.decision?.summary ||
+                  runtimeContinuation.userMessage ||
+                  "Automation paused because it hit the configured runtime limit.",
+                whatChanged: [],
+                evidence: [],
+                risks: runtimeContinuation.decision?.handoff?.risks ?? ["Runtime budget exhausted."],
+                nextActions:
+                  runtimeContinuation.decision?.handoff?.runActions?.length ||
+                  runtimeContinuation.decision?.handoff?.openQuestions?.length
+                    ? [
+                        ...(runtimeContinuation.decision?.handoff?.runActions ?? []),
+                        ...(runtimeContinuation.decision?.handoff?.openQuestions ?? [])
+                      ]
+                    : ["Review progress and resume with a fresh budget if needed."],
+                currentStepSummary: "Waiting for your direction.",
+                stopReason:
+                  runtimeContinuation.userMessage ||
+                  runtimeContinuation.decision?.summary ||
+                  "Runtime budget reached."
+              });
+              return;
+            }
+
+            await this.continueAutomationAfterAdvisor(workspacePath, {
+              sessionId: session.id,
+              fallbackSession: session,
+              decision: runtimeContinuation.decision,
+              userMessage: runtimeContinuation.userMessage,
+              currentStepSummaryFallback: "Continuing after refreshing the runtime budget window.",
+              startedAt: new Date().toISOString()
+            });
+            continue;
+          }
+
+          await this.pauseAutomationWithCheckpoint(workspacePath, {
+            session,
             title: "Automation time budget reached",
             summary: "Automation paused because it hit the configured runtime limit.",
             whatChanged: [],
             evidence: [],
             risks: ["Runtime budget exhausted."],
-            nextActions: ["Review progress and resume with a fresh budget if needed."]
-          });
-
-          await this.store.writeAutomationSession(workspacePath, {
-            ...session,
-            status: "idle",
-            latestCheckpointId: checkpoint.id,
+            nextActions: ["Review progress and resume with a fresh budget if needed."],
             currentStepSummary: "Runtime budget reached. Waiting for your direction.",
-            stopReason: "Runtime budget reached.",
-            updatedAt: new Date().toISOString()
+            stopReason: "Runtime budget reached."
           });
           return;
         }
 
         if (session.budget.usedSteps >= session.budget.maxSteps) {
-          const checkpoint = await this.createAutomationCheckpoint(workspacePath, session, {
+          if (session.mode === "continuous") {
+            const stepContinuation = await this.consultAutomationContinuationAdvisor(
+              workspacePath,
+              {
+                session,
+                reason: "step-budget",
+                latestDecision: snapshot.latestDecision,
+                latestRun: snapshot.latestRun,
+                latestCheckpoint: snapshot.latestAutomationCheckpoint
+              }
+            );
+
+            if (stepContinuation.shouldPause) {
+              await this.pauseAutomationWithCheckpoint(workspacePath, {
+                session,
+                title: "Checkpoint ready",
+                summary:
+                  stepContinuation.decision?.summary ||
+                  stepContinuation.userMessage ||
+                  "Automation paused because it used the configured step budget.",
+                whatChanged: [],
+                evidence: [],
+                risks: stepContinuation.decision?.handoff?.risks ?? ["Step budget exhausted."],
+                nextActions:
+                  stepContinuation.decision?.handoff?.runActions?.length ||
+                  stepContinuation.decision?.handoff?.openQuestions?.length
+                    ? [
+                        ...(stepContinuation.decision?.handoff?.runActions ?? []),
+                        ...(stepContinuation.decision?.handoff?.openQuestions ?? [])
+                      ]
+                    : ["Review progress and resume if you want a longer run."],
+                currentStepSummary: "Waiting for your direction.",
+                stopReason:
+                  stepContinuation.userMessage ||
+                  stepContinuation.decision?.summary ||
+                  "Step budget reached."
+              });
+              return;
+            }
+
+            await this.continueAutomationAfterAdvisor(workspacePath, {
+              sessionId: session.id,
+              fallbackSession: session,
+              decision: stepContinuation.decision,
+              userMessage: stepContinuation.userMessage,
+              currentStepSummaryFallback: "Continuing with a fresh step budget window.",
+              budget: {
+                ...session.budget,
+                usedSteps: 0
+              }
+            });
+            continue;
+          }
+
+          await this.pauseAutomationWithCheckpoint(workspacePath, {
+            session,
             title: "Automation step budget reached",
             summary: "Automation paused because it used the configured step budget.",
             whatChanged: [],
             evidence: [],
             risks: ["Step budget exhausted."],
-            nextActions: ["Review progress and resume if you want a longer run."]
-          });
-
-          await this.store.writeAutomationSession(workspacePath, {
-            ...session,
-            status: "idle",
-            latestCheckpointId: checkpoint.id,
+            nextActions: ["Review progress and resume if you want a longer run."],
             currentStepSummary: "Step budget reached. Waiting for your direction.",
-            stopReason: "Step budget reached.",
-            updatedAt: new Date().toISOString()
+            stopReason: "Step budget reached."
           });
           return;
         }
@@ -3347,12 +5791,39 @@ export class AppService {
         const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
         const redirectInstruction =
           controller.redirectInstruction.trim() || session.queuedUserInstruction?.trim() || "";
-        const snapshot = await this.store.getSnapshot(workspacePath);
+
+        const orchestratedCycle = await this.runAutomationOrchestratorCycle(
+          workspacePath,
+          session,
+          controller,
+          snapshot,
+          redirectInstruction,
+          appSettings
+        );
+
+        if (orchestratedCycle.handled) {
+          if (orchestratedCycle.shouldStopLoop) {
+            return;
+          }
+
+          continue;
+        }
+
+        const legacyCycle = await this.ensureAutomationCycle(workspacePath, session, {
+          title: "Fallback legacy automation cycle",
+          objective: redirectInstruction || session.displayObjective || session.objective,
+          plannerPrompt: redirectInstruction || session.displayObjective || session.objective,
+          summary: "Continuing with the fallback automation cycle."
+        });
+
         const shouldConsultStrategist =
-          session.budget.usedSteps === 0 ||
           shouldReplanFromRedirectInstruction(redirectInstruction) ||
           !snapshot.latestDecision ||
-          shouldReplanAfterFailedRun(snapshot.latestRun, snapshot.latestAutomationCheckpoint);
+          shouldReplanAfterFailedRun(
+            snapshot.latestRun,
+            snapshot.latestAutomationCheckpoint,
+            snapshot.latestDecision
+          );
         let latestDecision = snapshot.latestDecision;
 
         if (shouldConsultStrategist) {
@@ -3361,11 +5832,8 @@ export class AppService {
             redirectInstruction,
             appSettings.autopilotPromptLanguage,
             snapshot.latestRun,
-            snapshot.latestAutomationCheckpoint
-          );
-          const strategistSessionSlug = buildStrategistOracleSessionId(
-            workspacePath,
-            session.threadId
+            snapshot.latestAutomationCheckpoint,
+            snapshot.latestDecision
           );
           const strategistDisplayPrompt =
             session.budget.usedSteps === 0
@@ -3373,12 +5841,27 @@ export class AppService {
               : redirectInstruction
               ? `[Autopilot] ${redirectInstruction}`
               : `[Autopilot] ${session.displayObjective ?? session.objective}`;
-          const strategizeStep = await this.createAutomationStep(workspacePath, session, {
+          let strategizeStep = await this.createAutomationStep(workspacePath, session, {
+            cycleId: legacyCycle.id,
             kind: "strategize",
             lane: "strategist",
+            workerMode: "async",
             title: "Plan the next bounded research step",
             prompt: strategizePrompt
           });
+          const strategistSessionSlug = buildAutomationStrategistSessionSlug(
+            workspacePath,
+            session,
+            legacyCycle,
+            strategizeStep
+          );
+          strategizeStep = {
+            ...strategizeStep,
+            resumeCursor: strategistSessionSlug,
+            startedSideEffects: [`oracle-session:${strategistSessionSlug}`],
+            updatedAt: new Date().toISOString()
+          };
+          await this.store.writeAutomationStep(workspacePath, strategizeStep);
           controller.activeStrategistSlug = strategistSessionSlug;
           let strategistSnapshot: ProjectSnapshot;
 
@@ -3389,7 +5872,8 @@ export class AppService {
                 threadId: session.threadId,
                 prompt: strategizePrompt,
                 displayPrompt: strategistDisplayPrompt,
-                attachExplicitWorkspaceFiles: false
+                attachExplicitWorkspaceFiles: false,
+                sessionSlug: strategistSessionSlug
               },
               {
                 strategistSessionReady: appSettings.strategistSessionReady
@@ -3400,10 +5884,12 @@ export class AppService {
           }
           latestDecision = strategistSnapshot.latestDecision;
 
-          await this.completeAutomationStep(workspacePath, strategizeStep, {
+          await this.completeAutomationStep(workspacePath, session, strategizeStep, {
             status: "completed",
             summary:
               latestDecision?.summary || "The strategist did not return a concrete summary.",
+            resumeCursor: strategistSessionSlug,
+            completedSideEffects: latestDecision?.id ? [`decision:${latestDecision.id}`] : [],
             decisionId: latestDecision?.id,
             changedFiles: [],
             evidence: latestDecision?.summary ? [latestDecision.summary] : []
@@ -3447,9 +5933,11 @@ export class AppService {
           latestDecision,
           appSettings.autopilotPromptLanguage
         );
-        const builderStep = await this.createAutomationStep(workspacePath, session, {
+        let builderStep = await this.createAutomationStep(workspacePath, session, {
+          cycleId: legacyCycle.id,
           kind: inferAutomationBuilderStepKind(builderPrompt),
           lane: "builder",
+          workerMode: "async",
           title: "Let Codex choose and execute the next bounded step",
           prompt: builderPrompt
         });
@@ -3469,6 +5957,16 @@ export class AppService {
             displayPrompt: `[autopilot] ${builderDisplayPrompt}`
           });
           const runId = builderSnapshot.latestRun?.id ?? null;
+          if (runId) {
+            builderStep = {
+              ...builderStep,
+              runId,
+              resumeCursor: runId,
+              startedSideEffects: [`run:${runId}`],
+              updatedAt: new Date().toISOString()
+            };
+            await this.store.writeAutomationStep(workspacePath, builderStep);
+          }
           controller.activeRunId = runId;
           const completedSnapshot = runId
             ? await this.waitForAutomationRun(workspacePath, runId, controller)
@@ -3493,6 +5991,7 @@ export class AppService {
 
         const shouldStopLoop = await this.applyAutomationBuilderOutcome(workspacePath, {
           session,
+          cycle: legacyCycle,
           controller,
           builderStep,
           latestDecision,
@@ -3517,29 +6016,49 @@ export class AppService {
 
       if (session) {
         await this.failActiveAutomationStep(workspacePath, session, failureMessage);
-        const checkpoint = await this.createAutomationCheckpoint(workspacePath, session, {
+        if (session.mode === "continuous" && !isStrategistBlockedFailure(failureMessage)) {
+          const snapshot = await this.store.getSnapshot(workspacePath).catch(() => null);
+          const continuation = await this.consultAutomationContinuationAdvisor(workspacePath, {
+            session,
+            reason: "controller-failure",
+            latestDecision: snapshot?.latestDecision ?? null,
+            latestRun: snapshot?.latestRun ?? null,
+            latestCheckpoint: snapshot?.latestAutomationCheckpoint ?? null,
+            failureMessage
+          }).catch(() => null);
+
+          if (continuation && !continuation.shouldPause) {
+            await this.continueAutomationAfterAdvisor(workspacePath, {
+              sessionId,
+              fallbackSession: session,
+              decision: continuation.decision,
+              userMessage: continuation.userMessage,
+              currentStepSummaryFallback: "Recovering after an automation controller issue."
+            });
+            shouldRestartAfterFailure = true;
+            return;
+          }
+        }
+
+        await this.pauseAutomationWithCheckpoint(workspacePath, {
+          session,
           title: failureDetails.title,
           summary: failureDetails.summary,
           whatChanged: [],
           evidence: [],
           risks: [failureMessage],
-          nextActions: failureDetails.nextActions
-        });
-
-        await this.store.writeAutomationSession(workspacePath, {
-          ...session,
-          status: "idle",
-          latestCheckpointId: checkpoint.id,
+          nextActions: failureDetails.nextActions,
           currentStepSummary: failureDetails.currentStepSummary,
-          stopReason: failureMessage,
-          endedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+          stopReason: failureMessage
         });
       }
     } finally {
       controller.running = false;
       controller.activeRunId = null;
       controller.activeStrategistSlug = null;
+      if (shouldRestartAfterFailure) {
+        void this.runAutomationLoop(workspacePath, sessionId);
+      }
     }
   }
 
@@ -3633,24 +6152,35 @@ export class AppService {
     workspacePath: string,
     session: AutomationSessionRecord,
     input: {
+      cycleId?: string;
       kind: AutomationStepKind;
       lane: AutomationStepRecord["lane"];
+      workerMode?: AutomationWorkerMode;
       title: string;
       prompt: string;
+      resumeCursor?: string;
     }
   ) {
+    const currentSession =
+      (await this.store.readAutomationSession(workspacePath, session.id).catch(() => null)) ?? session;
     const allocation = await this.store.allocateAutomationStep(workspacePath);
     const now = new Date().toISOString();
     const step: AutomationStepRecord = {
       id: allocation.id,
-      sessionId: session.id,
-      threadId: session.threadId,
+      sessionId: currentSession.id,
+      threadId: currentSession.threadId,
+      cycleId: input.cycleId,
       kind: input.kind,
       lane: input.lane,
+      workerMode: input.workerMode,
       title: input.title,
       prompt: input.prompt,
       status: "running",
       summary: "Step started.",
+      idempotencyKey: this.buildAutomationStepIdempotencyKey(currentSession, input),
+      resumeCursor: input.resumeCursor,
+      startedSideEffects: [],
+      completedSideEffects: [],
       changedFiles: [],
       evidence: [],
       checkpointRequired: false,
@@ -3659,7 +6189,31 @@ export class AppService {
     };
 
     await this.store.writeAutomationStep(workspacePath, step);
-    await this.writeRunningAutomationSession(workspacePath, session, {
+    await this.updateAutomationCycleLaneState(workspacePath, input.cycleId, input.lane, {
+      title: input.title,
+      status: "running",
+      workerMode: input.workerMode ?? "async",
+      summary: input.title,
+      stepId: step.id,
+      idempotencyKey: step.idempotencyKey,
+      resumeCursor: input.resumeCursor,
+      updatedAt: now
+    });
+    if (input.cycleId) {
+      const currentCycle = await this.readAutomationCycle(workspacePath, input.cycleId);
+      if (currentCycle) {
+        await this.writeAutomationCycle(workspacePath, currentCycle, {
+          activeLaneStepIds: Array.from(new Set([...(currentCycle.activeLaneStepIds ?? []), step.id])),
+          completedLaneStepIds: (currentCycle.completedLaneStepIds ?? []).filter((entry) => entry !== step.id),
+          phase: input.lane === "controller" ? "planning" : "workers",
+          summary: input.title
+        });
+      }
+    }
+    await this.writeRunningAutomationSession(workspacePath, currentSession, {
+      latestCycleId: input.cycleId ?? currentSession.latestCycleId,
+      activeCycleId: input.cycleId ?? currentSession.activeCycleId,
+      activeLaneStepIds: Array.from(new Set([...(currentSession.activeLaneStepIds ?? []), step.id])),
       latestStepId: step.id,
       currentStepSummary: input.title,
       updatedAt: now
@@ -3670,27 +6224,73 @@ export class AppService {
 
   private async completeAutomationStep(
     workspacePath: string,
+    session: AutomationSessionRecord,
     step: AutomationStepRecord,
     input: {
       status: RecordStatus;
       summary: string;
       decisionId?: string;
       runId?: string;
+      resumeCursor?: string;
+      startedSideEffects?: string[];
+      completedSideEffects?: string[];
       changedFiles: string[];
       evidence: string[];
     }
   ) {
-    await this.store.writeAutomationStep(workspacePath, {
+    const currentSession =
+      (await this.store.readAutomationSession(workspacePath, session.id).catch(() => null)) ?? session;
+    const now = new Date().toISOString();
+    const nextStep: AutomationStepRecord = {
       ...step,
       status: input.status,
       summary: input.summary,
+      resumeCursor: input.resumeCursor ?? step.resumeCursor,
+      startedSideEffects: input.startedSideEffects ?? step.startedSideEffects ?? [],
+      completedSideEffects: input.completedSideEffects ?? step.completedSideEffects ?? [],
       decisionId: input.decisionId,
       runId: input.runId,
       changedFiles: input.changedFiles,
       evidence: input.evidence,
       checkpointRequired: input.status !== "completed",
-      updatedAt: new Date().toISOString(),
-      completedAt: new Date().toISOString()
+      updatedAt: now,
+      completedAt: now
+    };
+
+    await this.store.writeAutomationStep(workspacePath, nextStep);
+    await this.updateAutomationCycleLaneState(workspacePath, step.cycleId, step.lane, {
+      status: input.status,
+      summary: input.summary,
+      stepId: step.id,
+      resumeCursor: nextStep.resumeCursor,
+      idempotencyKey: nextStep.idempotencyKey,
+      updatedAt: now
+    });
+    if (step.cycleId) {
+      const currentCycle = await this.readAutomationCycle(workspacePath, step.cycleId);
+      if (currentCycle) {
+        await this.writeAutomationCycle(workspacePath, currentCycle, {
+          activeLaneStepIds: (currentCycle.activeLaneStepIds ?? []).filter((entry) => entry !== step.id),
+          completedLaneStepIds:
+            input.status === "completed"
+              ? Array.from(new Set([...(currentCycle.completedLaneStepIds ?? []), step.id]))
+              : currentCycle.completedLaneStepIds ?? [],
+          summary: input.summary
+        });
+      }
+    }
+    const nextActiveLaneStepIds = (currentSession.activeLaneStepIds ?? []).filter((entry) => entry !== step.id);
+    await this.writeRunningAutomationSession(workspacePath, currentSession, {
+      activeLaneStepIds: nextActiveLaneStepIds,
+      latestStepId:
+        currentSession.latestStepId === step.id
+          ? nextActiveLaneStepIds.at(-1)
+          : currentSession.latestStepId,
+      activeCycleId:
+        currentSession.activeCycleId === step.cycleId && nextActiveLaneStepIds.length === 0
+          ? undefined
+          : currentSession.activeCycleId,
+      updatedAt: now
     });
   }
 
@@ -3742,20 +6342,21 @@ export class AppService {
     session: AutomationSessionRecord,
     failureSummary: string
   ) {
-    const stepId = session.latestStepId;
-
-    if (!stepId) {
-      return;
-    }
-
     const steps = await this.store.listAutomationSteps(workspacePath);
-    const step = steps.find((record) => record.id === stepId);
+    const activeIds = new Set(session.activeLaneStepIds ?? []);
+    const step =
+      steps.find((record) => activeIds.has(record.id) && record.status === "running") ??
+      steps.find((record) => record.id === session.latestStepId && record.status === "running") ??
+      steps
+        .filter((record) => record.sessionId === session.id && record.status === "running")
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ??
+      null;
 
     if (!step || step.status !== "running") {
       return;
     }
 
-    await this.completeAutomationStep(workspacePath, step, {
+    await this.completeAutomationStep(workspacePath, session, step, {
       status: "failed",
       summary: failureSummary || "The automation step failed.",
       changedFiles: [],
@@ -3765,16 +6366,116 @@ export class AppService {
 
   private setChatProgress(
     workspacePath: string,
-    input: Omit<ActiveChatProgress, "updatedAt">
+    input: Omit<ActiveChatProgress, "updatedAt" | "operationId"> & { operationId?: string }
   ) {
-    this.activeChatProgressByWorkspace.set(workspacePath, {
+    const operationId = input.operationId?.trim() || input.lane;
+
+    this.activeChatProgressByWorkspace.set(this.chatProgressKey(workspacePath, input.threadId, operationId), {
       ...input,
+      operationId,
       updatedAt: new Date().toISOString()
     });
   }
 
-  private clearChatProgress(workspacePath: string) {
-    this.activeChatProgressByWorkspace.delete(workspacePath);
+  private clearChatProgress(workspacePath: string, threadId?: string, operationId?: string) {
+    if (threadId?.trim()) {
+      if (operationId?.trim()) {
+        this.activeChatProgressByWorkspace.delete(
+          this.chatProgressKey(workspacePath, threadId, operationId)
+        );
+        return;
+      }
+
+      const threadPrefix = `${workspacePath}::${threadId}::`;
+
+      for (const key of this.activeChatProgressByWorkspace.keys()) {
+        if (key.startsWith(threadPrefix)) {
+          this.activeChatProgressByWorkspace.delete(key);
+        }
+      }
+      return;
+    }
+
+    const prefix = `${workspacePath}::`;
+
+    for (const key of this.activeChatProgressByWorkspace.keys()) {
+      if (key === workspacePath || key.startsWith(prefix)) {
+        this.activeChatProgressByWorkspace.delete(key);
+      }
+    }
+  }
+
+  private listChatProgressEntries(workspacePath: string, threadId?: string) {
+    if (threadId?.trim()) {
+      const threadPrefix = `${workspacePath}::${threadId}::`;
+      return Array.from(this.activeChatProgressByWorkspace.entries())
+        .filter(([key]) => key.startsWith(threadPrefix))
+        .map(([, value]) => value)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    }
+
+    const prefix = `${workspacePath}::`;
+    const candidates = Array.from(this.activeChatProgressByWorkspace.entries())
+      .filter(([key]) => key === workspacePath || key.startsWith(prefix))
+      .map(([, value]) => value)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+    const latestThreadId = candidates[0]?.threadId;
+
+    if (!latestThreadId) {
+      return [];
+    }
+
+    return candidates.filter((candidate) => candidate.threadId === latestThreadId);
+  }
+
+  private getLatestChatProgressEntry(
+    workspacePath: string,
+    threadId?: string,
+    lane?: ActiveChatProgress["lane"]
+  ) {
+    const candidates = this.listChatProgressEntries(workspacePath, threadId);
+
+    if (!lane) {
+      return candidates[0] ?? null;
+    }
+
+    return candidates.find((candidate) => candidate.lane === lane) ?? null;
+  }
+
+  private rememberObservedChatProgress(
+    workspacePath: string,
+    current: ActiveChatProgress,
+    inspection: ChatProgressInspection
+  ) {
+    if (!hasMeaningfulChatProgressNarration(inspection.progressSummary, inspection.progressDetails)) {
+      return;
+    }
+
+    const key = this.chatProgressKey(workspacePath, current.threadId, current.operationId);
+    const nextProgress: ActiveChatProgress = {
+      ...current,
+      progressSummary: inspection.progressSummary,
+      progressDetails: inspection.progressDetails,
+      activeCommand: inspection.activeCommand,
+      updatedAt: inspection.updatedAt
+    };
+
+    if (
+      current.progressSummary === nextProgress.progressSummary &&
+      current.activeCommand === nextProgress.activeCommand &&
+      current.updatedAt === nextProgress.updatedAt &&
+      current.progressDetails.length === nextProgress.progressDetails.length &&
+      current.progressDetails.every((detail, index) => detail === nextProgress.progressDetails[index])
+    ) {
+      return;
+    }
+
+    this.activeChatProgressByWorkspace.set(key, nextProgress);
+  }
+
+  private chatProgressKey(workspacePath: string, threadId: string, operationId: string) {
+    return `${workspacePath}::${threadId}::${operationId}`;
   }
 }
 
@@ -3822,7 +6523,7 @@ function looksLikeAutomationStopInstruction(instruction: string) {
 }
 
 function looksLikeAutomationQuestion(instruction: string) {
-  const normalized = instruction.trim().toLowerCase();
+  const normalized = instruction.trim().toLowerCase().replace(/\s+/g, " ");
 
   if (!normalized) {
     return false;
@@ -3832,8 +6533,287 @@ function looksLikeAutomationQuestion(instruction: string) {
     return true;
   }
 
+  if (
+    /(?:지금|현재|방금|어디까지|무엇|뭐|뭘|뭐 하고|무슨 상태|한 줄).*(?:알려줘|말해줘|설명해줘|정리해줘)/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
   return /(?:progress|status|update|report|summary|what|why|how|which|where|when|did|does|is it|are we|so far|진행사항|현황|상태|보고|업데이트|요약|왜|어떻게|뭐야|뭐임|뭔가|맞아|맞음|좋아졌|기준삼아|기준으로|된 거|된거|어느 쪽|무슨 근거|무슨 기준|설명해|정리해|비교해)/i.test(
     normalized
+  );
+}
+
+function looksLikeExplicitAutomationCheckpointPreference(instruction: string) {
+  const normalized = instruction.trim().toLowerCase().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /(?:매 단계|단계마다|한 단계마다|스텝마다|매 스텝).*(?:체크포인트|checkpoint|승인|확인|멈춰)/i.test(
+      normalized
+    ) ||
+    /(?:체크포인트|checkpoint)(?:\s*모드|\s*mode)?\s*(?:로|at|for)?\s*(?:멈춰|멈추|stop|pause|review|승인|확인|before continuing|before the next step)/i.test(
+      normalized
+    ) ||
+    /(?:승인받고|승인 받고|확인받고|확인 받고|멈춰서 물어|멈춘 뒤 물어|pause for review|stop for review|ask me before continuing|approval after each step)/i.test(
+      normalized
+    )
+  );
+}
+
+function resolveAutomationConversationMode(
+  requestedMode: AutomationMode | undefined,
+  instruction: string
+): AutomationMode {
+  if (requestedMode !== "checkpoint") {
+    return requestedMode ?? "continuous";
+  }
+
+  return looksLikeExplicitAutomationCheckpointPreference(instruction) ? "checkpoint" : "continuous";
+}
+
+function sanitizeAutomationConversationSummary(summary: string) {
+  const trimmed = summary.trim();
+
+  if (!trimmed) {
+    return "";
+  }
+
+  if (
+    /builder run (?:stalled without producing|ended without writing) a final answer|automation is still running|waiting for your direction|latest strategist result:|latest builder result:/i.test(
+      trimmed
+    )
+  ) {
+    return "";
+  }
+
+  return trimmed.replace(/\s+/g, " ").trim();
+}
+
+function summarizeAutomationNextAction(nextActions: string[]) {
+  return nextActions
+    .map((action) => action.trim())
+    .find(Boolean) ?? "";
+}
+
+function buildAutomationCheckpointConversationMessage(input: {
+  session: AutomationSessionRecord;
+  checkpoint: AutomationCheckpointRecord;
+}) {
+  const { session, checkpoint } = input;
+  const language = resolveAutomationUiLanguage([
+    session.displayObjective ?? "",
+    session.objective,
+    checkpoint.summary,
+    checkpoint.title
+  ]);
+  const summary = sanitizeAutomationConversationSummary(checkpoint.summary);
+  const nextAction = summarizeAutomationNextAction(checkpoint.nextActions);
+
+  if (language === "ko") {
+    if (/^automation paused after the latest step$/i.test(checkpoint.title)) {
+      return [
+        "요청대로 현재 단계까지만 마치고 여기서 멈췄습니다.",
+        summary ? `마지막 결과는 ${summary}` : "",
+        nextAction ? `다음으로는 ${nextAction}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    if (/^checkpoint ready$/i.test(checkpoint.title)) {
+      return [
+        "한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다.",
+        summary ? `마지막 결과는 ${summary}` : "",
+        nextAction ? `다음으로는 ${nextAction}` : "",
+        "이 지점은 사용자 판단이 필요한 분기라고 감지돼 자동으로 멈췄습니다."
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    if (/needs review after a failed run|automation failed/i.test(checkpoint.title)) {
+      return [
+        "직전 단계가 실패해서 여기서 멈췄습니다.",
+        summary ? `현재까지 정리된 요약은 ${summary}` : "",
+        nextAction ? `복구 후보는 ${nextAction}` : "",
+        "방향을 정하면 그 기준으로 바로 이어서 진행하겠습니다."
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    if (/time budget reached/i.test(checkpoint.title)) {
+      return [
+        "설정된 실행 시간 한도에 닿아서 여기서 잠시 멈췄습니다.",
+        summary ? `현재까지 요약은 ${summary}` : "",
+        nextAction ? `다음 후보는 ${nextAction}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    if (/step budget reached/i.test(checkpoint.title)) {
+      return [
+        "설정된 단계 수 한도에 닿아서 여기서 잠시 멈췄습니다.",
+        summary ? `현재까지 요약은 ${summary}` : "",
+        nextAction ? `다음 후보는 ${nextAction}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    if (/interrupted after app restart/i.test(checkpoint.title)) {
+      return [
+        "앱 재시작 때문에 자동 연구가 잠깐 끊겨 여기서 멈췄습니다.",
+        summary ? `보존된 마지막 상태는 ${summary}` : "",
+        nextAction ? `다음으로는 ${nextAction}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    return [
+      "자동 연구가 여기서 잠시 멈춰 있습니다.",
+      summary ? `현재까지 요약은 ${summary}` : "",
+      nextAction ? `다음 후보는 ${nextAction}` : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (/^automation paused after the latest step$/i.test(checkpoint.title)) {
+    return [
+      "Paused here after finishing the current step, as requested.",
+      summary ? `Latest result: ${summary}` : "",
+      nextAction ? `Likely next action: ${nextAction}` : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (/^checkpoint ready$/i.test(checkpoint.title)) {
+    return [
+      "Finished one bounded step and paused here.",
+      summary ? `Latest result: ${summary}` : "",
+      nextAction ? `Likely next action: ${nextAction}` : "",
+      "Lithium stopped because this point looked like a real decision branch."
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (/needs review after a failed run|automation failed/i.test(checkpoint.title)) {
+    return [
+      "Paused here because the latest step failed.",
+      summary ? `Current summary: ${summary}` : "",
+      nextAction ? `Recovery candidate: ${nextAction}` : "",
+      "Once you steer the direction, Lithium can continue from there."
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (/time budget reached/i.test(checkpoint.title)) {
+    return [
+      "Paused here because the configured runtime budget was exhausted.",
+      summary ? `Current summary: ${summary}` : "",
+      nextAction ? `Likely next action: ${nextAction}` : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (/step budget reached/i.test(checkpoint.title)) {
+    return [
+      "Paused here because the configured step budget was exhausted.",
+      summary ? `Current summary: ${summary}` : "",
+      nextAction ? `Likely next action: ${nextAction}` : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (/interrupted after app restart/i.test(checkpoint.title)) {
+    return [
+      "Paused here because the app restarted mid-run.",
+      summary ? `Latest saved state: ${summary}` : "",
+      nextAction ? `Likely next action: ${nextAction}` : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return [
+    "Automation is paused here.",
+    summary ? `Current summary: ${summary}` : "",
+    nextAction ? `Likely next action: ${nextAction}` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildAutomationResumeConversationMessage(input: {
+  session: AutomationSessionRecord;
+  checkpoint: AutomationCheckpointRecord;
+  response?: string;
+  mode: AutomationMode;
+}) {
+  const language = resolveAutomationUiLanguage([
+    input.response ?? "",
+    input.session.displayObjective ?? "",
+    input.session.objective,
+    input.checkpoint.summary
+  ]);
+
+  if (language === "ko") {
+    return input.mode === "continuous"
+      ? "방금 방향을 반영했고 자동 연구를 다시 이어갑니다. 이제 routine step에서는 멈추지 않고, 정말 판단이 필요한 분기에서만 다시 물어보겠습니다."
+      : "방금 방향을 반영했고 자동 연구를 다시 이어갑니다. 다음 체크포인트가 오면 다시 이 채팅에서 바로 알려드리겠습니다.";
+  }
+
+  return input.mode === "continuous"
+    ? "Applied your latest direction and resumed automation. Routine steps will keep going automatically, and Lithium will only stop again at a real decision branch."
+    : "Applied your latest direction and resumed automation. Lithium will report back here again at the next checkpoint.";
+}
+
+function hasMeaningfulChatProgressNarration(summary: string, details: string[]) {
+  const normalizedSummary = summary.trim();
+  const normalizedDetails = details
+    .map((detail) => detail.trim())
+    .filter(Boolean);
+
+  if (!normalizedSummary && !normalizedDetails.length) {
+    return false;
+  }
+
+  return !isGenericChatProgressPlaceholder(normalizedSummary, normalizedDetails);
+}
+
+function isGenericChatProgressPlaceholder(summary: string, details: string[]) {
+  const normalizedSummary = summary.trim();
+  const normalizedDetails = details
+    .map((detail) => detail.trim())
+    .filter(Boolean);
+
+  if (!normalizedSummary) {
+    return normalizedDetails.length === 0;
+  }
+
+  if (normalizedSummary !== "Thinking…") {
+    return false;
+  }
+
+  return (
+    normalizedDetails.length === 0 ||
+    normalizedDetails.every(
+      (detail) => detail === "Reviewing the latest thread state and choosing the next move."
+    )
   );
 }
 
@@ -3984,18 +6964,254 @@ function buildAutomationChatFollowupPrompt(
     .join("\n\n");
 }
 
+function buildAutomationContinuationAdvisorPrompt(input: {
+  session: AutomationSessionRecord;
+  reason: "failed-run" | "runtime-budget" | "step-budget" | "controller-failure";
+  languagePreference: AppSettings["autopilotPromptLanguage"];
+  latestDecision?: DecisionRecord | null;
+  latestRun?: RunRecord | null;
+  latestCheckpoint?: AutomationCheckpointRecord | null;
+  redirectInstruction: string;
+  runStatus?: RecordStatus;
+  runSummary: string;
+  runRisks: string[];
+  runActions: string[];
+  failureMessage: string;
+}) {
+  const latestInstruction =
+    input.redirectInstruction.trim() ||
+    input.session.displayObjective?.trim() ||
+    input.session.objective.trim();
+  const latestDecisionSummary =
+    handoffMachineSummary(input.latestDecision?.handoff) || input.latestDecision?.summary || "";
+  const latestRunSummary =
+    handoffMachineSummary(input.latestRun?.handoff) ||
+    input.runSummary.trim() ||
+    extractRunSummary(input.latestRun?.finalMessage || "");
+  const latestCheckpointSummary = input.latestCheckpoint?.summary?.trim() || "";
+  const promptLanguage = resolveAutomationPromptLanguage(input.languagePreference, [
+    latestInstruction,
+    latestDecisionSummary,
+    latestRunSummary,
+    latestCheckpointSummary,
+    input.failureMessage
+  ]);
+
+  const issueSummary =
+    input.reason === "failed-run"
+      ? input.runStatus === "cancelled"
+        ? "The latest builder step was cancelled right before completion and hit a review boundary."
+        : "The latest builder step failed and hit a review boundary."
+      : input.reason === "runtime-budget"
+      ? "The configured runtime budget window was exhausted."
+      : input.reason === "step-budget"
+      ? "The configured step budget was exhausted."
+      : `The automation controller hit an issue: ${input.failureMessage.trim() || "unknown failure"}`;
+  const issueSummaryKo =
+    input.reason === "failed-run"
+      ? input.runStatus === "cancelled"
+        ? "직전 builder step이 끝나기 직전에 취소되었고, 기존 규칙이라면 여기서 review로 멈출 상황입니다."
+        : "직전 builder step이 실패했고, 기존 규칙이라면 여기서 review로 멈출 상황입니다."
+      : input.reason === "runtime-budget"
+      ? "설정된 실행 시간 한도에 닿았습니다."
+      : input.reason === "step-budget"
+      ? "설정된 단계 수 한도에 닿았습니다."
+      : `자동화 컨트롤러 쪽 이슈가 발생했습니다: ${input.failureMessage.trim() || "원인 미상"}`;
+
+  if (promptLanguage === "ko") {
+    return [
+      latestInstruction,
+      issueSummaryKo,
+      latestDecisionSummary ? `현재 최신 전략 요약: ${latestDecisionSummary}` : "",
+      latestRunSummary ? `현재 최신 실행 요약: ${latestRunSummary}` : "",
+      latestCheckpointSummary ? `직전 체크포인트 요약: ${latestCheckpointSummary}` : "",
+      input.runRisks.length ? formatPromptList("Failure risks", input.runRisks) : "",
+      input.runActions.length ? formatPromptList("Suggested next actions", input.runActions) : "",
+      "이 자동 연구는 continuous 모드이며, 웬만하면 여기서 멈추지 말고 계속 진행해야 합니다.",
+      "지금 상황을 큰 분기로 보고 gpt-5.4-pro 관점에서 다음 방향을 하나 정하세요.",
+      "응답의 맨 앞에는 사용자가 읽을 짧은 진행 보고를 같은 언어로 자연스럽게 적고, 그 뒤에는 왜 그 방향이 맞는지와 바로 실행할 다음 bounded step을 정리하세요.",
+      "외부 의존성이나 실제 사용자 선호가 없으면 진행 자체가 불가능한 경우에만 다시 물어보세요. 그때만 needs_user_checkpoint=true 또는 automation_mode=checkpoint/blocked를 쓰세요.",
+      "그 외에는 자동으로 계속 진행할 수 있게 방향을 고르고, 이 채팅에 보고한 뒤 바로 이어서 실행 가능한 상태로 넘기세요."
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [
+    latestInstruction,
+    issueSummary,
+    latestDecisionSummary ? `Latest strategy summary: ${latestDecisionSummary}` : "",
+    latestRunSummary ? `Latest run summary: ${latestRunSummary}` : "",
+    latestCheckpointSummary ? `Latest checkpoint summary: ${latestCheckpointSummary}` : "",
+    input.runRisks.length ? formatPromptList("Failure risks", input.runRisks) : "",
+    input.runActions.length ? formatPromptList("Suggested next actions", input.runActions) : "",
+    "This automation is in continuous mode, so it should keep moving unless there is a truly blocking reason to stop.",
+    "Treat the current situation as a major branch and decide the next direction from a gpt-5.4-pro research perspective.",
+    "Start your answer with a brief user-facing progress update in the same language as the recent chat, then explain why that direction is right and name the next bounded step that should run immediately.",
+    "Only ask the user again if an external dependency or a real preference choice makes progress impossible. Only in that case should you use needs_user_checkpoint=true or automation_mode=checkpoint/blocked.",
+    "Otherwise choose a direction that lets automation continue, report it naturally in chat, and hand off the next executable bounded step."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildAutomationOrchestratorPrompt(input: {
+  session: AutomationSessionRecord;
+  redirectInstruction: string;
+  languagePreference: AppSettings["autopilotPromptLanguage"];
+  snapshot: ProjectSnapshot;
+}) {
+  const latestInstruction = input.redirectInstruction.trim() || input.session.objective.trim();
+  const latestDecisionSummary = input.snapshot.latestDecision?.summary?.trim() || "";
+  const latestRunSummary =
+    handoffMachineSummary(input.snapshot.latestRun?.handoff) ||
+    extractRunSummary(input.snapshot.latestRun?.finalMessage || "");
+  const latestCheckpointSummary = input.snapshot.latestAutomationCheckpoint?.summary?.trim() || "";
+  const promptLanguage = resolveAutomationPromptLanguage(input.languagePreference, [
+    latestInstruction,
+    input.session.displayObjective || "",
+    latestDecisionSummary,
+    latestRunSummary,
+    latestCheckpointSummary
+  ]);
+  const budgetSummary =
+    promptLanguage === "ko"
+      ? `현재 예산: steps ${input.session.budget.usedSteps}/${input.session.budget.maxSteps}, retries ${input.session.budget.usedRetries}/${input.session.budget.maxRetries}, runtime ${input.session.budget.maxRuntimeMinutes}분`
+      : `Current budget: steps ${input.session.budget.usedSteps}/${input.session.budget.maxSteps}, retries ${input.session.budget.usedRetries}/${input.session.budget.maxRetries}, runtime ${input.session.budget.maxRuntimeMinutes} minutes`;
+
+  if (promptLanguage === "ko") {
+    return [
+      latestInstruction,
+      input.session.displayObjective ? `사용자에게 보이는 목표: ${input.session.displayObjective}` : "",
+      budgetSummary,
+      latestDecisionSummary ? `최신 전략 요약: ${latestDecisionSummary}` : "",
+      latestRunSummary ? `최신 실행 요약: ${latestRunSummary}` : "",
+      latestCheckpointSummary ? `직전 체크포인트: ${latestCheckpointSummary}` : "",
+      "이 turn은 진행 중인 자동 연구의 다음 bounded cycle을 정하는 planner turn입니다.",
+      "가능하면 builder가 바로 시작할 수 있는 실제 workspace step을 포함하세요.",
+      "병렬성이 도움이 되면 builder와 strategist를 동시에 요청하세요.",
+      "단, strategist-only로 길게 머물지 말고 builder가 바로 할 수 있는 일이 있으면 같이 시작하세요.",
+      "사용자에게 보여줄 말은 짧고 자연스럽게 적되, 내부 verbose나 제어 파일 이름은 드러내지 마세요.",
+      "정말 진행이 막히는 외부 의존성이나 실제 사용자 선택이 필요한 경우에만 automation lane으로 checkpoint/blocked를 요청하세요.",
+      "그 외에는 worker lane만 골라서 자동 연구가 계속 굴러가게 하세요."
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [
+    latestInstruction,
+    input.session.displayObjective ? `Visible goal: ${input.session.displayObjective}` : "",
+    budgetSummary,
+    latestDecisionSummary ? `Latest strategy summary: ${latestDecisionSummary}` : "",
+    latestRunSummary ? `Latest run summary: ${latestRunSummary}` : "",
+    latestCheckpointSummary ? `Latest checkpoint: ${latestCheckpointSummary}` : "",
+    "This turn is for planning the next bounded cycle of an already-running research automation.",
+    "Prefer a concrete builder action that can start immediately whenever one exists.",
+    "If parallelism helps, request builder and strategist in parallel.",
+    "Do not linger in strategist-only mode when the builder can make concrete progress now.",
+    "Keep the visible reply short and natural, and do not expose internal verbose or control files.",
+    "Only request the automation lane with checkpoint/blocked when an external dependency or a real user choice makes progress impossible.",
+    "Otherwise choose worker lanes that keep the automation moving."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildAutomationOrchestratorFollowupPrompt(input: {
+  objective: string;
+  delegations: AutomationWorkerDelegation[];
+  snapshot: ProjectSnapshot;
+}) {
+  const base =
+    input.delegations.length === 1
+      ? buildOrchestratorWorkerFollowupPrompt({
+          originalPrompt: input.objective,
+          lane: input.delegations[0].lane,
+          workerPrompt: input.delegations[0].prompt,
+          snapshot: input.snapshot
+        })
+      : buildOrchestratorParallelFollowupPrompt({
+          originalPrompt: input.objective,
+          delegations: input.delegations,
+          snapshot: input.snapshot
+        });
+
+  const promptLanguage = containsHangul(input.objective) ? "ko" : "en";
+
+  if (promptLanguage === "ko") {
+    return [
+      base,
+      "이 답변은 ongoing 자동 연구의 짧은 진행 보고입니다.",
+      "가능하면 metric, command, log path, artifact path, next action을 짧게 녹여서 알려주세요.",
+      "단, raw verbose를 길게 덤프하지는 마세요."
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [
+    base,
+    "This reply is a short progress update for an ongoing automation run.",
+    "When possible, briefly include the metric, command, log path, artifact path, and next action.",
+    "Do not dump raw verbose logs."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function summarizeAutomationPlannerResult(
+  workerDelegations: AutomationWorkerDelegation[],
+  automationDelegation?: Extract<OrchestratorDelegationDirective, { lane: "automation" }> | null
+) {
+  if (workerDelegations.length) {
+    return summarizeAutomationDelegationCycle(workerDelegations, workerDelegations.map((item) => item.prompt).join("\n"));
+  }
+
+  if (!automationDelegation) {
+    return "";
+  }
+
+  return "The automation planner prepared a checkpoint for review.";
+}
+
+function summarizeAutomationDelegationCycle(
+  delegations: AutomationWorkerDelegation[],
+  languageSample: string
+) {
+  const uniqueLanes = Array.from(new Set(delegations.map((delegation) => delegation.lane)));
+  const isKo = containsHangul(languageSample);
+
+  if (uniqueLanes.includes("builder") && uniqueLanes.includes("strategist")) {
+    return isKo
+      ? "builder 실행과 strategist 리서치를 병렬로 진행하고 있습니다."
+      : "Running builder execution and strategist research in parallel.";
+  }
+
+  if (uniqueLanes.includes("builder")) {
+    return isKo
+      ? "바로 실행 가능한 builder step을 진행하고 있습니다."
+      : "Running the next concrete builder step.";
+  }
+
+  return isKo
+    ? "다음 실행 판단을 위한 strategist 리서치를 진행하고 있습니다."
+    : "Running strategist research for the next execution decision.";
+}
+
 function buildAutomationStrategistPrompt(
   session: AutomationSessionRecord,
   redirectInstruction: string,
   languagePreference: AppSettings["autopilotPromptLanguage"],
   latestRun?: RunRecord | null,
-  latestCheckpoint?: AutomationCheckpointRecord | null
+  latestCheckpoint?: AutomationCheckpointRecord | null,
+  latestDecision?: DecisionRecord | null
 ) {
   const latestInstruction =
     redirectInstruction.trim() ||
     session.objective;
 
-  if (!shouldReplanAfterFailedRun(latestRun, latestCheckpoint)) {
+  if (!shouldReplanAfterFailedRun(latestRun, latestCheckpoint, latestDecision)) {
     return latestInstruction.trim();
   }
 
@@ -4030,15 +7246,22 @@ function buildAutomationStrategistPrompt(
     "If you need more research before editing code, do that first and then propose the most plausible recovery step.",
     "If the next move depends on a real user choice or multiple materially different directions, ask one concise question and set needs_user_checkpoint=true."
   ]
-    .filter(Boolean)
-    .join("\n\n");
+      .filter(Boolean)
+      .join("\n\n");
 }
 
 function shouldReplanAfterFailedRun(
   run?: RunRecord | null,
-  latestCheckpoint?: AutomationCheckpointRecord | null
+  latestCheckpoint?: AutomationCheckpointRecord | null,
+  latestDecision?: DecisionRecord | null
 ) {
   if (!run || (run.status !== "failed" && run.status !== "cancelled")) {
+    return false;
+  }
+
+  const runTimestamp = run.endedAt || run.startedAt || run.createdAt;
+
+  if (latestDecision && latestDecision.createdAt >= runTimestamp) {
     return false;
   }
 
@@ -4103,6 +7326,74 @@ function summarizeAutomationFailureRecovery(input: {
   return [base, input.runSummary.trim(), "Lithium is already planning the next recovery step."]
     .filter(Boolean)
     .join(" ");
+}
+
+function buildAutomationAdvisorFallbackMessage(
+  session: AutomationSessionRecord,
+  reason: "failed-run" | "runtime-budget" | "step-budget" | "controller-failure"
+) {
+  const language = resolveAutomationUiLanguage([
+    session.displayObjective ?? "",
+    session.objective
+  ]);
+
+  if (language === "ko") {
+    if (reason === "failed-run") {
+      return "직전 분기를 다시 검토했고, 그 판단을 반영해 자동 연구를 계속 이어가겠습니다.";
+    }
+
+    if (reason === "runtime-budget") {
+      return "실행 시간 한도에 닿았지만, 방향을 다시 정리해서 자동 연구를 계속 이어가겠습니다.";
+    }
+
+    if (reason === "step-budget") {
+      return "단계 수 한도에 닿았지만, 다음 방향을 다시 정리해서 자동 연구를 계속 이어가겠습니다.";
+    }
+
+    return "방금 이슈를 다시 검토했고, 복구 방향을 반영해 자동 연구를 계속 이어가겠습니다.";
+  }
+
+  if (reason === "failed-run") {
+    return "I reviewed the latest branch and will keep automation moving with the updated direction.";
+  }
+
+  if (reason === "runtime-budget") {
+    return "The runtime window was exhausted, but I refreshed the direction and will keep automation moving.";
+  }
+
+  if (reason === "step-budget") {
+    return "The step budget was exhausted, but I refreshed the direction and will keep automation moving.";
+  }
+
+  return "I reviewed the latest issue and will keep automation moving with the updated recovery path.";
+}
+
+function resolveAutomationAdvisorUserMessage(
+  session: AutomationSessionRecord,
+  decision: DecisionRecord | null,
+  fallback: string
+) {
+  const visibleReply = extractVisibleStrategistReply(decision?.rawOutput ?? "", 900).trim();
+  const handoffReply = handoffUserMessage(decision?.handoff)?.trim() || "";
+  const summary = sanitizeAutomationConversationSummary(
+    handoffMachineSummary(decision?.handoff) || decision?.summary || ""
+  );
+
+  return (
+    visibleReply ||
+    handoffReply ||
+    summary ||
+    fallback ||
+    buildAutomationAdvisorFallbackMessage(session, "controller-failure")
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function summarizeAutomationAdvisorCurrentStep(decision: DecisionRecord | null) {
+  return sanitizeAutomationConversationSummary(
+    handoffMachineSummary(decision?.handoff) || decision?.summary || ""
+  );
 }
 
 function shouldPersistThreadSummary(summary: string) {
@@ -4205,6 +7496,158 @@ function isStrategistBrowserBlockedFailure(message: string) {
   );
 }
 
+type ActiveOracleProcess = {
+  pid: number;
+  commandLine: string;
+  outputPath: string;
+  model?: AppSettings["strategistModel"];
+  files: string[];
+  command: CommandSpec;
+};
+
+async function inspectActiveOracleProcessBySlug(sessionSlug: string): Promise<ActiveOracleProcess | null> {
+  const psOutput = await execFileText("ps", ["axww", "-o", "pid=,command="]).catch(() => "");
+
+  if (!psOutput.trim()) {
+    return null;
+  }
+
+  const slugCandidates = Array.from(new Set([sessionSlug, normalizeOracleSessionId(sessionSlug)]));
+  const matches = psOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(.+)$/);
+
+      if (!match) {
+        return null;
+      }
+
+      return {
+        pid: Number(match[1]),
+        commandLine: match[2]
+      };
+    })
+    .filter((entry): entry is { pid: number; commandLine: string } => Boolean(entry))
+    .filter(
+      (entry) =>
+        entry.commandLine.includes("/oracle") &&
+        slugCandidates.some((slug) => entry.commandLine.includes(`--slug ${slug}`))
+    );
+
+  const active = matches.at(-1);
+
+  if (!active) {
+    return null;
+  }
+
+  const outputPathMatch = active.commandLine.match(/--write-output\s+(\S+)/);
+  const outputPath = outputPathMatch?.[1]?.trim();
+
+  if (!outputPath) {
+    return null;
+  }
+
+  const modelMatch = active.commandLine.match(/--model\s+(gpt-5\.4(?:-pro)?)/);
+  const fileMatches = Array.from(active.commandLine.matchAll(/--file\s+(\S+)/g)).map((match) => match[1]);
+
+  return {
+    pid: active.pid,
+    commandLine: active.commandLine,
+    outputPath,
+    model: isOracleModelValue(modelMatch?.[1]) ? modelMatch?.[1] : undefined,
+    files: fileMatches,
+    command: {
+      command: "oracle",
+      args: ["--slug", sessionSlug],
+      cwd: path.dirname(path.dirname(outputPath))
+    }
+  };
+}
+
+function deriveDecisionArtifactsFromOutputPath(outputPath: string) {
+  const match = outputPath.trim().match(/^(.*\/)?(D\d+)\.output\.txt$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const directory = match[1] ? match[1].replace(/\/$/, "") : path.dirname(outputPath);
+  const id = match[2];
+
+  return {
+    id,
+    outputPath,
+    stdoutPath: path.join(directory, `${id}.stdout.log`),
+    stderrPath: path.join(directory, `${id}.stderr.log`)
+  };
+}
+
+function buildInterruptedStrategistRecoveryInstruction(
+  session: AutomationSessionRecord,
+  step: AutomationStepRecord
+) {
+  const language = resolveAutomationUiLanguage([
+    session.displayObjective ?? "",
+    session.objective,
+    session.lastUserInstruction ?? "",
+    step.prompt
+  ]);
+  const basePrompt = session.queuedUserInstruction?.trim() || session.lastUserInstruction?.trim();
+
+  if (language === "ko") {
+    return [
+      basePrompt || (session.displayObjective ?? session.objective).trim(),
+      "앱 재시작으로 방금 진행 중이던 strategist planning step이 끊겼습니다.",
+      "사용자에게 멈춰서 묻지 말고, 최신 저장 상태를 기준으로 같은 planning step을 자동으로 다시 만들어 다음 bounded research step 하나를 정한 뒤 계속 진행하세요."
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [
+    basePrompt || (session.displayObjective ?? session.objective).trim(),
+    "The in-flight strategist planning step was interrupted by an app restart.",
+    "Do not stop for user review. Recreate that planning step from the latest saved workspace state, choose the next bounded research step again, and continue automatically."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildAutomationStrategistSessionSlug(
+  workspacePath: string,
+  session: AutomationSessionRecord,
+  cycle: AutomationCycleRecord | null,
+  step: AutomationStepRecord
+) {
+  const seed = [
+    basename(workspacePath).replace(/[^a-z0-9]+/gi, "").toLowerCase().slice(0, 12) || "workspace",
+    session.id,
+    cycle?.id ?? step.cycleId ?? "nocycle",
+    step.id || step.lane
+  ].join("-");
+
+  return normalizeOracleSessionId(`ors-auto-${seed}`);
+}
+
+function isOracleModelValue(value: string | undefined): value is AppSettings["strategistModel"] {
+  return value === "gpt-5.4" || value === "gpt-5.4-pro";
+}
+
+function execFileText(command: string, args: string[]) {
+  return new Promise<string>((resolve, reject) => {
+    execFile(command, args, { encoding: "utf8", maxBuffer: 5 * 1024 * 1024 }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(stdout);
+    });
+  });
+}
+
 function buildContextDrivenBuilderPrompt(
   objective: string,
   decision: DecisionRecord | null | undefined,
@@ -4260,6 +7703,180 @@ function buildContextDrivenBuilderPrompt(
     .join("\n\n");
 }
 
+function buildOrchestratorWorkerFollowupPrompt(input: {
+  originalPrompt: string;
+  lane: OrchestratorDelegationLane;
+  workerPrompt: string;
+  snapshot: ProjectSnapshot;
+}) {
+  const latestDecision = input.snapshot.latestDecision;
+  const latestRun = input.snapshot.latestRun;
+  const workerSummary =
+    input.lane === "strategist"
+      ? latestDecision?.summary?.trim() || "none"
+      : handoffMachineSummary(latestRun?.handoff) || extractRunSummary(latestRun?.finalMessage || "") || "none";
+  const workerReply =
+    input.lane === "strategist"
+      ? extractVisibleStrategistReply(latestDecision?.rawOutput || "", 800) || handoffUserMessage(latestDecision?.handoff)
+      : handoffUserMessage(latestRun?.handoff) || sanitizeConversationBody(latestRun?.finalMessage || "");
+  const changedFiles =
+    input.lane === "builder" ? latestRun?.changedFiles?.slice(0, 8).join(", ") || "none" : "none";
+
+  return [
+    `Original user message: ${input.originalPrompt.trim()}`,
+    `You delegated to: ${input.lane}`,
+    `Worker task: ${input.workerPrompt.trim()}`,
+    `Worker summary: ${workerSummary}`,
+    workerReply ? `Worker visible reply:\n${workerReply}` : "",
+    input.lane === "builder" ? `Changed files: ${changedFiles}` : "",
+    "Now write the user-facing reply for the thread.",
+    "Keep it natural and concise in the user's language.",
+    "Synthesize the worker result. Do not echo raw verbose logs, control headers, or truncated fragments.",
+    "Only delegate again if the answer would be materially incomplete without another concrete step."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildOrchestratorParallelFollowupPrompt(input: {
+  originalPrompt: string;
+  delegations: Array<Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>>;
+  snapshot: ProjectSnapshot;
+}) {
+  const sections = input.delegations.map((delegation) => {
+    if (delegation.lane === "strategist") {
+      const summary = input.snapshot.latestDecision?.summary?.trim() || "none";
+      const reply =
+        extractVisibleStrategistReply(input.snapshot.latestDecision?.rawOutput || "", 800) ||
+        handoffUserMessage(input.snapshot.latestDecision?.handoff);
+
+      return [
+        "Worker lane: strategist",
+        `Worker task: ${delegation.prompt.trim()}`,
+        `Worker summary: ${summary}`,
+        reply ? `Worker visible reply:\n${reply}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+    }
+
+    const summary =
+      handoffMachineSummary(input.snapshot.latestRun?.handoff) ||
+      extractRunSummary(input.snapshot.latestRun?.finalMessage || "") ||
+      "none";
+    const reply =
+      handoffUserMessage(input.snapshot.latestRun?.handoff) ||
+      sanitizeConversationBody(input.snapshot.latestRun?.finalMessage || "");
+    const changedFiles = input.snapshot.latestRun?.changedFiles?.slice(0, 8).join(", ") || "none";
+    const runStatus = input.snapshot.latestRun?.status || "unknown";
+
+    return [
+      "Worker lane: builder",
+      `Worker task: ${delegation.prompt.trim()}`,
+      `Worker status: ${runStatus}`,
+      `Worker summary: ${summary}`,
+      reply ? `Worker visible reply:\n${reply}` : "",
+      `Changed files: ${changedFiles}`
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  });
+
+  return [
+    `Original user message: ${input.originalPrompt.trim()}`,
+    "You delegated to multiple workers in parallel.",
+    ...sections,
+    "Now write the single user-facing reply for the thread.",
+    "Keep it natural and concise in the user's language.",
+    "Synthesize the worker results together. Make it clear when one lane is still running and another already finished.",
+    "Do not echo raw verbose logs, control headers, or truncated fragments.",
+    "Only delegate again if the answer would be materially incomplete without another concrete step."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function sanitizeConversationBody(value: string) {
+  return value
+    .replace(/\n*LITHIUM_STATUS\s*\n[\s\S]*$/i, "")
+    .replace(/\n*LITHIUM_HANDOFF\s*\n[\s\S]*$/i, "")
+    .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function summarizeWorkerSnapshotForConversation(
+  lane: OrchestratorDelegationLane,
+  snapshot: ProjectSnapshot
+) {
+  if (lane === "strategist") {
+    return (
+      extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 900) ||
+      handoffUserMessage(snapshot.latestDecision?.handoff) ||
+      snapshot.latestDecision?.summary ||
+      "I reviewed the research context and captured the next recommendation."
+    );
+  }
+
+  return (
+    handoffUserMessage(snapshot.latestRun?.handoff) ||
+    sanitizeConversationBody(snapshot.latestRun?.finalMessage || "") ||
+    handoffMachineSummary(snapshot.latestRun?.handoff) ||
+    "I finished the workspace step and recorded the latest result."
+  );
+}
+
+function summarizeWorkerSnapshotsForConversation(
+  delegations: Array<Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>>,
+  snapshot: ProjectSnapshot
+) {
+  const parts = delegations
+    .map((delegation) => summarizeWorkerSnapshotForConversation(delegation.lane, snapshot))
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (!parts.length) {
+    return "I finished the delegated work and captured the latest state.";
+  }
+
+  return Array.from(new Set(parts)).join("\n\n");
+}
+
+function describeDelegationSetForActivity(
+  delegations: Array<Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>>
+) {
+  return delegations
+    .map((delegation) => delegation.lane)
+    .filter((lane, index, values) => values.indexOf(lane) === index)
+    .sort()
+    .join("+");
+}
+
+function summarizeLiveWorkerStartForConversation(
+  delegation: Extract<OrchestratorDelegationDirective, { lane: "builder" }>,
+  snapshot: ProjectSnapshot
+) {
+  const run = snapshot.latestRun;
+
+  if (run?.status === "running") {
+    if (containsHangul(delegation.prompt)) {
+      return "바로 이어서 live builder 실행을 시작했습니다. 진행 상황과 결과는 이 채팅에서 계속 정리하겠습니다.";
+    }
+
+    return "I started the live builder run and will keep the progress and result flowing back into this chat.";
+  }
+
+  return summarizeWorkerSnapshotForConversation("builder", snapshot);
+}
+
+function localizeAutomationStartReply(prompt: string) {
+  if (containsHangul(prompt)) {
+    return "이 목표로 자동 연구를 시작하겠습니다. 진행하면서 필요한 상태와 결과를 채팅으로 이어서 보고하겠습니다.";
+  }
+
+  return "I’ll start the automation from this goal and continue the status updates here in chat.";
+}
+
 function stripLegacyNextTask(handoff: LithiumHandoff) {
   const { nextTask: _legacyNextTask, ...rest } = handoff;
   return rest;
@@ -4268,7 +7885,7 @@ function stripLegacyNextTask(handoff: LithiumHandoff) {
 function extractVisibleStrategistReply(rawOutput: string, maxChars = 2400) {
   const stripped = rawOutput
     .replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "")
-    .replace(/\n\s*입니다\.\s*(?=\n|$)/g, "")
+    .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
     .trim();
 
   if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
@@ -4281,6 +7898,62 @@ function extractVisibleStrategistReply(rawOutput: string, maxChars = 2400) {
 
   const budget = Math.max(0, maxChars - 1);
   return `${stripped.slice(0, budget).trimEnd()}…`;
+}
+
+function resolveOrchestratorDelegations(
+  turn: {
+    requestedLane: OrchestratorDelegationLane | null;
+    delegatedPrompt: string;
+    delegation?: OrchestratorDelegationDirective | null;
+    delegations?: OrchestratorDelegationDirective[];
+  },
+  fallbackPrompt: string
+): OrchestratorDelegationDirective[] {
+  if (turn.delegations?.length) {
+    return dedupeOrchestratorDelegations(turn.delegations);
+  }
+
+  if (turn.delegation) {
+    return dedupeOrchestratorDelegations([turn.delegation]);
+  }
+
+  const prompt = turn.delegatedPrompt?.trim() || fallbackPrompt.trim();
+
+  if (!turn.requestedLane || !prompt) {
+    return [];
+  }
+
+  if (turn.requestedLane === "builder") {
+    return [{
+      lane: "builder",
+      prompt
+    }];
+  }
+
+  if (turn.requestedLane === "strategist") {
+    return [{
+      lane: "strategist",
+      prompt
+    }];
+  }
+
+  return [{
+    lane: "automation",
+    prompt
+  }];
+}
+
+function dedupeOrchestratorDelegations(delegations: OrchestratorDelegationDirective[]) {
+  const latestByLane = new Map<OrchestratorDelegationDirective["lane"], OrchestratorDelegationDirective>();
+
+  for (const delegation of delegations) {
+    latestByLane.set(delegation.lane, delegation);
+  }
+
+  const orderedLanes: OrchestratorDelegationDirective["lane"][] = ["automation", "builder", "strategist"];
+  return orderedLanes
+    .map((lane) => latestByLane.get(lane) ?? null)
+    .filter((delegation): delegation is OrchestratorDelegationDirective => Boolean(delegation));
 }
 
 function looksLikeStructuredStrategistOnly(value: string) {
@@ -4325,6 +7998,59 @@ function resolveAutomationPromptLanguage(
 
 function containsHangul(value: string) {
   return /[\u3131-\u318E\uAC00-\uD7A3]/.test(value);
+}
+
+function combineParallelChatProgressInspections(inspections: ChatProgressInspection[]): ChatProgressInspection {
+  const ordered = [...inspections].sort((left, right) => left.lane.localeCompare(right.lane));
+  const combinedText = ordered
+    .flatMap((inspection) => [inspection.progressSummary, ...inspection.progressDetails])
+    .join("\n");
+  const progressSummary = containsHangul(combinedText)
+    ? "병렬 작업 진행 중입니다."
+    : "Parallel work is in progress.";
+  const progressDetails = ordered
+    .map((inspection) => formatParallelChatProgressDetail(inspection))
+    .filter(Boolean);
+
+  return {
+    active: true,
+    lane: "orchestrator",
+    threadId: ordered[0]?.threadId,
+    progressSummary,
+    progressDetails,
+    activeCommand: null,
+    stdoutTail: ordered
+      .map((inspection) => inspection.stdoutTail.trim())
+      .filter(Boolean)
+      .join("\n\n"),
+    stderrTail: ordered
+      .map((inspection) => inspection.stderrTail.trim())
+      .filter(Boolean)
+      .join("\n\n"),
+    updatedAt: ordered.reduce((latest, inspection) =>
+      inspection.updatedAt.localeCompare(latest) > 0 ? inspection.updatedAt : latest,
+    ordered[0]?.updatedAt || new Date().toISOString())
+  };
+}
+
+function formatParallelChatProgressDetail(inspection: ChatProgressInspection) {
+  const label = inspection.lane === "builder"
+    ? "Builder"
+    : inspection.lane === "strategist"
+    ? "Strategist"
+    : "Worker";
+  const lines = Array.from(
+    new Set([
+      inspection.progressSummary.trim(),
+      ...inspection.progressDetails.map((detail) => detail.trim())
+    ].filter(Boolean))
+  ).slice(0, 3);
+
+  if (!lines.length) {
+    return "";
+  }
+
+  return `${label}\n${lines.map((line) => `- ${line}`).join("\n")}`;
 }
 
 function formatPromptList(label: string, values: string[]) {
@@ -4464,6 +8190,27 @@ function mergeProgressDetails(primary: string[], secondary: string[]) {
   ).slice(-5);
 }
 
+async function resolveChatProgressTouchedAt(progress: ActiveChatProgress) {
+  const candidatePaths = [
+    progress.stdoutPath,
+    progress.stderrPath,
+    progress.oracleSessionSlug ? await resolveOracleSessionOutputLogPath(progress.oracleSessionSlug) : ""
+  ].filter((value): value is string => Boolean(value));
+
+  const modifiedAts = await Promise.all(
+    candidatePaths.map(async (filePath) => {
+      try {
+        const metadata = await stat(filePath);
+        return metadata.mtime.toISOString();
+      } catch {
+        return "";
+      }
+    })
+  );
+
+  return modifiedAts.filter(Boolean).sort().at(-1) || "";
+}
+
 function extractProgressTailDetails(...tails: string[]) {
   return Array.from(
     new Set(
@@ -4471,6 +8218,7 @@ function extractProgressTailDetails(...tails: string[]) {
         .flatMap((text) => text.split("\n"))
         .map((line) => line.replace(/\s+/g, " ").trim())
         .filter(Boolean)
+        .filter((line) => !line.startsWith("{"))
         .filter((line) => !/^LITHIUM_/i.test(line))
         .filter((line) => !/^[>{}\[\],"]+$/.test(line))
         .filter((line) => !/^(model|reasoning intensity|launching browser mode|objective|budget|latest user direction)\s*:/i.test(line))
@@ -4750,6 +8498,8 @@ function createEmptyProjectSnapshot(): ProjectSnapshot {
     threads: [],
     activeThreadId: null,
     activeThread: null,
+    conversationEntries: [],
+    latestConversationEntry: null,
     attachments: [],
     activeThreadAttachments: [],
     decisions: [],

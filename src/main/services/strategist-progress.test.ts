@@ -48,4 +48,64 @@ describe("strategist-progress", () => {
     );
     expect(merged.progressDetails).toEqual(["README와 examples/train_probe.py를 먼저 대조하고 있습니다."]);
   });
+
+  it("drops truncated preview fragments when a fuller version arrives later", () => {
+    const parsed = extractOracleSessionProgress([
+      "[assistant-preview] 작은 이상 징후 하나가 바로 보였습",
+      "[assistant-preview] 작은 이상 징후 하나가 바로 보였습니다. 먼저 README와 최신 로그를 대조하겠습니다."
+    ].join("\n"));
+
+    expect(parsed.progressSummary).toBe(
+      "작은 이상 징후 하나가 바로 보였습니다. 먼저 README와 최신 로그를 대조하겠습니다."
+    );
+    expect(parsed.progressDetails).toEqual([]);
+  });
+
+  it("splits cumulative assistant previews into stable paragraph history and drops a trailing fragment", () => {
+    const parsed = extractOracleSessionProgress([
+      "[assistant-preview] 이제 리스크 쪽을 확인하고 있습니다. 겉으로는 단순한 공개 챌린지인데, 실제로는 평가 공정성 쟁점을 먼저 분리해 봐야 합니다.",
+      "[assistant-preview] 이제 리스크 쪽을 확인하고 있습니다. 겉으로는 단순한 공개 챌린지인데, 실제로는 평가 공정성 쟁점을 먼저 분리해 봐야 합니다.<br><br>공식 챌린지/저장소는 확인됐고, 지금은 이 해석이 맞는지 근거를 더 다지고 있습니다.<br><br>이제 리"
+    ].join("\n"));
+
+    expect(parsed.progressSummary).toBe(
+      "공식 챌린지/저장소는 확인됐고, 지금은 이 해석이 맞는지 근거를 더 다지고 있습니다."
+    );
+    expect(parsed.progressDetails).toEqual([
+      "이제 리스크 쪽을 확인하고 있습니다. 겉으로는 단순한 공개 챌린지인데, 실제로는 평가 공정성 쟁점을 먼저 분리해 봐야 합니다."
+    ]);
+  });
+
+  it("prefers fuller logged strategist progress over a shorter live fragment", () => {
+    const merged = mergeStrategistLiveProgress(
+      {
+        progressSummary: "이제 리",
+        progressDetails: []
+      },
+      {
+        progressSummary: "공식 챌린지/저장소는 확인됐고, 지금은 이 해석이 맞는지 근거를 더 다지고 있습니다.",
+        progressDetails: [
+          "이제 리스크 쪽을 확인하고 있습니다. 겉으로는 단순한 공개 챌린지인데, 실제로는 평가 공정성 쟁점을 먼저 분리해 봐야 합니다."
+        ]
+      }
+    );
+
+    expect(merged.progressSummary).toBe(
+      "공식 챌린지/저장소는 확인됐고, 지금은 이 해석이 맞는지 근거를 더 다지고 있습니다."
+    );
+    expect(merged.progressDetails).toEqual([
+      "이제 리스크 쪽을 확인하고 있습니다. 겉으로는 단순한 공개 챌린지인데, 실제로는 평가 공정성 쟁점을 먼저 분리해 봐야 합니다."
+    ]);
+  });
+
+  it("drops a short fragment detail when a later fuller sentence starts with the same text", () => {
+    const parsed = extractOracleSessionProgress([
+      "[assistant-preview] 먼저 공개",
+      "[assistant-preview] 먼저 공개 기록과 로컬 official 상태를 아주 얇게 다시 확인한 뒤, 바로 가장 싼 MLX bounded step 하나를 실제로 돌리겠습니다."
+    ].join("\n"));
+
+    expect(parsed.progressSummary).toBe(
+      "먼저 공개 기록과 로컬 official 상태를 아주 얇게 다시 확인한 뒤, 바로 가장 싼 MLX bounded step 하나를 실제로 돌리겠습니다."
+    );
+    expect(parsed.progressDetails).toEqual([]);
+  });
 });

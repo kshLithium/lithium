@@ -36,4 +36,20 @@ describe("parseCodexProgressLog", () => {
       activeCommand: null
     });
   });
+
+  it("replaces partial agent_message updates for the same item instead of keeping fragments as history", () => {
+    const progress = parseCodexProgressLog(
+      [
+        '{"type":"item.updated","item":{"id":"item_7","type":"agent_message","text":"이제 리"}}',
+        '{"type":"item.updated","item":{"id":"item_7","type":"agent_message","text":"이제 리스크 쪽을 확인하고 있습니다."}}',
+        '{"type":"item.completed","item":{"id":"item_8","type":"agent_message","text":"공식 저장소와 최근 로그를 같이 대조하는 중입니다."}}'
+      ].join("\n")
+    );
+
+    expect(progress).toEqual({
+      progressSummary: "공식 저장소와 최근 로그를 같이 대조하는 중입니다.",
+      progressDetails: ["이제 리스크 쪽을 확인하고 있습니다."],
+      activeCommand: null
+    });
+  });
 });

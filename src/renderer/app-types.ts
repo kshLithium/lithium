@@ -91,6 +91,8 @@ export const emptySnapshot: ProjectSnapshot = {
   threads: [],
   activeThreadId: null,
   activeThread: null,
+  conversationEntries: [],
+  latestConversationEntry: null,
   attachments: [],
   activeThreadAttachments: [],
   decisions: [],

@@ -30,6 +30,8 @@ import { detectChromePath } from "./services/chrome-detection";
 import { DiscordBotService, resolveDiscordBotConfig } from "./services/discord-bot-service";
 import { stopAllLiveProcesses } from "./services/live-process-registry";
 import { MobileBridgeServer } from "./services/mobile-bridge-server";
+import { OrchestratorRunner } from "./services/orchestrator-runner";
+import { ResidentOrchestratorRunner } from "./services/resident-orchestrator-runner";
 import { onLiveTerminalEvent, stopAllLiveTerminals } from "./services/terminal-pty-registry";
 import {
   APP_PROTOCOL,
@@ -61,6 +63,7 @@ const appSettingsStore = new AppSettingsStore(
   path.join(app.getPath("userData"), "app-settings.json")
 );
 const appService = new AppService(DEFAULT_WORKSPACE_PATH, {
+  orchestratorRunner: new ResidentOrchestratorRunner(new OrchestratorRunner()),
   remoteWorkspaceRoot: path.join(app.getPath("userData"), "remote-workspaces"),
   onSelectedWorkspacePathChange: (workspacePath) => {
     void appSettingsStore.update({ lastWorkspacePath: workspacePath });

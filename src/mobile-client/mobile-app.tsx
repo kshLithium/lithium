@@ -405,14 +405,6 @@ export function MobileApp() {
 
           <div className="topbar-actions">
             <button
-              aria-label="Autoresearch"
-              className="icon-button"
-              onClick={() => setAutomationSheetOpen(true)}
-              type="button"
-            >
-              <SparkIcon />
-            </button>
-            <button
               aria-label="Refresh"
               className="icon-button"
               disabled={busy}
@@ -449,15 +441,6 @@ export function MobileApp() {
         </main>
 
         <footer className="composer-shell">
-          <button
-            aria-label="Open chats"
-            className="composer-side-button"
-            onClick={() => setThreadSheetOpen(true)}
-            type="button"
-          >
-            <PlusIcon />
-          </button>
-
           <form
             className="composer-form"
             onSubmit={(event) => {
@@ -828,38 +811,12 @@ function MenuIcon() {
   );
 }
 
-function SparkIcon() {
-  return (
-    <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
-      <path
-        d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
-}
-
 function MoreIcon() {
   return (
     <svg aria-hidden="true" fill="currentColor" viewBox="0 0 24 24">
       <circle cx="5" cy="12" r="1.8" />
       <circle cx="12" cy="12" r="1.8" />
       <circle cx="19" cy="12" r="1.8" />
-    </svg>
-  );
-}
-
-function PlusIcon() {
-  return (
-    <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M12 5v14M5 12h14"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.9"
-      />
     </svg>
   );
 }

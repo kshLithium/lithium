@@ -4,6 +4,7 @@ import { TERMINAL_FEATURE_ENABLED, WORKBENCH_SURFACES_ENABLED } from "../shared/
 
 type ComposerProps = {
   attachments: AttachmentRecord[];
+  allowWhileBusy?: boolean;
   canCreateThread: boolean;
   canOpenCode: boolean;
   canOpenPaper: boolean;
@@ -295,7 +296,8 @@ export function Composer(props: ComposerProps) {
   const slashQuery =
     inputFocused && rawSlashQuery !== null && rawSlashQuery !== dismissedSlashQuery ? rawSlashQuery : null;
   const showSlashHeadings = slashQuery !== null && slashQuery.length === 0;
-  const sendDisabled = props.busy || !props.value.trim() || rawSlashQuery !== null;
+  const interactionLocked = props.busy && !props.allowWhileBusy;
+  const sendDisabled = interactionLocked || !props.value.trim() || rawSlashQuery !== null;
 
   const slashCommands: SlashCommand[] = [
     {
@@ -605,7 +607,7 @@ export function Composer(props: ComposerProps) {
           const filePaths = extractDroppedPaths(event);
           setDragActive(false);
 
-          if (!filePaths.length || props.busy) {
+          if (!filePaths.length || interactionLocked) {
             return;
           }
 
@@ -617,7 +619,7 @@ export function Composer(props: ComposerProps) {
           aria-controls={slashQuery !== null ? "composer-slash-menu" : undefined}
           aria-expanded={slashQuery !== null}
           className="composer-input"
-          disabled={props.busy}
+          disabled={interactionLocked}
           onChange={(event) => props.onValueChange(event.target.value)}
           onBlur={() => setInputFocused(false)}
           onFocus={() => setInputFocused(true)}
@@ -684,7 +686,7 @@ export function Composer(props: ComposerProps) {
                 <button
                   aria-label={`Remove ${attachment.name}`}
                   className="composer-attachment-remove"
-                  disabled={props.busy}
+                  disabled={interactionLocked}
                   onClick={() => props.onRemoveAttachment(attachment.id)}
                   type="button"
                 >

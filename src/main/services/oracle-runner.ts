@@ -62,9 +62,109 @@ export type OracleRunResult = {
   outputText: string;
 };
 
+export type OracleStartedSession = {
+  command: CommandSpec;
+  chromePath?: string;
+  sessionId: string;
+  sessionLogPath?: string;
+  startedAt: string;
+  pid: number | null;
+  slug: string;
+  model: OracleModel;
+  files: string[];
+  outputPath: string;
+  stdoutPath: string;
+  stderrPath: string;
+};
+
 type InteractiveRecoveryMode = "cookies" | "fresh-browser" | "fresh-chat" | null;
 
 export class OracleRunner {
+  async startConsult(options: OracleRunOptions): Promise<OracleStartedSession> {
+    const sessionId = normalizeOracleSessionId(options.slug);
+    const initialLaunch = resolveOracleLaunchOptions(process.env, {
+      strategistSessionReady: options.strategistSessionReady
+    });
+    const allowConversationReuse = shouldReuseSavedChatgptConversation(process.env);
+    const shouldPreemptReusableBrowser =
+      initialLaunch.engine === "browser" &&
+      initialLaunch.manualLogin &&
+      initialLaunch.strategistSessionReady;
+    const reusableChatgptUrl =
+      initialLaunch.engine === "browser" &&
+      initialLaunch.strategistSessionReady &&
+      allowConversationReuse &&
+      !initialLaunch.chatgptUrl
+        ? await resolveReusableChatgptConversationUrl(sessionId)
+        : undefined;
+    const launch =
+      reusableChatgptUrl && !initialLaunch.chatgptUrl
+        ? {
+            ...initialLaunch,
+            chatgptUrl: reusableChatgptUrl
+          }
+        : initialLaunch;
+    const browserThinkingTime =
+      launch.engine === "browser" && (await supportsOracleBrowserThinkingTime())
+        ? options.browserThinkingTime
+        : undefined;
+    const chromePath = launch.engine === "browser" ? await detectChromePath() : undefined;
+
+    if (shouldPreemptReusableBrowser) {
+      await this.resetInteractiveReuseState(chromePath);
+    }
+
+    const oracleCommand = await resolveLocalOracleCommand();
+    const inlineCookiesPath =
+      launch.engine === "browser" && (await this.exists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
+        ? ORACLE_BROWSER_INLINE_COOKIES_PATH
+        : undefined;
+    const commandEnv =
+      launch.engine === "browser" && launch.manualLogin
+        ? {
+            ORACLE_BROWSER_PROFILE_DIR: ORACLE_BROWSER_PROFILE_PATH
+          }
+        : undefined;
+    const command = this.buildCommand({
+      workspacePath: options.workspacePath,
+      prompt: this.normalizePrompt(options.prompt),
+      model: options.model,
+      browserThinkingTime,
+      outputPath: options.outputPath,
+      slug: options.slug,
+      chromePath,
+      oracleCommand,
+      inlineCookiesPath,
+      launch,
+      files: options.files
+    });
+    const session = await startCommand({
+      spec: command,
+      stdoutPath: options.stdoutPath,
+      stderrPath: options.stderrPath,
+      env: commandEnv
+    });
+
+    void session.result.finally(async () => {
+      await this.cleanupLingeringBrowser(chromePath, launch).catch(() => undefined);
+    });
+
+    return {
+      command,
+      chromePath,
+      sessionId,
+      sessionLogPath: launch.engine === "browser" ? await resolveOracleSessionLogPath(sessionId) : undefined,
+      startedAt: session.startedAt,
+      pid: session.pid,
+      slug: options.slug,
+      model: options.model,
+      files: options.files,
+      outputPath: options.outputPath,
+      stdoutPath: options.stdoutPath,
+      stderrPath: options.stderrPath
+    };
+  }
+
   async consult(options: OracleRunOptions): Promise<OracleRunResult> {
     const sessionId = normalizeOracleSessionId(options.slug);
     const initialLaunch = resolveOracleLaunchOptions(process.env, {

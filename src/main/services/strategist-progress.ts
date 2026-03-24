@@ -40,28 +40,20 @@ export function extractOracleSessionProgress(logText: string): StrategistProgres
     const explicitPreview = line.match(/^\[assistant-preview\]\s*([\s\S]+)$/i)?.[1]?.trim();
 
     if (explicitPreview) {
-      const normalizedPreview = sanitizeOracleProgressText(explicitPreview);
-
-      if (normalizedPreview) {
-        assistantPreviews.push(normalizedPreview);
-      }
+      assistantPreviews.push(...extractOracleProgressEntries(explicitPreview));
       continue;
     }
 
     const thinkingMatch = line.match(/^\d+%\s+\[[^\]]+\]\s+—\s+(.+)$/);
 
     if (thinkingMatch?.[1]) {
-      const normalizedThinking = sanitizeOracleProgressText(thinkingMatch[1]);
-
-      if (normalizedThinking) {
-        thinkingPreviews.push(normalizedThinking);
-      }
+      thinkingPreviews.push(...extractOracleProgressEntries(thinkingMatch[1]));
     }
   }
 
-  const uniqueErrorPreviews = dedupeOracleProgressEntries(errorPreviews);
-  const uniqueAssistantPreviews = dedupeOracleProgressEntries(assistantPreviews);
-  const uniqueThinkingPreviews = dedupeOracleProgressEntries(thinkingPreviews);
+  const uniqueErrorPreviews = buildStableOracleProgressHistory(errorPreviews);
+  const uniqueAssistantPreviews = buildStableOracleProgressHistory(assistantPreviews);
+  const uniqueThinkingPreviews = buildStableOracleProgressHistory(thinkingPreviews);
   const previewHistory =
     uniqueAssistantPreviews.length > 0
       ? uniqueAssistantPreviews.slice(-3)
@@ -81,20 +73,24 @@ export function mergeStrategistLiveProgress(
     return logProgress;
   }
 
-  const liveSummary = liveProgress?.progressSummary ?? "";
-  const logSummary = logProgress.progressSummary ?? "";
-  const preferredSummary =
-    isGenericStrategistProgressSummary(liveSummary) && !isGenericStrategistProgressSummary(logSummary)
-      ? logSummary
-      : liveSummary || logSummary;
-  const preferredDetails = dedupeOracleProgressEntries([
+  const logHistory = buildStableOracleProgressHistory([
     ...logProgress.progressDetails,
-    ...(liveProgress?.progressDetails ?? [])
-  ]).filter((detail) => detail !== preferredSummary);
+    logProgress.progressSummary
+  ]);
+  const liveHistory = buildStableOracleProgressHistory([
+    ...(liveProgress?.progressDetails ?? []),
+    liveProgress?.progressSummary ?? ""
+  ]);
+  const mergedHistory = buildStableOracleProgressHistory([
+    ...logHistory,
+    ...(shouldUseLiveStrategistHistory(logHistory, liveHistory) ? liveHistory : [])
+  ]);
+  const preferredSummary = mergedHistory.at(-1) ?? logHistory.at(-1) ?? liveHistory.at(-1) ?? "";
+  const preferredDetails = mergedHistory.slice(0, -1);
 
   return {
     progressSummary: preferredSummary,
-    progressDetails: preferredDetails
+    progressDetails: preferredDetails.slice(-3)
   };
 }
 
@@ -157,13 +153,17 @@ export async function readLiveOracleSessionProgress(sessionSlug: string): Promis
             thinkingStatus?: string;
           }
         | undefined;
-      const assistantPreview = sanitizeOracleProgressText(value?.assistantPreview ?? "");
-      const thinkingStatus = sanitizeOracleProgressText(value?.thinkingStatus ?? "");
+      const assistantPreview = buildStableOracleProgressHistory(
+        extractOracleProgressEntries(value?.assistantPreview ?? "")
+      );
+      const thinkingStatus = buildStableOracleProgressHistory(
+        extractOracleProgressEntries(value?.thinkingStatus ?? "")
+      );
       const previewHistory =
         assistantPreview.length > 0
-          ? [assistantPreview]
+          ? assistantPreview.slice(-3)
           : thinkingStatus.length > 0
-            ? [thinkingStatus]
+            ? thinkingStatus.slice(-3)
             : [];
 
       return {
@@ -216,13 +216,81 @@ function sanitizeOracleProgressText(value: string) {
   return dedupedParagraphs.join("\n\n").trim();
 }
 
+function extractOracleProgressEntries(value: string) {
+  return sanitizeOracleProgressText(value)
+    .split(/\n\s*\n/)
+    .map((entry) => entry.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function buildStableOracleProgressHistory(values: string[]) {
+  return trimOracleProgressTail(pruneOracleProgressFragments(dedupeOracleProgressEntries(values)));
+}
+
+function trimOracleProgressTail(values: string[]) {
+  const entries = [...values];
+
+  while (entries.length > 1 && looksLikeOracleTrailingFragment(entries.at(-1) ?? "")) {
+    entries.pop();
+  }
+
+  return entries;
+}
+
+function pruneOracleProgressFragments(values: string[]) {
+  return values.filter((entry, index, entries) => {
+    if (!looksLikeOracleTrailingFragment(entry)) {
+      return true;
+    }
+
+    const normalizedEntry = entry.replace(/[.…\s]+$/g, "").trim();
+
+    if (!normalizedEntry) {
+      return false;
+    }
+
+    return !entries.slice(index + 1).some((candidate) => {
+      const normalizedCandidate = candidate.trim();
+
+      if (!normalizedCandidate || looksLikeOracleTrailingFragment(normalizedCandidate)) {
+        return false;
+      }
+
+      return normalizedCandidate.startsWith(normalizedEntry);
+    });
+  });
+}
+
 function dedupeOracleProgressEntries(values: string[]) {
   const entries: string[] = [];
 
   for (const value of values) {
     const normalized = sanitizeOracleProgressText(value);
 
-    if (!normalized || entries.includes(normalized)) {
+    if (!normalized) {
+      continue;
+    }
+
+    let handled = false;
+
+    for (let index = 0; index < entries.length; index += 1) {
+      const existing = entries[index];
+
+      if (existing === normalized) {
+        handled = true;
+        break;
+      }
+
+      if (isOracleProgressPrefixVariant(existing, normalized)) {
+        if (normalized.length > existing.length) {
+          entries[index] = normalized;
+        }
+        handled = true;
+        break;
+      }
+    }
+
+    if (handled) {
       continue;
     }
 
@@ -230,6 +298,63 @@ function dedupeOracleProgressEntries(values: string[]) {
   }
 
   return entries;
+}
+
+function shouldUseLiveStrategistHistory(logHistory: string[], liveHistory: string[]) {
+  const liveSummary = liveHistory.at(-1) ?? "";
+  const logSummary = logHistory.at(-1) ?? "";
+
+  if (!liveSummary) {
+    return false;
+  }
+
+  if (!logSummary) {
+    return true;
+  }
+
+  if (isGenericStrategistProgressSummary(liveSummary) && !isGenericStrategistProgressSummary(logSummary)) {
+    return false;
+  }
+
+  if (looksLikeOracleTrailingFragment(liveSummary) && !looksLikeOracleTrailingFragment(logSummary)) {
+    return false;
+  }
+
+  if (isOracleProgressPrefixVariant(liveSummary, logSummary) && logSummary.length >= liveSummary.length) {
+    return false;
+  }
+
+  return true;
+}
+
+function isOracleProgressPrefixVariant(left: string, right: string) {
+  const shorter = left.length <= right.length ? left : right;
+  const longer = shorter === left ? right : left;
+  const normalizedShorter = shorter.replace(/[.…\s]+$/g, "").trim();
+  const normalizedLonger = longer.trim();
+
+  if (!normalizedShorter || normalizedShorter.length < 12) {
+    return false;
+  }
+
+  return normalizedLonger.startsWith(normalizedShorter);
+}
+
+function looksLikeOracleTrailingFragment(value: string) {
+  const normalized = value.replace(/[.…\s]+$/g, "").trim();
+  const compact = normalized.replace(/\s+/g, "");
+
+  if (!compact) {
+    return true;
+  }
+
+  return compact.length <= 4 && !looksLikeFinishedOracleSentence(normalized);
+}
+
+function looksLikeFinishedOracleSentence(value: string) {
+  return /[.!?…]$/.test(value) || /(니다|요|죠|함|합니다|됩니다|였습니다|하겠습니다|할게요|했어요|중입니다|입니다)$/u.test(
+    value
+  );
 }
 
 function buildLiveOracleProgressExpression() {

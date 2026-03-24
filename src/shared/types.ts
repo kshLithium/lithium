@@ -163,6 +163,12 @@ export type ThreadRecord = {
   title: string;
   summary: string;
   memory?: string;
+  orchestratorSessionId?: string;
+  orchestratorUpdatedAt?: string;
+  conversationOrchestratorSessionId?: string;
+  conversationOrchestratorUpdatedAt?: string;
+  automationPlannerSessionId?: string;
+  automationPlannerUpdatedAt?: string;
   strategistContextFingerprint?: string;
   strategistLastContextAttachedAt?: string;
   createdAt: string;
@@ -175,6 +181,44 @@ export type ProjectMemoryPreferences = {
   manuscriptStyle: string;
 };
 
+export type ProjectNarrativeMemoryRecord = {
+  northStar: string;
+  activeStory: string;
+  collaborationContract: string[];
+  currentFocus: string;
+  recentDirections: string[];
+  constraints: string[];
+};
+
+export type ProjectModelMemoryRecord = {
+  openQuestions: string[];
+  activeHypotheses: string[];
+  stableFacts: string[];
+  keyDecisions: string[];
+  metrics: string[];
+  learnedPatterns: string[];
+};
+
+export type ProjectExecutionJournalMemoryRecord = {
+  sessionSummary: string;
+  activeAutomationSummary: string;
+  recentArtifacts: string[];
+  recentCommands: string[];
+  recentLogs: string[];
+  recoveryNotes: string[];
+};
+
+export type ProjectMemoryLayer = {
+  summary: string;
+  bullets: string[];
+};
+
+export type ProjectMemoryMap = {
+  narrative: ProjectMemoryLayer;
+  knowledge: ProjectMemoryLayer;
+  execution: ProjectMemoryLayer;
+};
+
 export type ProjectMemoryRecord = {
   projectBrief: string;
   researchGoal: string;
@@ -183,6 +227,12 @@ export type ProjectMemoryRecord = {
   openQuestions: string[];
   activeHypotheses: string[];
   sessionSummary: string;
+  layers: {
+    narrative: ProjectNarrativeMemoryRecord;
+    projectModel: ProjectModelMemoryRecord;
+    executionJournal: ProjectExecutionJournalMemoryRecord;
+  };
+  memoryMap: ProjectMemoryMap;
   updatedAt: string;
 };
 
@@ -190,6 +240,7 @@ export type ContextPackLane = "strategist" | "builder" | "paper";
 
 export type AutomationMode = "checkpoint" | "continuous";
 export type AutomationStatus = "idle" | "running";
+export type AutomationWorkerMode = "planner" | "sync" | "async" | "live";
 export type AutomationStepKind =
   | "strategize"
   | "code-edit"
@@ -199,6 +250,8 @@ export type AutomationStepKind =
   | "literature-search"
   | "checkpoint";
 export type AutomationStepLane = "controller" | "strategist" | "builder" | "researcher" | "writer" | "critic";
+export type AutomationCycleStatus = "planned" | "running" | "paused" | "completed" | "failed" | "cancelled";
+export type AutomationCyclePhase = "planning" | "workers" | "reporting";
 export type AutomationBudget = {
   maxSteps: number;
   maxRuntimeMinutes: number;
@@ -206,23 +259,59 @@ export type AutomationBudget = {
   usedSteps: number;
   usedRetries: number;
 };
+export type AutomationCycleLaneState = {
+  lane: AutomationStepLane;
+  title: string;
+  status: "pending" | RecordStatus;
+  workerMode: AutomationWorkerMode;
+  summary: string;
+  stepId?: string;
+  idempotencyKey?: string;
+  resumeCursor?: string;
+  updatedAt: string;
+};
 export type AutomationProposedStep = {
   kind: AutomationStepKind;
   title: string;
   prompt: string;
   requiresReview?: boolean;
 };
+export type AutomationCycleRecord = {
+  id: string;
+  sessionId: string;
+  threadId: string;
+  title: string;
+  objective: string;
+  plannerPrompt: string;
+  plannerReply?: string;
+  plannerSessionId?: string;
+  status: AutomationCycleStatus;
+  phase: AutomationCyclePhase;
+  summary: string;
+  laneStates: AutomationCycleLaneState[];
+  activeLaneStepIds?: string[];
+  completedLaneStepIds?: string[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string;
+  completedAt?: string;
+};
 export type AutomationSessionRecord = {
   id: string;
   threadId: string;
   objective: string;
   displayObjective?: string;
+  plannerSessionId?: string;
+  plannerUpdatedAt?: string;
   mode: AutomationMode;
   status: AutomationStatus;
   allowedActions: AutomationStepKind[];
   paperWriteEnabled: boolean;
   evidenceMode: "strict" | "pragmatic";
   budget: AutomationBudget;
+  latestCycleId?: string;
+  activeCycleId?: string;
+  activeLaneStepIds?: string[];
   latestStepId?: string;
   latestCheckpointId?: string;
   currentStepSummary: string;
@@ -238,12 +327,18 @@ export type AutomationStepRecord = {
   id: string;
   sessionId: string;
   threadId: string;
+  cycleId?: string;
   kind: AutomationStepKind;
   lane: AutomationStepLane;
+  workerMode?: AutomationWorkerMode;
   title: string;
   prompt: string;
   status: RecordStatus;
   summary: string;
+  idempotencyKey?: string;
+  startedSideEffects?: string[];
+  completedSideEffects?: string[];
+  resumeCursor?: string;
   decisionId?: string;
   runId?: string;
   changedFiles: string[];
@@ -356,6 +451,7 @@ export type BuilderRunControlRequest = {
 
 export type ChatProgressRequest = {
   workspacePath?: string;
+  threadId?: string;
 };
 
 export type BuilderRunInspection = {
@@ -375,7 +471,8 @@ export type BuilderRunInspection = {
 
 export type ChatProgressInspection = {
   active: boolean;
-  lane: "router" | "strategist" | "builder";
+  lane: "orchestrator" | "router" | "strategist" | "builder";
+  threadId?: string;
   progressSummary: string;
   progressDetails: string[];
   activeCommand: string | null;
@@ -431,6 +528,29 @@ export type AttachmentRecord = {
   updatedAt: string;
 };
 
+export type ConversationEntryRole = "user" | "assistant" | "system";
+export type ConversationEntrySource =
+  | "user"
+  | "orchestrator"
+  | "automation"
+  | "checkpoint"
+  | "system";
+
+export type ConversationEntryRecord = {
+  id: string;
+  threadId: string;
+  role: ConversationEntryRole;
+  source: ConversationEntrySource;
+  body: string;
+  createdAt: string;
+  decisionId?: string;
+  runId?: string;
+  automationSessionId?: string;
+  automationCycleId?: string;
+  automationStepId?: string;
+  automationCheckpointId?: string;
+};
+
 export type ManuscriptSectionRecord = {
   section: "results";
   path: string;
@@ -444,6 +564,8 @@ export type ProjectSnapshot = {
   threads: ThreadRecord[];
   activeThreadId: string | null;
   activeThread: ThreadRecord | null;
+  conversationEntries?: ConversationEntryRecord[];
+  latestConversationEntry?: ConversationEntryRecord | null;
   attachments: AttachmentRecord[];
   activeThreadAttachments: AttachmentRecord[];
   decisions: DecisionRecord[];
@@ -458,9 +580,11 @@ export type ProjectSnapshot = {
   latestTerminalSession: TerminalSessionSummary | null;
   manuscript: ManuscriptSectionRecord | null;
   automationSessions?: AutomationSessionRecord[];
+  automationCycles?: AutomationCycleRecord[];
   automationSteps?: AutomationStepRecord[];
   automationCheckpoints?: AutomationCheckpointRecord[];
   latestAutomationSession?: AutomationSessionRecord | null;
+  latestAutomationCycle?: AutomationCycleRecord | null;
   latestAutomationCheckpoint?: AutomationCheckpointRecord | null;
   logs: string[];
 };
@@ -509,6 +633,7 @@ export type StrategistRequest = {
   prompt: string;
   displayPrompt?: string;
   attachExplicitWorkspaceFiles?: boolean;
+  sessionSlug?: string;
   model?: OracleModel;
   reasoningIntensity?: OracleThinkingTime;
 };
@@ -802,6 +927,16 @@ export type ProjectMemoryUpdate = {
   activeHypotheses?: string[];
   preferences?: Partial<ProjectMemoryPreferences>;
   sessionSummary?: string;
+  layers?: Partial<{
+    narrative: Partial<ProjectNarrativeMemoryRecord>;
+    projectModel: Partial<ProjectModelMemoryRecord>;
+    executionJournal: Partial<ProjectExecutionJournalMemoryRecord>;
+  }>;
+  memoryMap?: Partial<{
+    narrative: Partial<ProjectMemoryLayer>;
+    knowledge: Partial<ProjectMemoryLayer>;
+    execution: Partial<ProjectMemoryLayer>;
+  }>;
 };
 
 export type LithiumApi = {

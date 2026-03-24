@@ -54,7 +54,11 @@
   --chat-surface-glow: radial-gradient(circle at top, rgba(255, 255, 255, 0.8) 0%, rgba(255, 255, 255, 0) 58%);
   --process-glass: rgba(255, 255, 255, 0.72);
   --user-bubble-shadow: 0 10px 26px rgba(15, 23, 42, 0.05);
-  --bubble-user: #ececec;
+  --bubble-user: rgb(243 243 243);
+  --chat-pill-radius: 16px;
+  --chat-column-width: clamp(43rem, 60vw, 54rem);
+  --chat-read-width: calc(var(--chat-column-width) - clamp(1rem, 1.8vw, 1.5rem));
+  --surface-drag-strip-height: 32px;
   --shadow-soft: 0 8px 20px rgba(15, 23, 42, 0.03);
   --shadow-medium: 0 10px 28px rgba(15, 23, 42, 0.08);
   --shadow-large: 0 24px 70px rgba(15, 23, 42, 0.12);
@@ -305,8 +309,8 @@ select {
 }
 
 .workspace-shell.platform-darwin .thread-rail:not(.collapsed) .thread-rail-header {
-  min-height: 50px;
-  padding-left: 88px;
+  min-height: 58px;
+  padding: 12px 12px 8px 88px;
 }
 
 .workspace-shell.platform-darwin .thread-rail:not(.collapsed) .thread-rail-header.empty {
@@ -495,7 +499,7 @@ select {
 .main-shell {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   background: var(--panel);
 }
 
@@ -643,9 +647,11 @@ select {
 
 .chat-column {
   min-height: 0;
+  height: 100%;
   position: relative;
   display: grid;
   grid-template-areas: "chat";
+  grid-template-rows: minmax(0, 1fr);
   isolation: isolate;
   background: transparent;
 }
@@ -673,6 +679,7 @@ select {
 .chat-canvas-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   transition:
     grid-template-columns 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
     opacity 180ms ease;
@@ -721,10 +728,10 @@ select {
 }
 
 .chat-feed {
-  width: min(860px, 100%);
+  width: min(var(--chat-column-width), 100%);
   display: grid;
   align-content: start;
-  gap: 16px;
+  gap: 18px;
   padding-top: 2px;
 }
 
@@ -790,23 +797,19 @@ select {
 }
 
 .message {
-  width: min(720px, 100%);
-  max-width: min(720px, 100%);
+  width: min(var(--chat-read-width), 100%);
+  max-width: min(var(--chat-read-width), 100%);
   display: grid;
   gap: 7px;
+  justify-self: center;
   color: var(--text);
 }
 
 .message.user {
-  width: fit-content;
-  max-width: min(72%, 620px);
-  min-width: 72px;
-  justify-self: end;
-  padding: 13px 15px;
-  border-radius: 16px;
-  border: 1px solid var(--border);
-  background: var(--bubble-user);
-  color: var(--text);
+  width: min(var(--chat-read-width), 100%);
+  max-width: min(var(--chat-read-width), 100%);
+  display: flex;
+  justify-content: flex-end;
 }
 
 .message.assistant,
@@ -815,20 +818,24 @@ select {
 }
 
 .message.system {
-  width: min(760px, 100%);
+  width: 100%;
   text-align: center;
 }
 
 .chat-feed > .message.user + .message.assistant,
+.chat-feed > .message.assistant + .message.user,
 .chat-feed > .message.user + .process-card,
-.chat-feed > .process-card + .message.assistant {
-  margin-top: 12px;
+.chat-feed > .process-card + .message.assistant,
+.chat-feed > .process-card + .message.user {
+  margin-top: 18px;
 }
 
 .chat-feed.compact > .message.user + .message.assistant,
+.chat-feed.compact > .message.assistant + .message.user,
 .chat-feed.compact > .message.user + .process-card,
-.chat-feed.compact > .process-card + .message.assistant {
-  margin-top: 8px;
+.chat-feed.compact > .process-card + .message.assistant,
+.chat-feed.compact > .process-card + .message.user {
+  margin-top: 12px;
 }
 
 .message.user .message-meta,
@@ -1020,7 +1027,22 @@ select {
 }
 
 .message.user .message-body {
-  line-height: 1.54;
+  width: fit-content;
+  max-width: min(72%, 38rem);
+  min-width: 4.5rem;
+  margin-left: auto;
+  padding: 10px 14px;
+  border-radius: var(--chat-pill-radius);
+  border: 1px solid var(--border);
+  background: var(--bubble-user);
+  box-shadow: var(--user-bubble-shadow);
+  line-height: 1.42;
+}
+
+.message.assistant .message-body {
+  max-width: 100%;
+  font-size: 0.875rem;
+  line-height: 1.78;
 }
 
 .message.system .message-body {
@@ -2227,7 +2249,7 @@ select {
 
 .thread-rail-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   min-height: 34px;
@@ -2237,6 +2259,33 @@ select {
 .thread-rail-header.empty {
   min-height: 36px;
   padding: 6px 12px 4px;
+}
+
+.thread-rail-project {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.thread-rail-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 0.94rem;
+  font-weight: 620;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+.thread-rail-project-meta {
+  color: var(--subtle);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
 .thread-rail-body {
@@ -2490,6 +2539,8 @@ select {
 .main-shell {
   position: relative;
   min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -2505,9 +2556,29 @@ select {
   transition: background 180ms ease;
 }
 
+.surface-header.surface-header-ghost {
+  position: absolute;
+  inset: 0 0 auto;
+  min-height: var(--surface-drag-strip-height);
+  height: var(--surface-drag-strip-height);
+  padding: 0;
+  z-index: 14;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.workspace-shell:not(.platform-darwin) .surface-header.surface-header-ghost {
+  display: none;
+}
+
 .surface-header button,
 .surface-header select {
   -webkit-app-region: no-drag;
+}
+
+.surface-header.surface-header-ghost::after {
+  display: none;
 }
 
 .surface-header::after {
@@ -2648,9 +2719,15 @@ select {
   scroll-padding-bottom: 160px;
 }
 
+.workspace-shell.platform-darwin .chat-scroll {
+  padding-top: calc(var(--surface-drag-strip-height) + 24px);
+  scroll-padding-top: calc(var(--surface-drag-strip-height) + 24px);
+}
+
 .message {
-  width: min(760px, 100%);
-  max-width: min(760px, 100%);
+  width: min(var(--chat-read-width), 100%);
+  max-width: min(var(--chat-read-width), 100%);
+  justify-self: center;
   animation: surface-fade-up 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
   transition:
     background 180ms ease,
@@ -2661,21 +2738,14 @@ select {
 }
 
 .message.user {
-  width: fit-content;
-  max-width: min(70%, 640px);
-  min-width: 72px;
-  justify-self: end;
-  padding: 12px 16px;
-  border-radius: 14px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: var(--bubble-user);
-  color: var(--text);
-  box-shadow: var(--user-bubble-shadow);
+  width: min(var(--chat-read-width), 100%);
+  max-width: min(var(--chat-read-width), 100%);
+  justify-content: flex-end;
 }
 
 .message.assistant {
-  width: min(760px, 100%);
-  max-width: min(760px, 100%);
+  width: min(var(--chat-read-width), 100%);
+  max-width: min(var(--chat-read-width), 100%);
 }
 
 .message.pending .message-body {
@@ -2683,8 +2753,8 @@ select {
 }
 
 .message-body {
-  font-size: 0.85rem;
-  line-height: 1.72;
+  font-size: 0.86rem;
+  line-height: 1.74;
 }
 
 .composer-shell {
@@ -2702,7 +2772,7 @@ select {
   left: 50%;
   bottom: calc(100% + 12px);
   z-index: 14;
-  width: min(720px, calc(100% - 32px));
+  width: min(var(--chat-column-width), calc(100% - 32px));
   max-height: min(440px, calc(100vh - 220px));
   display: grid;
   gap: 10px;
@@ -2845,17 +2915,20 @@ select {
 
 .composer-card {
   --composer-input-line-height: 1.34;
-  --composer-input-pad-block-start: clamp(0.34rem, 0.32rem + 0.06vw, 0.4rem);
-  --composer-input-pad-block-end: clamp(0.32rem, 0.3rem + 0.06vw, 0.38rem);
+  --composer-input-pad-block-start: clamp(0.5rem, 0.46rem + 0.08vw, 0.58rem);
+  --composer-input-pad-block-end: clamp(0.48rem, 0.44rem + 0.08vw, 0.56rem);
   --composer-input-pad-inline: clamp(0.92rem, 0.88rem + 0.16vw, 1.02rem);
-  width: min(688px, calc(100% - 28px));
+  position: relative;
+  width: min(var(--chat-column-width), calc(100% - 28px));
   margin: 0 auto;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 78%, transparent);
-  border-radius: 20px;
-  background: color-mix(in srgb, var(--surface-frost-strong) 94%, transparent);
-  box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14);
-  backdrop-filter: blur(20px) saturate(135%);
-  -webkit-backdrop-filter: blur(20px) saturate(135%);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 56%, transparent);
+  border-radius: calc(var(--chat-pill-radius) + 4px);
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 18px 34px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
   overflow: hidden;
   transition:
     border-color 140ms ease,
@@ -2864,26 +2937,41 @@ select {
     transform 140ms ease;
 }
 
+.composer-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0) 52%);
+  pointer-events: none;
+}
+
 .composer-shell.compact .composer-card {
   --composer-input-line-height: 1.32;
-  --composer-input-pad-block-start: 0.3rem;
-  --composer-input-pad-block-end: 0.28rem;
+  --composer-input-pad-block-start: 0.44rem;
+  --composer-input-pad-block-end: 0.42rem;
 }
 
 .composer-card.drag-active {
   border-color: rgba(71, 80, 93, 0.26);
-  box-shadow: 0 0 0 3px rgba(71, 80, 93, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 0 0 3px rgba(71, 80, 93, 0.06),
+    0 18px 34px rgba(15, 23, 42, 0.08);
 }
 
 .composer-card:focus-within {
-  border-color: rgba(71, 80, 93, 0.18);
-  box-shadow: 0 22px 44px rgba(15, 23, 42, 0.16);
-  transform: translateY(-1px);
+  border-color: rgba(71, 80, 93, 0.14);
+  background: color-mix(in srgb, var(--panel-strong) 88%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 20px 38px rgba(15, 23, 42, 0.1);
+  transform: translateY(-0.5px);
 }
 
 .composer-input {
   width: 100%;
-  min-height: calc(1lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end) + 0.06rem);
+  min-height: calc(1lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end) + 0.08rem);
   max-height: min(
     20vh,
     calc(5lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end))
@@ -2894,21 +2982,26 @@ select {
     var(--composer-input-pad-inline)
     var(--composer-input-pad-block-end);
   border: 0;
-  border-radius: 20px;
+  border-radius: calc(var(--chat-pill-radius) + 2px);
   background: transparent;
-  font-size: 0.86rem;
+  font-size: 0.9rem;
   line-height: var(--composer-input-line-height);
+  position: relative;
+  z-index: 1;
 }
 
 .composer-input::placeholder {
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted) 90%, transparent);
 }
 
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 0 12px 12px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid rgba(15, 23, 42, 0.05);
+  position: relative;
+  z-index: 1;
 }
 
 .composer-attachment-chip {

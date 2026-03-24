@@ -4,6 +4,7 @@ import type {
   AutomationStepRecord,
   BuilderRunInspection,
   ChatProgressInspection,
+  ConversationEntryRecord,
   ResolvedTheme,
   LithiumHandoff,
   ThemePreference,
@@ -43,6 +44,9 @@ export function buildChatItems(
 
   const items: ChatItem[] = [];
   const activeThreadId = snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? null;
+  const conversationEntries = [...(snapshot.conversationEntries ?? [])]
+    .filter((entry) => !activeThreadId || entry.threadId === activeThreadId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   const decisions = [...snapshot.decisions]
     .filter((decision) => !activeThreadId || decision.threadId === activeThreadId)
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
@@ -63,6 +67,11 @@ export function buildChatItems(
     .filter((trace) => !activeThreadId || trace.threadId === activeThreadId)
     .sort((left, right) => left.completedAt.localeCompare(right.completedAt));
   const automationSessionById = new Map(automationSessions.map((session) => [session.id, session] as const));
+  const conversationCheckpointIds = new Set(
+    conversationEntries
+      .map((entry) => entry.automationCheckpointId)
+      .filter((value): value is string => Boolean(value))
+  );
   const latestAutomationTimelineTimestamp = resolveLatestAutomationTimelineTimestamp(
     automationSessions,
     automationSteps,
@@ -73,8 +82,15 @@ export function buildChatItems(
       .filter((trace) => trace.finalRoute === "mixed" && trace.downstreamRunId)
       .map((trace) => trace.downstreamRunId as string)
   );
+  const hasConversationEntries = conversationEntries.length > 0;
 
-  for (const decision of decisions) {
+  if (hasConversationEntries) {
+    for (const entry of conversationEntries) {
+      items.push(formatConversationEntry(entry, items.length));
+    }
+  }
+
+  for (const decision of hasConversationEntries ? [] : decisions) {
     const visiblePrompt = resolveVisibleDecisionPrompt(decision);
 
     if (visiblePrompt) {
@@ -108,7 +124,7 @@ export function buildChatItems(
     });
   }
 
-  for (const run of runs) {
+  for (const run of hasConversationEntries ? [] : runs) {
     if (shouldSuppressAutomationRun(run, latestAutomationTimelineTimestamp)) {
       continue;
     }
@@ -141,7 +157,7 @@ export function buildChatItems(
     });
   }
 
-  for (const session of automationSessions) {
+  for (const session of hasConversationEntries ? [] : automationSessions) {
     const visiblePrompt = shouldSuppressAutomationSessionPrompt(session, automationCheckpoints)
       ? ""
       : resolveVisibleAutomationSessionPrompt(session);
@@ -171,13 +187,17 @@ export function buildChatItems(
       role: "assistant",
       variant: "neutral",
       title: "Lithium",
-      body: step.summary.trim(),
+      body: humanizeAutomationStepSummary(step.summary.trim()),
       timestamp: step.completedAt || step.updatedAt,
       order: items.length
     });
   }
 
   for (const checkpoint of automationCheckpoints) {
+    if (conversationCheckpointIds.has(checkpoint.id)) {
+      continue;
+    }
+
     const visiblePrompt = resolveVisibleAutomationCheckpointPrompt(checkpoint);
     const session = automationSessionById.get(checkpoint.sessionId);
     const tone = resolveAutomationCheckpointTone(checkpoint, session);
@@ -222,17 +242,59 @@ export function buildChatItems(
     });
   }
 
-  const sortedItems = items.sort((left, right) => {
-    const timeDifference = left.timestamp.localeCompare(right.timestamp);
+  return collapseDuplicateUserTaskItems(sortChatItems(items));
+}
 
-    if (timeDifference !== 0) {
-      return timeDifference;
-    }
+export function mergeTransientChatItems(
+  chatItems: ChatItem[],
+  pendingChatItems: ChatItem[],
+  input: {
+    busyAction?: string | null;
+    busyBody?: string | null;
+    chatProgress?: ChatProgressInspection | null;
+    workspacePath?: string;
+    activeThreadId?: string | null;
+  }
+) {
+  const items = [...chatItems, ...pendingChatItems];
+  const liveProgressBody = formatLiveProgressBody(input.chatProgress ?? null);
+  const order = items.length;
+  const transientThreadKey =
+    input.chatProgress?.threadId || input.activeThreadId || input.workspacePath || pendingChatItems[0]?.id || "chat";
 
-    return left.order - right.order;
-  });
+  if (input.busyAction && pendingChatItems.length) {
+    items.push({
+      id: `busy:${transientThreadKey}:${input.busyAction}`,
+      role: "assistant",
+      variant: "neutral",
+      title: "Lithium",
+      body: input.busyBody?.trim() || liveProgressBody || "Working…",
+      timestamp:
+        input.chatProgress?.updatedAt || pendingChatItems[pendingChatItems.length - 1]?.timestamp || new Date().toISOString(),
+      order,
+      pending: true
+    });
+    return sortChatItems(items);
+  }
 
-  return collapseDuplicateUserTaskItems(sortedItems);
+  if (
+    input.chatProgress?.active &&
+    liveProgressBody &&
+    shouldRenderLiveProgress(chatItems, input.chatProgress, liveProgressBody)
+  ) {
+    items.push({
+      id: `live-progress:${transientThreadKey}:${input.chatProgress.lane}`,
+      role: "assistant",
+      variant: "neutral",
+      title: "Lithium",
+      body: liveProgressBody,
+      timestamp: input.chatProgress.updatedAt,
+      order,
+      pending: true
+    });
+  }
+
+  return sortChatItems(items);
 }
 
 function resolveVisibleDecisionPrompt(decision: ProjectSnapshot["decisions"][number]) {
@@ -243,6 +305,39 @@ function resolveVisibleDecisionPrompt(decision: ProjectSnapshot["decisions"][num
   }
 
   return prompt;
+}
+
+function sortChatItems(items: ChatItem[]) {
+  return [...items].sort((left, right) => {
+    const timeDifference = left.timestamp.localeCompare(right.timestamp);
+
+    if (timeDifference !== 0) {
+      return timeDifference;
+    }
+
+    return left.order - right.order;
+  });
+}
+
+function shouldRenderLiveProgress(
+  chatItems: ChatItem[],
+  progress: ChatProgressInspection,
+  body: string
+) {
+  const latestPersistedTimestamp = [...chatItems]
+    .reverse()
+    .find((item) => !item.pending)?.timestamp;
+
+  if (latestPersistedTimestamp && latestPersistedTimestamp.localeCompare(progress.updatedAt) > 0) {
+    return false;
+  }
+
+  const latestAssistantOrSystemBody = [...chatItems]
+    .reverse()
+    .find((item) => item.role !== "user" && !item.pending)?.body
+    ?.trim();
+
+  return latestAssistantOrSystemBody !== body.trim();
 }
 
 function resolveVisibleRunPrompt(run: ProjectSnapshot["runs"][number]) {
@@ -373,6 +468,12 @@ function describeAutomationCheckpoint(
 
   if (tone === "failed") {
     return "직전 단계가 깔끔하게 끝나지 않았습니다. 같은 경로를 계속 복구할지, 방향을 바꿀지 알려주세요.";
+  }
+
+  if (/^checkpoint ready$/i.test(checkpoint.title)) {
+    return summary
+      ? `한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다. 마지막 결과는 ${summary}`
+      : "한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다. 다음 방향을 정하면 바로 이어서 진행할 수 있습니다.";
   }
 
   if (
@@ -792,10 +893,35 @@ function formatChatArtifactLabel(relativePath: string) {
 export function resolveThreadTitle(snapshot: ProjectSnapshot) {
   return (
     snapshot.activeThread?.title ||
+    snapshot.latestConversationEntry?.body ||
     snapshot.latestDecision?.summary ||
     snapshot.project?.name ||
     "Lithium"
   );
+}
+
+function formatConversationEntry(entry: ConversationEntryRecord, order: number): ChatItem {
+  const variant =
+    entry.source === "automation" || entry.source === "checkpoint"
+      ? "neutral"
+      : entry.role === "assistant"
+      ? "research"
+      : "neutral";
+
+  return {
+    id: `conversation:${entry.id}`,
+    role: entry.role,
+    variant,
+    title:
+      entry.role === "user"
+        ? "You"
+        : entry.role === "system"
+        ? "Automation"
+        : "Lithium",
+    body: entry.body.trim(),
+    timestamp: entry.createdAt,
+    order
+  };
 }
 
 export function resolveWorkspaceSurfaceTitle(
@@ -1049,7 +1175,7 @@ function extractVisibleStrategistReply(rawOutput: string) {
 
 function simplifyStrategistDisplayText(value: string) {
   return inlineReferenceLinks(value)
-    .replace(/\n\s*입니다\.\s*(?=\n|$)/g, "")
+    .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -1332,19 +1458,42 @@ export function formatLiveProgressBody(
     | Pick<ChatProgressInspection, "progressSummary" | "progressDetails" | "activeCommand">
     | null
 ) {
-  if (!progress?.progressSummary.trim()) {
+  if (!progress) {
     return "";
   }
 
-  const lines = [progress.progressSummary.trim()];
+  const summary = progress.progressSummary.trim();
+  const lines: string[] = [];
 
   if (progress.progressDetails.length) {
     for (const detail of progress.progressDetails) {
-      lines.push(detail);
+      if (detail.trim()) {
+        lines.push(detail.trim());
+      }
     }
   }
 
+  if (summary && !lines.includes(summary)) {
+    lines.push(summary);
+  }
+
+  const command = progress.activeCommand?.trim() || "";
+
+  if (command && (!summary || isGenericLiveProgressSummary(summary)) && !lines.some((line) => line.includes(command))) {
+    lines.push(`Command: \`${truncateText(command, 160)}\``);
+  }
+
+  if (!lines.length) {
+    return "";
+  }
+
   return lines.join("\n\n");
+}
+
+function isGenericLiveProgressSummary(value: string) {
+  return /^(thinking|thinking…|working|working…|starting|starting…|researching|researching…|finishing|finishing…|routing your message\.?)$/i.test(
+    value.trim()
+  );
 }
 
 function extractCompactBuilderSummary(value: string) {
