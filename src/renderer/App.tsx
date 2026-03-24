@@ -169,6 +169,7 @@ export default function App() {
   );
   const visibleChatItems = useMemo(() => {
     const items = [...chatItems, ...visiblePendingChatItems];
+    const liveProgressBody = formatLiveProgressBody(chatProgress);
 
     if (busyAction && visiblePendingChatItems.length) {
       items.push({
@@ -176,18 +177,18 @@ export default function App() {
         role: "assistant",
         variant: "neutral",
         title: "Lithium",
-        body: formatLiveProgressBody(chatProgress) || describeBusyChatState(busyAction),
+        body: liveProgressBody || describeBusyChatState(busyAction),
         timestamp: new Date().toISOString(),
         order: items.length,
         pending: true
       });
-    } else if (chatProgress?.active && formatLiveProgressBody(chatProgress)) {
+    } else if (chatProgress?.active && liveProgressBody) {
       items.push({
-        id: `live-progress:${chatProgress.updatedAt}`,
+        id: `live-progress:${workspacePath || activeThreadId || "chat"}:${chatProgress.lane}`,
         role: "assistant",
         variant: "neutral",
         title: "Lithium",
-        body: formatLiveProgressBody(chatProgress),
+        body: liveProgressBody,
         timestamp: chatProgress.updatedAt,
         order: items.length,
         pending: true
@@ -195,7 +196,7 @@ export default function App() {
     }
 
     return items;
-  }, [busyAction, chatItems, chatProgress, visiblePendingChatItems]);
+  }, [activeThreadId, busyAction, chatItems, chatProgress, visiblePendingChatItems, workspacePath]);
   const pdfPreviewPath = useMemo(
     () => resolvePdfPreviewPath(selectedPaperPath, paperWorkbenchFiles),
     [paperWorkbenchFiles, selectedPaperPath]
@@ -843,7 +844,7 @@ export default function App() {
 
     const poll = async () => {
       try {
-        await refreshWorkspace(workspacePath);
+        await refreshProjectSnapshot(workspacePath);
 
         if (cancelled) {
           return;
@@ -879,6 +880,10 @@ export default function App() {
       return;
     }
 
+    if (surfaceMode !== "memory") {
+      return;
+    }
+
     let cancelled = false;
 
     void window.lithium
@@ -898,6 +903,7 @@ export default function App() {
       cancelled = true;
     };
   }, [
+    surfaceMode,
     snapshot.activeThread?.id,
     snapshot.activeThread?.updatedAt,
     snapshot.latestDecision?.id,
@@ -1114,6 +1120,23 @@ export default function App() {
       setSnapshot(nextSnapshot);
       setWorkspaceFiles(files);
     });
+  }
+
+  async function refreshProjectSnapshot(nextWorkspacePath = workspacePath) {
+    if (!nextWorkspacePath) {
+      startTransition(() => {
+        setSnapshot(emptySnapshot);
+      });
+      return emptySnapshot;
+    }
+
+    const nextSnapshot = await window.lithium.getProjectSnapshot(nextWorkspacePath);
+
+    startTransition(() => {
+      setSnapshot(nextSnapshot);
+    });
+
+    return nextSnapshot;
   }
 
   async function withBusy(label: string, work: () => Promise<void>) {
@@ -1949,7 +1972,7 @@ export default function App() {
     });
   }
 
-  function handleOpenArtifact(path: string) {
+  const handleOpenArtifact = useEffectEvent((path: string) => {
     if (!WORKBENCH_SURFACES_ENABLED) {
       return;
     }
@@ -1958,11 +1981,11 @@ export default function App() {
     setCodeCanvasOpen(false);
     setLogsOpen(false);
     setInspectorPath(path);
-  }
+  });
 
-  function handleCloseArtifact() {
+  const handleCloseArtifact = useEffectEvent(() => {
     setInspectorPath("");
-  }
+  });
 
   function handleOpenInspectorWorkbench() {
     if (!WORKBENCH_SURFACES_ENABLED || !selectedInspectorFile) {

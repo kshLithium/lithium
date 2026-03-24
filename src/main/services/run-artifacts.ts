@@ -7,6 +7,7 @@ import type {
   WorkspaceFileDiff,
   WorkspaceFileDiffStatus
 } from "../../shared/types";
+import { handoffMachineSummary } from "../../shared/handoff-utils";
 import { parseBuilderOutput } from "./protocol";
 import { resolveWorkspaceGitRoot } from "./workspace-execution";
 import { resolveWorkspaceMemberPath } from "./workspace-paths";
@@ -68,9 +69,10 @@ export function stripStatusFooter(finalMessage: string) {
 
 export function extractFinalSummary(finalMessage: string) {
   const handoff = parseBuilderOutput(finalMessage);
+  const machineSummary = handoffMachineSummary(handoff);
 
-  if (handoff.summary) {
-    return handoff.summary;
+  if (machineSummary) {
+    return machineSummary;
   }
 
   const stripped = stripStatusFooter(finalMessage);

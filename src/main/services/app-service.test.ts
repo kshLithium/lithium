@@ -467,7 +467,7 @@ describe("AppService", () => {
     expect(snapshotAfterInterrupt.latestAutomationCheckpoint?.title).toBe("Automation update");
     expect(snapshotAfterInterrupt.latestAutomationCheckpoint?.userResponse).toBe("지금까지 진행사항 보고좀");
     expect(snapshotAfterInterrupt.latestAutomationCheckpoint?.summary).toContain(
-      "Lithium is still working on the current step."
+      "현재 단계 작업을 계속 진행하고 있습니다."
     );
     await new Promise((resolve) => setTimeout(resolve, 250));
   });
@@ -554,7 +554,7 @@ describe("AppService", () => {
     expect(snapshot.latestAutomationSession?.latestCheckpointId).toBeUndefined();
     expect(snapshot.latestAutomationSession?.budget.usedRetries).toBe(1);
     expect(snapshot.latestAutomationCheckpoint?.title).toBe("Automation update");
-    expect(snapshot.latestAutomationCheckpoint?.summary).toContain("already planning the next recovery step");
+    expect(snapshot.latestAutomationCheckpoint?.summary).toContain("자동으로 다음 복구 경로를 정리하고 있습니다.");
     expect(snapshot.latestAutomationCheckpoint?.status).toBe("approved");
     expect((oracleRunner.consult.mock.calls[1]?.[0] as { prompt?: string })?.prompt).toMatch(/failed|실패/);
 
@@ -1063,7 +1063,202 @@ describe("AppService", () => {
     expect(resumedSnapshot.latestAutomationSession?.endedAt).toBeUndefined();
   });
 
-  it("terminates detached builder runs when the latest automation session is already idle", async () => {
+  it("clears stale stop metadata when a checkpoint is approved", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const app = new AppService(workspace, { store });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf를 다시 이어서 진행해줘",
+      mode: "continuous",
+      maxSteps: 12,
+      maxRuntimeMinutes: 30,
+      maxRetries: 4,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const now = new Date().toISOString();
+
+    await store.writeAutomationCheckpoint(workspace, {
+      id: "AC900",
+      sessionId: session.id,
+      threadId: session.threadId,
+      status: "pending",
+      title: "Automation interrupted after app restart",
+      summary: "Automation stopped when Lithium restarted during the builder step.",
+      whatChanged: [],
+      evidence: [],
+      risks: ["Automation stopped when Lithium restarted during the builder step."],
+      nextActions: ["Resume automation to continue from the latest saved state."],
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "idle",
+      latestCheckpointId: "AC900",
+      currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+      stopReason: "Automation stopped when Lithium restarted during the builder step.",
+      endedAt: now,
+      updatedAt: now
+    });
+
+    const resumedSnapshot = await app.approveAutomationCheckpoint({
+      workspacePath: workspace,
+      sessionId: session.id,
+      checkpointId: "AC900",
+      response: "계속 연구 진행"
+    });
+
+    expect(resumedSnapshot.latestAutomationSession?.id).toBe(session.id);
+    expect(resumedSnapshot.latestAutomationSession?.status).toBe("running");
+    expect(resumedSnapshot.latestAutomationSession?.stopReason).toBeUndefined();
+    expect(resumedSnapshot.latestAutomationSession?.endedAt).toBeUndefined();
+  });
+
+  it("does not treat an app-restart interruption as a fresh builder failure when resuming automation", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-18T01:30:03.000Z",
+        endedAt: "2026-03-18T01:30:05.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: [
+          "이전 판단을 이어서 바로 실행하겠습니다.",
+          "",
+          "LITHIUM_HANDOFF",
+          JSON.stringify({
+            summary: "이전 판단을 이어서 바로 실행하겠습니다."
+          })
+        ].join("\n")
+      }))
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-18T01:41:10.000Z",
+        endedAt: "2026-03-18T01:41:12.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: [
+          "이어진 builder step을 실행했습니다.",
+          "",
+          "LITHIUM_STATUS",
+          '{"summary":"recovery resumed cleanly","result":"success"}'
+        ].join("\n")
+      })),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
+        buildImmediateBuilderCommand(cwd, prompt, outputPath)
+      )
+    };
+    const app = new AppService(workspace, { store, oracleRunner, codexRunner });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf를 다시 이어서 진행해줘",
+      mode: "continuous",
+      maxSteps: 12,
+      maxRuntimeMinutes: 30,
+      maxRetries: 4,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const activeThread = createdSnapshot.activeThread!;
+    const now = "2026-03-18T01:30:00.000Z";
+    const taskId = (await store.allocateTask(workspace)).id;
+    const runPaths = await store.allocateRun(workspace);
+
+    await store.writeTask(workspace, {
+      id: taskId,
+      threadId: activeThread.id,
+      sourceDecisionId: undefined,
+      title: "Detached builder task",
+      prompt: "Continue the detached builder task.",
+      status: "failed",
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.writeRun(workspace, {
+      id: runPaths.id,
+      threadId: activeThread.id,
+      taskId,
+      prompt: "Continue the detached builder task.",
+      displayPrompt: "[autopilot] Continue the detached builder task.",
+      model: "gpt-5.4",
+      status: "failed",
+      exitCode: null,
+      pid: null,
+      command: buildImmediateBuilderCommand(workspace, "Continue the detached builder task.", runPaths.outputPath),
+      stdoutPath: runPaths.stdoutPath,
+      stderrPath: runPaths.stderrPath,
+      finalMessagePath: runPaths.outputPath,
+      finalMessage: [
+        "Builder run ended without writing a final answer.",
+        "",
+        "LITHIUM_STATUS",
+        '{"summary":"Builder run ended without writing a final answer.","result":"failed"}'
+      ].join("\n"),
+      handoff: undefined,
+      changedFiles: [],
+      contextPackPath: undefined,
+      finalization: "auto",
+      createdAt: now,
+      startedAt: now,
+      endedAt: "2026-03-18T01:31:00.000Z"
+    });
+    await store.writeAutomationCheckpoint(workspace, {
+      id: "AC900",
+      sessionId: session.id,
+      threadId: session.threadId,
+      status: "pending",
+      title: "Automation interrupted after app restart",
+      summary: "Automation stopped when Lithium restarted during the builder step.",
+      whatChanged: [],
+      evidence: [],
+      risks: ["Automation stopped when Lithium restarted during the builder step."],
+      nextActions: ["Resume automation to continue from the latest saved state."],
+      createdAt: "2026-03-18T01:31:05.000Z",
+      updatedAt: "2026-03-18T01:31:05.000Z"
+    });
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "idle",
+      latestCheckpointId: "AC900",
+      currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+      stopReason: "Automation stopped when Lithium restarted during the builder step.",
+      endedAt: "2026-03-18T01:31:05.000Z",
+      updatedAt: "2026-03-18T01:31:05.000Z"
+    });
+
+    await app.approveAutomationCheckpoint({
+      workspacePath: workspace,
+      sessionId: session.id,
+      checkpointId: "AC900",
+      response: "이어서 진행"
+    });
+
+    await vi.waitFor(() => {
+      expect(oracleRunner.consult).toHaveBeenCalled();
+    });
+
+    const strategistCalls = oracleRunner.consult.mock.calls as unknown as Array<[{ prompt?: string }]>;
+    const strategistPrompt = strategistCalls[0]?.[0]?.prompt ?? "";
+    expect(strategistPrompt).toContain("이어서 진행");
+    expect(strategistPrompt).not.toContain("직전 builder step이 실패되었습니다.");
+    expect(strategistPrompt).not.toContain("직전 실패 요약: Builder run ended without writing a final answer.");
+  });
+
+  it("keeps detached builder runs alive after restart when their recorded process still exists", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
     const app = new AppService(workspace, { store });
@@ -1139,12 +1334,154 @@ describe("AppService", () => {
     const reconciledSnapshot = await app.getSnapshot(workspace);
 
     expect(reconciledSnapshot.latestAutomationSession?.status).toBe("idle");
-    expect(reconciledSnapshot.latestRun?.status).toBe("cancelled");
-    expect(reconciledSnapshot.latestRun?.pid).toBeNull();
-    expect(reconciledSnapshot.latestRun?.finalMessage).toContain("detached builder process");
+    expect(reconciledSnapshot.latestRun?.status).toBe("running");
+    expect(reconciledSnapshot.latestRun?.pid).toBe(child.pid ?? null);
+
+    const inspection = await app.inspectBuilderRun({
+      workspacePath: workspace,
+      runId: runPaths.id
+    });
+
+    expect(inspection?.active).toBe(true);
+    expect(await processGone(child.pid ?? -1)).toBe(false);
+
+    await app.terminateBuilderRun({
+      workspacePath: workspace,
+      runId: runPaths.id
+    });
     await vi.waitFor(async () => {
       expect(await processGone(child.pid ?? -1)).toBe(true);
     });
+  });
+
+  it("resumes a running automation builder step after app restart instead of interrupting the session", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const previousFinalizationThreshold = process.env.LITHIUM_RUN_FINALIZATION_THRESHOLD_MS;
+    process.env.LITHIUM_RUN_FINALIZATION_THRESHOLD_MS = "20";
+
+    try {
+      const app = new AppService(workspace, { store });
+
+      await app.initProject(workspace);
+      const createdSnapshot = await app.createAutomationSession({
+        workspacePath: workspace,
+        objective: "parameter-golf 기준선을 자동으로 이어서 실험해줘",
+        mode: "checkpoint",
+        maxSteps: 12,
+        maxRuntimeMinutes: 30,
+        maxRetries: 4,
+        paperWriteEnabled: false
+      });
+      const activeThread = createdSnapshot.activeThread!;
+      const session = createdSnapshot.latestAutomationSession!;
+      const runPaths = await store.allocateRun(workspace);
+      const stepAllocation = await store.allocateAutomationStep(workspace);
+      const taskId = (await store.allocateTask(workspace)).id;
+      const now = new Date().toISOString();
+      const command = buildOutputThenHangBuilderCommand(
+        workspace,
+        "Continue the MLX experiment after restart.",
+        runPaths.outputPath
+      );
+
+      await Promise.all([
+        writeFile(runPaths.stdoutPath, "", "utf8"),
+        writeFile(runPaths.stderrPath, "", "utf8"),
+        writeFile(runPaths.outputPath, "", "utf8")
+      ]);
+
+      const child = spawn(command.command, command.args, {
+        cwd: command.cwd,
+        stdio: "ignore"
+      });
+
+      await store.writeTask(workspace, {
+        id: taskId,
+        threadId: activeThread.id,
+        sourceDecisionId: undefined,
+        title: "Resume detached automation run",
+        prompt: "Continue the MLX experiment after restart.",
+        status: "running",
+        createdAt: now,
+        updatedAt: now
+      });
+      await store.writeRun(workspace, {
+        id: runPaths.id,
+        threadId: activeThread.id,
+        taskId,
+        prompt: "Continue the MLX experiment after restart.",
+        displayPrompt: "[autopilot] Continue the MLX experiment after restart.",
+        model: "gpt-5.4",
+        status: "running",
+        exitCode: null,
+        pid: child.pid ?? null,
+        command,
+        stdoutPath: runPaths.stdoutPath,
+        stderrPath: runPaths.stderrPath,
+        finalMessagePath: runPaths.outputPath,
+        finalMessage: "",
+        handoff: null,
+        changedFiles: [],
+        contextPackPath: undefined,
+        finalization: null,
+        createdAt: now,
+        startedAt: now,
+        endedAt: undefined
+      });
+      await store.writeAutomationStep(workspace, {
+        id: stepAllocation.id,
+        sessionId: session.id,
+        threadId: activeThread.id,
+        kind: "experiment-run",
+        lane: "builder",
+        title: "Let Codex choose and execute the next bounded step",
+        prompt: "Continue the MLX experiment after restart.",
+        status: "running",
+        summary: "Step started.",
+        runId: runPaths.id,
+        changedFiles: [],
+        evidence: [],
+        checkpointRequired: false,
+        createdAt: now,
+        updatedAt: now
+      });
+      await store.writeAutomationSession(workspace, {
+        ...session,
+        status: "running",
+        latestStepId: stepAllocation.id,
+        currentStepSummary: "Let Codex choose and execute the next bounded step",
+        updatedAt: now
+      });
+
+      const restartedApp = new AppService(workspace, { store });
+      const firstSnapshot = await restartedApp.getSnapshot(workspace);
+
+      expect(firstSnapshot.latestAutomationSession?.status).toBe("running");
+      expect(firstSnapshot.latestAutomationSession?.stopReason).toBeUndefined();
+
+      await vi.waitFor(
+        async () => {
+          const snapshot = await restartedApp.getSnapshot(workspace);
+          expect(snapshot.latestRun?.id).toBe(runPaths.id);
+          expect(snapshot.latestRun?.status).toBe("completed");
+          expect(snapshot.latestAutomationSession?.status).toBe("idle");
+          expect(snapshot.latestAutomationCheckpoint?.title).toBe("Checkpoint ready");
+          expect(snapshot.latestAutomationCheckpoint?.summary).toContain("builder completed before the process stalled");
+          expect(snapshot.latestAutomationCheckpoint?.summary).not.toContain("restarted");
+          expect(snapshot.latestAutomationSession?.stopReason).toBeUndefined();
+        },
+        {
+          timeout: 5_000
+        }
+      );
+
+      await vi.waitFor(async () => {
+        expect(await processGone(child.pid ?? -1)).toBe(true);
+      });
+    } finally {
+      restoreEnv("LITHIUM_RUN_FINALIZATION_THRESHOLD_MS", previousFinalizationThreshold);
+    }
   });
 
   it("terminates detached builder processes even when no live registry handle exists", async () => {
@@ -1547,6 +1884,80 @@ describe("AppService", () => {
       downstreamDecisionId: "D001",
       downstreamRunId: "R001"
     });
+  });
+
+  it("does not re-inject a truncated strategist summary when a natural strategist reply already exists", async () => {
+    const workspace = await createWorkspace();
+    const routerRunner = {
+      route: vi.fn(async () => ({
+        decision: {
+          route: "mixed" as const,
+          rewrittenPrompt: "연구 자동화를 이어가되 먼저 다음 recovery step을 정해라.",
+          reasonShort: "The request needs a strategist pass and then concrete execution."
+        },
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-18T01:30:00.000Z",
+        endedAt: "2026-03-18T01:30:02.000Z",
+        exitCode: 0,
+        timedOut: false,
+        rawOutput: "LITHIUM_ROUTE\n{\"route\":\"mixed\"}"
+      }))
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-18T01:30:03.000Z",
+        endedAt: "2026-03-18T01:30:05.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: [
+          "이번 실패는 오케스트레이션 복구로 보는 게 맞습니다.",
+          "",
+          "LITHIUM_HANDOFF",
+          JSON.stringify({
+            summary:
+              "이번 실패는 오케스트레이션 복구로 보는 게 맞습니다. 업로드된 runtime에는 latest builder summary가 그대로…",
+            rationale: "Natural reply already captures the user-facing guidance."
+          })
+        ].join("\n")
+      }))
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-18T01:41:10.000Z",
+        endedAt: "2026-03-18T01:41:12.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: [
+          "복구 step을 정했습니다.",
+          "",
+          "LITHIUM_STATUS",
+          '{"summary":"recovery step chosen","result":"success"}'
+        ].join("\n")
+      })),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
+        buildImmediateBuilderCommand(cwd, prompt, outputPath)
+      )
+    };
+    const app = new AppService(workspace, {
+      routerRunner,
+      oracleRunner,
+      codexRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "연구 자동화 다시 시작 이어서"
+    });
+
+    expect(snapshot.latestRun?.prompt).toContain("Strategist answer:\n이번 실패는 오케스트레이션 복구로 보는 게 맞습니다.");
+    expect(snapshot.latestRun?.prompt).not.toContain("Strategist summary:");
   });
 
   it("lets hidden /build override force the builder while still recording the router decision", async () => {

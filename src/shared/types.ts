@@ -216,6 +216,7 @@ export type AutomationSessionRecord = {
   id: string;
   threadId: string;
   objective: string;
+  displayObjective?: string;
   mode: AutomationMode;
   status: AutomationStatus;
   allowedActions: AutomationStepKind[];
@@ -274,6 +275,8 @@ export type LithiumHandoff = {
   schemaVersion: "lithium_handoff_v1";
   role: ContextPackLane;
   summary: string;
+  machineSummary?: string;
+  userMessage?: string;
   nextTask?: string;
   rationale?: string;
   result?: "success" | "partial" | "failed";
@@ -757,6 +760,7 @@ export type AutomationSessionCreateRequest = {
   workspacePath?: string;
   threadId?: string;
   objective: string;
+  displayObjective?: string;
   mode?: AutomationMode;
   maxSteps?: number;
   maxRuntimeMinutes?: number;

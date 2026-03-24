@@ -43,6 +43,8 @@ describe("protocol", () => {
       schemaVersion: "lithium_handoff_v1",
       role: "strategist",
       summary: "tight summary",
+      machineSummary: "tight summary",
+      userMessage: "Operator-facing note.",
       rationale: "it is the highest-value check",
       files: ["paper/main.tex"],
       risks: ["compile may fail"],
@@ -70,6 +72,8 @@ describe("protocol", () => {
     expect(result).toMatchObject({
       role: "strategist",
       summary: "자연스럽게 정리된 최종 답변.",
+      machineSummary: "자연스럽게 정리된 최종 답변.",
+      userMessage: "운영 메모: local context is thin, so official sources were used.",
       rationale: "The workspace had no local Overwatch notes."
     });
   });
@@ -97,6 +101,8 @@ describe("protocol", () => {
       schemaVersion: "lithium_handoff_v1",
       role: "builder",
       summary: "terminal and protocol cleanup",
+      machineSummary: "terminal and protocol cleanup",
+      userMessage: "Implemented the fix and verified the build.",
       result: "success",
       files: ["src/main/services/app-service.ts", "src/main/services/protocol.ts"],
       risks: ["needs broader product evals"],
@@ -106,6 +112,26 @@ describe("protocol", () => {
       openQuestions: ["should compile auto-run?"],
       automationMode: "continue",
       needsUserCheckpoint: false
+    });
+  });
+
+  it("keeps user_message and machine_summary separate when both are provided", () => {
+    const result = parseBuilderOutput([
+      "긴 자연어 본문입니다.",
+      "",
+      "LITHIUM_STATUS",
+      JSON.stringify({
+        user_message: "짧은 사용자 보고",
+        machine_summary: "internal handoff summary",
+        result: "partial"
+      })
+    ].join("\n"));
+
+    expect(result).toMatchObject({
+      summary: "internal handoff summary",
+      machineSummary: "internal handoff summary",
+      userMessage: "짧은 사용자 보고",
+      result: "partial"
     });
   });
 
@@ -276,6 +302,7 @@ describe("protocol", () => {
       schemaVersion: "lithium_handoff_v1",
       role: "strategist",
       summary: "Use the same-thread comparison first.",
+      machineSummary: "Use the same-thread comparison first.",
       rationale: "The summary and rationale should still survive.",
       files: [],
       risks: [],

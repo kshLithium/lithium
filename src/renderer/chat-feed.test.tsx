@@ -79,6 +79,37 @@ describe("ChatFeed", () => {
     expect(html).toContain(">torch_impl.py</a>에서 metric logging");
   });
 
+  it("keeps valid markdown file links out of math normalization", () => {
+    const items: ChatItem[] = [
+      {
+        id: "assistant-3b",
+        role: "assistant",
+        variant: "research",
+        title: "Lithium",
+        body:
+          "정리 메모와 산출물은 [warm34 quant gap memo](/Users/rubidium/parameter-golf/official/logs/mlx_local_research_update_2026-03-24_warm34_quant_gap.md), [raw eval log](/Users/rubidium/parameter-golf/official/logs/mlx_tiny_0layer_100step_fp16emb_r006_warm34_raw_eval_20260324.txt), [partial warm38 log](/Users/rubidium/parameter-golf/official/logs/mlx_tiny_0layer_100step_fp16emb_r006_warm38_20260324.txt)에 남겼습니다.",
+        timestamp: "2026-03-21T10:02:30.000Z",
+        order: 3
+      }
+    ];
+
+    const html = renderToStaticMarkup(<ChatFeed items={items} />);
+
+    expect(html).toContain(
+      'href="/Users/rubidium/parameter-golf/official/logs/mlx_local_research_update_2026-03-24_warm34_quant_gap.md"'
+    );
+    expect(html).toContain(">warm34 quant gap memo</a>");
+    expect(html).toContain(
+      'href="/Users/rubidium/parameter-golf/official/logs/mlx_tiny_0layer_100step_fp16emb_r006_warm34_raw_eval_20260324.txt"'
+    );
+    expect(html).toContain(">raw eval log</a>");
+    expect(html).toContain(
+      'href="/Users/rubidium/parameter-golf/official/logs/mlx_tiny_0layer_100step_fp16emb_r006_warm38_20260324.txt"'
+    );
+    expect(html).toContain(">partial warm38 log</a>에 남겼습니다.");
+    expect(html).not.toContain("katex");
+  });
+
   it("ignores changed-file artifacts and keeps the reply as plain chat content", () => {
     const items: ChatItem[] = [
       {

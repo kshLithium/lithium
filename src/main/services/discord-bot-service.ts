@@ -16,6 +16,7 @@ import type {
   RunRecord,
   ThreadCreateRequest
 } from "../../shared/types";
+import { handoffMachineSummary, handoffUserMessage } from "../../shared/handoff-utils";
 
 const DISCORD_MESSAGE_LIMIT = 1_900;
 const THREAD_TITLE_LIMIT = 64;
@@ -569,7 +570,8 @@ function deriveReply(
 
 function formatRunCompletion(run: RunRecord) {
   const summary =
-    run.handoff?.summary?.trim() ||
+    handoffUserMessage(run.handoff) ||
+    handoffMachineSummary(run.handoff) ||
     summarizeBuilderFinalMessage(run.finalMessage) ||
     `Builder finished with status ${run.status}.`;
 

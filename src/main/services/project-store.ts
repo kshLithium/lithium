@@ -1,4 +1,4 @@
-import { appendFile, copyFile, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
@@ -26,6 +26,7 @@ import type {
   WorkspaceFileRecord
 } from "../../shared/types";
 import { DEFAULT_PROJECT_RESEARCH_GOAL } from "../../shared/types";
+import { handoffMachineSummary, handoffUserMessage } from "../../shared/handoff-utils";
 import { extractFinalSummary, readTailText } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
 import { parseTerminalCapture } from "./terminal-session";
@@ -477,18 +478,26 @@ export class ProjectStore {
       return null;
     }
 
+    const latestStrategistSummary = snapshot.latestDecision?.summary?.trim() || "";
+    const latestStrategistReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 260);
+
     const sessionSummary = [
       `Project: ${snapshot.project.name}`,
       `Active Thread: ${snapshot.activeThread?.title || "none"}`,
       `Active attachments: ${snapshot.activeThreadAttachments.length || 0}`,
-      snapshot.latestDecision ? `Latest strategist summary: ${snapshot.latestDecision.summary}` : "Latest strategist summary: none",
+      snapshot.latestDecision ? `Latest strategist summary: ${latestStrategistSummary || "none"}` : "Latest strategist summary: none",
+      latestStrategistReply && !isRedundantInlineSummary(latestStrategistReply, latestStrategistSummary)
+        ? `Latest strategist reply: ${latestStrategistReply}`
+        : null,
       snapshot.latestRun
         ? `Latest run: ${snapshot.latestRun.id} (${snapshot.latestRun.status}, exit ${snapshot.latestRun.exitCode ?? "unknown"})`
         : "Latest run: none",
       snapshot.latestRun?.finalMessage
         ? `Latest builder summary: ${extractFinalSummary(snapshot.latestRun.finalMessage)}`
         : "Latest builder summary: none"
-    ].join("\n");
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
 
     return this.writeProjectMemory(workspacePath, { sessionSummary });
   }
@@ -707,6 +716,8 @@ export class ProjectStore {
     const workspaceFiles =
       lane === "strategist" ? await this.listWorkspaceFiles(workspacePath) : [];
     const memory = snapshot.memory;
+    const latestStrategistSummary = snapshot.latestDecision?.summary?.trim() || "";
+    const latestStrategistReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 420);
     const latestRunChangedFiles = snapshot.latestRun?.changedFiles ?? [];
     const latestRunSummary = snapshot.latestRun?.finalMessage
       ? extractFinalSummary(snapshot.latestRun.finalMessage)
@@ -721,7 +732,12 @@ export class ProjectStore {
       ? truncateRuntimeExcerpt(snapshot.manuscript.content, 320)
       : "none";
     const automationState = snapshot.latestAutomationSession
-      ? `Automation: ${snapshot.latestAutomationSession.status} — ${truncateInline(snapshot.latestAutomationSession.currentStepSummary || snapshot.latestAutomationSession.objective, 220)}`
+      ? `Automation: ${snapshot.latestAutomationSession.status} — ${truncateInline(
+          snapshot.latestAutomationSession.currentStepSummary ||
+            snapshot.latestAutomationSession.displayObjective ||
+            snapshot.latestAutomationSession.objective,
+          220
+        )}`
       : "Automation: none";
     const latestStateLines =
       lane === "strategist"
@@ -738,7 +754,10 @@ export class ProjectStore {
             snapshot.manuscript?.content ? "Manuscript content: available" : "Manuscript content: none"
           ]
         : [
-            `Latest strategist summary: ${truncateInline(snapshot.latestDecision?.summary || "none", 260)}`,
+            `Latest strategist summary: ${truncateInline(latestStrategistSummary || "none", 260)}`,
+            latestStrategistReply && !isRedundantInlineSummary(latestStrategistReply, latestStrategistSummary)
+              ? `Latest strategist reply: ${truncateInline(latestStrategistReply, 420)}`
+              : null,
             `Latest strategist rationale: ${truncateInline(snapshot.latestDecision?.rationale || "none", 220)}`,
             `Latest builder status: ${snapshot.latestRun?.status || "none"}`,
             `Latest builder summary: ${truncateInline(latestRunSummary, 220)}`,
@@ -750,7 +769,7 @@ export class ProjectStore {
               ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
               : "Latest terminal cwd: none",
             snapshot.manuscript?.content ? "Manuscript content: available" : "Manuscript content: none"
-          ];
+          ].filter((line): line is string => Boolean(line));
     const keyFiles =
       lane === "strategist"
         ? workspaceFiles
@@ -852,6 +871,8 @@ export class ProjectStore {
       .join("\n");
     const otherThreads = snapshot.threads.filter((thread) => thread.id !== snapshot.activeThreadId);
     const latestDecisionHandoff = deriveDecisionHandoff(snapshot.latestDecision);
+    const latestDecisionSummary = snapshot.latestDecision?.summary?.trim() || "";
+    const latestDecisionReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 500);
     const latestRunHandoff = deriveRunHandoff(snapshot.latestRun);
     const latestRunChangedFiles = snapshot.latestRun?.changedFiles ?? [];
     const manuscriptExcerpt = snapshot.manuscript?.content
@@ -950,7 +971,14 @@ export class ProjectStore {
       {
         title: "## Latest Decision",
         body: latestDecisionHandoff
-          ? formatHandoff(latestDecisionHandoff)
+          ? [
+              latestDecisionReply && !isRedundantInlineSummary(latestDecisionReply, latestDecisionSummary)
+                ? `Visible Reply: ${latestDecisionReply}`
+                : null,
+              formatHandoff(latestDecisionHandoff)
+            ]
+              .filter(Boolean)
+              .join("\n")
           : "No strategist handoff yet."
       },
       {
@@ -1374,7 +1402,9 @@ export class ProjectStore {
 
   private async writeJson(filePath: string, value: unknown) {
     await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    const tempPath = `${filePath}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await rename(tempPath, filePath);
   }
 
   private async removeFileIfExists(filePath: string) {
@@ -1557,7 +1587,7 @@ function normalizeDecisionRecord(record: DecisionRecord, defaultThreadId: string
   return {
     ...record,
     threadId: record.threadId || defaultThreadId,
-    summary: structured?.summary ?? record.summary,
+    summary: handoffMachineSummary(structured) || structured?.summary || record.summary,
     rationale: structured?.rationale ?? record.rationale,
     nextTask: undefined,
     handoff
@@ -1595,6 +1625,7 @@ function deriveDecisionHandoff(record: DecisionRecord | null): LithiumHandoff | 
       schemaVersion: "lithium_handoff_v1",
       role: "strategist",
       summary: record.summary,
+      machineSummary: record.summary,
       rationale: record.rationale,
       files: [],
       risks: [],
@@ -1616,6 +1647,7 @@ function deriveRunHandoff(record: RunRecord | null): LithiumHandoff | null {
       schemaVersion: "lithium_handoff_v1",
       role: "builder",
       summary: extractFinalSummary(record.finalMessage || ""),
+      machineSummary: extractFinalSummary(record.finalMessage || ""),
       result: record.status === "completed" ? "success" : "failed",
       files: record.changedFiles ?? [],
       risks: [],
@@ -1628,9 +1660,13 @@ function deriveRunHandoff(record: RunRecord | null): LithiumHandoff | null {
 }
 
 function formatHandoff(handoff: LithiumHandoff) {
+  const machineSummary = handoffMachineSummary(handoff);
+  const userMessage = handoffUserMessage(handoff);
+
   return [
     `Role: ${handoff.role}`,
-    `Summary: ${handoff.summary}`,
+    userMessage ? `User Message: ${userMessage}` : null,
+    `Machine Summary: ${machineSummary || handoff.summary}`,
     handoff.rationale ? `Rationale: ${handoff.rationale}` : null,
     handoff.result ? `Result: ${handoff.result}` : null,
     `Files: ${handoff.files.join("; ") || "none"}`,
@@ -1649,7 +1685,7 @@ function renderOutputContract(lane: ContextPackLane) {
     return [
       "Reply naturally first.",
       "Then append LITHIUM_HANDOFF with one compact JSON object for the app.",
-      "Only include fields that actually help the next step."
+      'Prefer "machine_summary" for the compact internal handoff and use "user_message" only when a shorter user-facing restatement helps.'
     ].join("\n");
   }
 
@@ -1657,6 +1693,7 @@ function renderOutputContract(lane: ContextPackLane) {
     return [
       "Reply naturally first.",
       "Then append LITHIUM_STATUS with one compact JSON object for the app.",
+      'Prefer "machine_summary" for the compact internal handoff and use "user_message" only when a shorter user-facing restatement helps.',
       "Keep result in success, partial, or failed."
     ].join("\n");
   }
@@ -1787,6 +1824,50 @@ function truncateAttachmentExcerpt(value: string, maxLength: number) {
   }
 
   return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function extractVisibleStrategistReply(rawOutput: string, maxChars: number) {
+  const stripped = rawOutput.replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "").trim();
+
+  if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
+    return "";
+  }
+
+  return truncateInline(stripped, maxChars);
+}
+
+function looksLikeStructuredStrategistOnly(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return true;
+  }
+
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || trimmed === "LITHIUM_HANDOFF") {
+    return true;
+  }
+
+  const meaningfulLines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return meaningfulLines.every((line) =>
+    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+      line
+    )
+  );
+}
+
+function isRedundantInlineSummary(left: string, right: string) {
+  const normalizedLeft = left.replace(/\s+/g, " ").trim().toLowerCase();
+  const normalizedRight = right.replace(/\s+/g, " ").trim().toLowerCase();
+
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft))
+  );
 }
 
 function truncateInline(value: string, maxLength: number) {

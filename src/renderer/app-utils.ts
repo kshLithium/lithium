@@ -13,6 +13,11 @@ import type {
   ThreadRecord,
   WorkspaceFileRecord
 } from "../shared/types";
+import {
+  handoffMachineSummary,
+  handoffUserMessage,
+  isOperationalAutomationMessage
+} from "../shared/handoff-utils";
 import { WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
 import type { ChatItem, ExplorerRow, MemoryDraft, PaperOutlineRow, ThreadMemoryDraft } from "./app-types";
 
@@ -58,6 +63,11 @@ export function buildChatItems(
     .filter((trace) => !activeThreadId || trace.threadId === activeThreadId)
     .sort((left, right) => left.completedAt.localeCompare(right.completedAt));
   const automationSessionById = new Map(automationSessions.map((session) => [session.id, session] as const));
+  const latestAutomationTimelineTimestamp = resolveLatestAutomationTimelineTimestamp(
+    automationSessions,
+    automationSteps,
+    automationCheckpoints
+  );
   const mixedFollowupRunIds = new Set(
     routerTraces
       .filter((trace) => trace.finalRoute === "mixed" && trace.downstreamRunId)
@@ -66,7 +76,6 @@ export function buildChatItems(
 
   for (const decision of decisions) {
     const visiblePrompt = resolveVisibleDecisionPrompt(decision);
-    const hiddenAutopilotPrompt = !visiblePrompt && isAutopilotPrompt(decision.displayPrompt || decision.prompt);
 
     if (visiblePrompt) {
       items.push({
@@ -85,13 +94,17 @@ export function buildChatItems(
       role: "assistant",
       variant: "research",
       title: "Lithium",
-      body: formatDecisionBody(decision.summary, decision.rationale, decision.rawOutput, hiddenAutopilotPrompt),
+      body: formatDecisionBody(decision.summary, decision.rationale, decision.rawOutput, false, decision.handoff),
       timestamp: decision.createdAt,
       order: items.length
     });
   }
 
   for (const run of runs) {
+    if (shouldSuppressAutomationRun(run, latestAutomationTimelineTimestamp)) {
+      continue;
+    }
+
     const visibleRunPrompt = resolveVisibleRunPrompt(run);
 
     if (!mixedFollowupRunIds.has(run.id) && visibleRunPrompt) {
@@ -121,7 +134,9 @@ export function buildChatItems(
   }
 
   for (const session of automationSessions) {
-    const visiblePrompt = resolveVisibleAutomationSessionPrompt(session);
+    const visiblePrompt = shouldSuppressAutomationSessionPrompt(session, automationCheckpoints)
+      ? ""
+      : resolveVisibleAutomationSessionPrompt(session);
 
     if (!visiblePrompt) {
       continue;
@@ -139,21 +154,7 @@ export function buildChatItems(
   }
 
   for (const step of automationSteps) {
-    const visiblePrompt = resolveVisibleAutomationStepPrompt(step);
-
-    if (visiblePrompt) {
-      items.push({
-        id: `automation-step-prompt:${step.id}`,
-        role: "user",
-        variant: "neutral",
-        title: "You",
-        body: visiblePrompt,
-        timestamp: step.createdAt,
-        order: items.length
-      });
-    }
-
-    if (!shouldRenderAutomationStepSummary(step)) {
+    if (!shouldRenderAutomationStepSummary(step, automationSessionById.get(step.sessionId), automationSteps, automationCheckpoints)) {
       continue;
     }
 
@@ -173,8 +174,14 @@ export function buildChatItems(
     const session = automationSessionById.get(checkpoint.sessionId);
     const tone = resolveAutomationCheckpointTone(checkpoint, session);
     const checkpointBody = describeAutomationCheckpoint(checkpoint, session);
+    const suppressBody = shouldSuppressResolvedAutomationCheckpointBody(
+      checkpoint,
+      session,
+      automationCheckpoints,
+      automationSteps
+    );
 
-    if (tone === "recorded" || !checkpointBody) {
+    if (tone === "recorded") {
       continue;
     }
 
@@ -188,6 +195,10 @@ export function buildChatItems(
         timestamp: checkpoint.createdAt,
         order: items.length
       });
+    }
+
+    if (!checkpointBody || suppressBody) {
+      continue;
     }
 
     items.push({
@@ -234,32 +245,69 @@ function resolveVisibleRunPrompt(run: ProjectSnapshot["runs"][number]) {
   return prompt;
 }
 
-function resolveVisibleAutomationStepPrompt(step: AutomationStepRecord) {
-  const title = step.title.trim();
-  const prompt = step.prompt.trim();
-
-  if (prompt && isGenericAutomationStepTitle(title)) {
-    return truncateText(prompt, 280);
-  }
-
-  if (title) {
-    return title;
-  }
-
-  return truncateText(prompt, 280);
-}
-
-function shouldRenderAutomationStepSummary(step: AutomationStepRecord) {
+function shouldRenderAutomationStepSummary(
+  step: AutomationStepRecord,
+  _session: AutomationSessionRecord | undefined,
+  steps: AutomationStepRecord[],
+  checkpoints: AutomationCheckpointRecord[]
+) {
   if (step.status === "running" || step.decisionId || step.runId) {
     return false;
   }
 
   const summary = step.summary.trim();
-  return Boolean(summary && summary !== "Step started.");
+  if (!summary || summary === "Step started.") {
+    return false;
+  }
+
+  if (!isOperationalAutomationMessage(summary)) {
+    return true;
+  }
+
+  const timestamp = step.completedAt || step.updatedAt;
+
+  if (
+    checkpoints.some(
+      (checkpoint) =>
+        checkpoint.sessionId === step.sessionId &&
+        isOperationalAutomationCheckpoint(checkpoint) &&
+        (checkpoint.updatedAt || checkpoint.createdAt) >= timestamp
+    )
+  ) {
+    return false;
+  }
+
+  return !hasNewerOperationalAutomationEvent(step.sessionId, timestamp, checkpoints, steps, step.id);
 }
 
 function resolveVisibleAutomationSessionPrompt(session: AutomationSessionRecord) {
-  return session.objective.trim();
+  return session.displayObjective?.trim() || session.objective.trim();
+}
+
+function shouldSuppressAutomationSessionPrompt(
+  session: AutomationSessionRecord,
+  checkpoints: AutomationCheckpointRecord[]
+) {
+  const hasSupersedingUserInstruction = checkpoints.some(
+    (checkpoint) => checkpoint.sessionId === session.id && Boolean(checkpoint.userResponse?.trim())
+  );
+
+  if (!hasSupersedingUserInstruction) {
+    return false;
+  }
+
+  const prompt = resolveVisibleAutomationSessionPrompt(session);
+  return looksLikeCanonicalAutomationObjective(prompt);
+}
+
+function looksLikeCanonicalAutomationObjective(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  return /(?:^|\n)(?:목표|제약)\s*:/m.test(trimmed) || trimmed.length > 260;
 }
 
 function resolveVisibleAutomationCheckpointPrompt(checkpoint: AutomationCheckpointRecord) {
@@ -337,7 +385,7 @@ function simplifyAutomationCheckpointSummary(
 }
 
 function looksLikeInternalAutomationSummary(value: string) {
-  return /builder run stalled without producing a final answer|latest strategist result:|latest builder result:|retry \d+\/\d+|module not founderror|shell_snapshot|automation is still running\.|automation stopped when lithium restarted during builder step/i.test(
+  return /builder run (?:stalled without producing|ended without writing) a final answer|latest strategist result:|latest builder result:|retry \d+\/\d+|module not founderror|shell_snapshot|automation is still running\.|automation stopped when lithium restarted during (?:the )?builder step/i.test(
     value
   );
 }
@@ -361,6 +409,62 @@ function humanizeAutomationStepSummary(value: string) {
 
   if (/plan the next bounded research step/i.test(trimmed)) {
     return "다음 연구 단계를 작게 쪼개서 정리하고 있습니다.";
+  }
+
+  if (/automation is ready to begin/i.test(trimmed)) {
+    return "자동 연구를 시작할 준비를 마쳤습니다.";
+  }
+
+  if (/automation started\. planning the next bounded step/i.test(trimmed)) {
+    return "자동 연구를 시작했고, 바로 다음 단계를 정리하고 있습니다.";
+  }
+
+  if (/pause requested\. finishing the current bounded step before stopping/i.test(trimmed)) {
+    return "지금 단계까지만 마무리한 뒤 멈출 예정입니다.";
+  }
+
+  if (/automation resumed/i.test(trimmed)) {
+    return "이전 상태에서 자동 연구를 다시 이어가고 있습니다.";
+  }
+
+  if (/checkpoint approved\. continuing automation/i.test(trimmed)) {
+    return "방금 방향을 반영했고 자동 연구를 이어가고 있습니다.";
+  }
+
+  if (/continuing the current step\. the latest instruction will be applied next/i.test(trimmed)) {
+    return "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다.";
+  }
+
+  if (/automation was interrupted when lithium restarted/i.test(trimmed)) {
+    return "앱이 다시 켜지면서 자동 연구가 잠시 멈췄습니다. 이어서 어떻게 할지 알려주세요.";
+  }
+
+  if (/runtime budget reached/i.test(trimmed)) {
+    return "실행 시간 한도에 도달해서 잠시 멈췄습니다. 이어갈지 결정해 주세요.";
+  }
+
+  if (/step budget reached/i.test(trimmed)) {
+    return "단계 수 한도에 도달해서 잠시 멈췄습니다. 이어갈지 결정해 주세요.";
+  }
+
+  if (/blocked on the strategist run/i.test(trimmed)) {
+    return "strategist 단계에서 막혀 있습니다. 같은 경로로 다시 시도할지 알려주세요.";
+  }
+
+  if (/automation stopped with an issue/i.test(trimmed)) {
+    return "문제가 생겨 잠시 멈췄습니다. 복구를 이어갈지 알려주세요.";
+  }
+
+  if (/paper phase activated after the latest strategist decision/i.test(trimmed)) {
+    return "최신 판단을 바탕으로 paper 동기화 단계까지 포함해 진행하고 있습니다.";
+  }
+
+  if (/^recovering after\b/i.test(trimmed)) {
+    return "직전 단계 이후 복구 경로를 진행하고 있습니다.";
+  }
+
+  if (/^continuing after\b/i.test(trimmed)) {
+    return "방금 끝난 단계에 이어 다음 작업을 진행하고 있습니다.";
   }
 
   return trimmed;
@@ -445,6 +549,89 @@ function isStrategistBrowserBlockedCheckpoint(
   return /chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired/.test(
     haystack
   );
+}
+
+function shouldSuppressResolvedAutomationCheckpointBody(
+  checkpoint: AutomationCheckpointRecord,
+  session?: AutomationSessionRecord,
+  checkpoints: AutomationCheckpointRecord[] = [],
+  steps: AutomationStepRecord[] = []
+) {
+  if (!isOperationalAutomationCheckpoint(checkpoint)) {
+    return false;
+  }
+
+  if (hasNewerOperationalAutomationEvent(checkpoint.sessionId, checkpoint.updatedAt || checkpoint.createdAt, checkpoints, steps, checkpoint.id)) {
+    return true;
+  }
+
+  return Boolean(session?.status === "running" && checkpoint.status === "approved");
+}
+
+function isOperationalAutomationCheckpoint(checkpoint: AutomationCheckpointRecord) {
+  return /automation interrupted after app restart|automation blocked on the strategist run|automation paused after the latest step|automation needs review after a failed run|automation failed|checkpoint ready|automation time budget reached|automation step budget reached/i.test(
+    checkpoint.title
+  );
+}
+
+function shouldSuppressAutomationRun(run: ProjectSnapshot["runs"][number], latestAutomationTimelineTimestamp: string) {
+  if (!latestAutomationTimelineTimestamp || run.status === "running" || !isAutopilotPrompt(run.displayPrompt || run.prompt)) {
+    return false;
+  }
+
+  if (handoffUserMessage(run.handoff)) {
+    return false;
+  }
+
+  const runSummary =
+    handoffMachineSummary(run.handoff) ||
+    extractCompactBuilderSummary(stripBuilderFooterForDisplay(run.finalMessage).trim());
+
+  if (!isOperationalAutomationMessage(runSummary)) {
+    return false;
+  }
+
+  return latestAutomationTimelineTimestamp > (run.endedAt || run.startedAt);
+}
+
+function hasNewerOperationalAutomationEvent(
+  sessionId: string,
+  timestamp: string,
+  checkpoints: AutomationCheckpointRecord[],
+  steps: AutomationStepRecord[],
+  currentId?: string
+) {
+  return (
+    checkpoints.some(
+      (checkpoint) =>
+        checkpoint.sessionId === sessionId &&
+        checkpoint.id !== currentId &&
+        isOperationalAutomationCheckpoint(checkpoint) &&
+        (checkpoint.updatedAt || checkpoint.createdAt) > timestamp
+    ) ||
+    steps.some(
+      (step) =>
+        step.sessionId === sessionId &&
+        step.id !== currentId &&
+        isOperationalAutomationMessage(step.summary.trim()) &&
+        (step.completedAt || step.updatedAt) > timestamp
+    )
+  );
+}
+
+function resolveLatestAutomationTimelineTimestamp(
+  sessions: AutomationSessionRecord[],
+  steps: AutomationStepRecord[],
+  checkpoints: AutomationCheckpointRecord[]
+) {
+  return [
+    ...sessions.map((session) => session.updatedAt),
+    ...steps.map((step) => step.completedAt || step.updatedAt),
+    ...checkpoints.map((checkpoint) => checkpoint.updatedAt || checkpoint.createdAt)
+  ]
+    .filter(Boolean)
+    .sort()
+    .at(-1) || "";
 }
 
 function collapseDuplicateUserTaskItems(items: ChatItem[]) {
@@ -748,13 +935,25 @@ export function fullDecisionBody(summary: string, rationale: string) {
     .join("\n");
 }
 
-export function formatDecisionBody(summary: string, rationale: string, rawOutput = "", preferSummary = false) {
+export function formatDecisionBody(
+  summary: string,
+  rationale: string,
+  rawOutput = "",
+  preferSummary = false,
+  handoff?: LithiumHandoff | null
+) {
   if (preferSummary) {
     const normalizedSummary = simplifyStrategistDisplayText(summary);
 
     if (normalizedSummary) {
       return normalizedSummary;
     }
+  }
+
+  const handoffMessage = simplifyStrategistDisplayText(handoffUserMessage(handoff));
+
+  if (handoffMessage) {
+    return handoffMessage;
   }
 
   const displayReply = extractVisibleStrategistReply(rawOutput);
@@ -815,7 +1014,7 @@ function looksLikeStructuredStrategistOnly(value: string) {
   }
 
   return meaningfulLines.every((line) =>
-    /^(summary|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
       line
     )
   );
@@ -991,9 +1190,20 @@ export function formatBuilderBody(
     return "Lithium is still working on this task.";
   }
 
+  const handoffMessage = handoffUserMessage(run.handoff);
+
+  if (handoffMessage) {
+    return handoffMessage;
+  }
+
   const body = stripBuilderFooterForDisplay(run.finalMessage).trim();
+
+  if (body && !looksLikeInternalExecutionTranscript(body) && !looksLikeInternalBuilderStatusMessage(body)) {
+    return body;
+  }
+
   const compactAutomationSummary = isAutopilotPrompt(run.displayPrompt || run.prompt)
-    ? run.handoff?.summary?.trim() || extractCompactBuilderSummary(body)
+    ? handoffMachineSummary(run.handoff) || extractCompactBuilderSummary(body)
     : "";
 
   if (compactAutomationSummary) {
@@ -1052,9 +1262,7 @@ function extractCompactBuilderSummary(value: string) {
 }
 
 function looksLikeInternalBuilderStatusMessage(value: string) {
-  return /builder run stalled without producing a final answer|latest issue:|retry \d+\/\d+|shell_snapshot|module not founderror|automation is still running\.|automation stopped when lithium restarted during builder step/i.test(
-    value
-  );
+  return isOperationalAutomationMessage(value);
 }
 
 export function truncateText(value: string, maxLength: number) {

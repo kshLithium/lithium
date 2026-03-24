@@ -28,8 +28,9 @@ import { AppService } from "./services/app-service";
 import { AppSettingsStore, sanitizeThemePreference } from "./services/app-settings-store";
 import { detectChromePath } from "./services/chrome-detection";
 import { DiscordBotService, resolveDiscordBotConfig } from "./services/discord-bot-service";
+import { stopAllLiveProcesses } from "./services/live-process-registry";
 import { MobileBridgeServer } from "./services/mobile-bridge-server";
-import { onLiveTerminalEvent } from "./services/terminal-pty-registry";
+import { onLiveTerminalEvent, stopAllLiveTerminals } from "./services/terminal-pty-registry";
 import {
   APP_PROTOCOL,
   isSafeExternalUrl,
@@ -51,6 +52,7 @@ const TERMINAL_EVENT_CHANNEL = "lithium:terminal-event";
 const THEME_STATE_CHANNEL = "lithium:theme-state";
 const APP_ICON_PATH = resolveAppIconPath();
 const APP_NAME = process.env.LITHIUM_APP_NAME?.trim() || (app.isPackaged ? "Lithium" : "Lithium Dev");
+const RUNTIME_CAPABILITY_CACHE_TTL_MS = 30_000;
 let lastKnownThemePreference: ThemePreference = DEFAULT_APP_SETTINGS.themePreference;
 app.setName(APP_NAME);
 app.setPath("userData", path.join(app.getPath("appData"), APP_NAME));
@@ -171,6 +173,55 @@ async function commandExists(command: string) {
   });
 }
 
+type AsyncCapabilityCache<T> = {
+  expiresAt: number;
+  value?: T;
+  promise?: Promise<T>;
+};
+
+const commandExistsCache = new Map<string, AsyncCapabilityCache<boolean>>();
+const chromePathCache: AsyncCapabilityCache<string | null> = {
+  expiresAt: 0
+};
+
+async function resolveCachedCapability<T>(
+  cache: AsyncCapabilityCache<T>,
+  loader: () => Promise<T>,
+  ttlMs = RUNTIME_CAPABILITY_CACHE_TTL_MS
+) {
+  const now = Date.now();
+
+  if (cache.value !== undefined && cache.expiresAt > now) {
+    return cache.value;
+  }
+
+  if (!cache.promise) {
+    cache.promise = loader()
+      .then((value) => {
+        cache.value = value;
+        cache.expiresAt = Date.now() + ttlMs;
+        return value;
+      })
+      .finally(() => {
+        cache.promise = undefined;
+      });
+  }
+
+  return await cache.promise;
+}
+
+async function getCachedCommandExists(command: string) {
+  const cache = commandExistsCache.get(command) ?? {
+    expiresAt: 0
+  };
+  commandExistsCache.set(command, cache);
+  return await resolveCachedCapability(cache, async () => await commandExists(command));
+}
+
+async function getCachedChromePath() {
+  return await resolveCachedCapability(chromePathCache, async () => (await detectChromePath()) ?? null);
+}
+
 async function getRuntimeAppState() {
   const settings = await appSettingsStore.read();
   return appService.getAppState({
@@ -179,9 +230,9 @@ async function getRuntimeAppState() {
     chromeVersion: process.versions.chrome,
     nodeVersion: process.versions.node,
     cwd: process.cwd(),
-    oracleReady: await commandExists("npx"),
-    codexReady: await commandExists("codex"),
-    oracleChromePath: (await detectChromePath()) ?? null,
+    oracleReady: await getCachedCommandExists("npx"),
+    codexReady: await getCachedCommandExists("codex"),
+    oracleChromePath: await getCachedChromePath(),
     discordBotStatus: discordBotService.getStatus(),
     settings
   });
@@ -756,6 +807,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  stopAllLiveProcesses();
+  stopAllLiveTerminals();
   void discordBotService.stop("shutdown");
   void mobileBridgeServer.stop();
 });

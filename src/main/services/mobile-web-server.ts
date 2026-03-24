@@ -668,7 +668,10 @@ function mapAutoresearch(snapshot: ProjectSnapshot): MobileAutoresearchSession |
 
   if (session.status === "idle" && checkpoint?.status === "pending") {
     status = isBlockedCheckpoint(checkpoint, session) ? "blocked" : "paused";
-  } else if (latestStep?.status === "failed" || /failed|issue|blocked/i.test(session.stopReason ?? "")) {
+  } else if (
+    session.status === "idle" &&
+    (latestStep?.status === "failed" || /failed|issue|blocked/i.test(session.stopReason ?? ""))
+  ) {
     status = "failed";
   } else if (session.status === "idle" && session.endedAt) {
     status = "completed";
@@ -676,15 +679,56 @@ function mapAutoresearch(snapshot: ProjectSnapshot): MobileAutoresearchSession |
 
   return {
     id: session.id,
-    objective: session.objective,
+    objective: session.displayObjective?.trim() || session.objective,
     status,
-    currentStep: session.currentStepSummary,
-    lastUpdate: checkpoint?.summary || session.currentStepSummary,
-    nextActions: checkpoint?.nextActions ?? [],
+    currentStep: humanizeAutoresearchStatusCopy(session.currentStepSummary),
+    lastUpdate:
+      humanizeAutoresearchStatusCopy(
+        session.status === "running" ? session.currentStepSummary : checkpoint?.summary || session.currentStepSummary
+      ),
+    nextActions: session.status === "running" ? [] : checkpoint?.nextActions ?? [],
     threadId: session.threadId,
     startedAt: session.startedAt,
     updatedAt: session.updatedAt
   };
+}
+
+function humanizeAutoresearchStatusCopy(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return "";
+  }
+
+  if (/plan the next bounded research step/i.test(trimmed)) {
+    return "다음 연구 단계를 작게 쪼개서 정리하고 있습니다.";
+  }
+
+  if (/let codex choose and execute the next bounded step/i.test(trimmed)) {
+    return "다음으로 검증할 실험이나 구현 단계를 고르고 있습니다.";
+  }
+
+  if (/automation started\. planning the next bounded step/i.test(trimmed)) {
+    return "자동 연구를 시작했고, 바로 다음 단계를 정리하고 있습니다.";
+  }
+
+  if (/automation resumed/i.test(trimmed)) {
+    return "이전 상태에서 자동 연구를 다시 이어가고 있습니다.";
+  }
+
+  if (/continuing the current step\. the latest instruction will be applied next/i.test(trimmed)) {
+    return "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다.";
+  }
+
+  if (/^recovering after\b/i.test(trimmed)) {
+    return "직전 단계 이후 복구 경로를 진행하고 있습니다.";
+  }
+
+  if (/^continuing after\b/i.test(trimmed)) {
+    return "방금 끝난 단계에 이어 다음 작업을 진행하고 있습니다.";
+  }
+
+  return trimmed;
 }
 
 function isBlockedCheckpoint(

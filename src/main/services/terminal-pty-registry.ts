@@ -177,6 +177,18 @@ export function stopLiveTerminal(workspacePath: string, id: string) {
   return true;
 }
 
+export function stopAllLiveTerminals() {
+  for (const state of activeTerminals.values()) {
+    state.requestedExitStatus = "cancelled";
+
+    try {
+      state.pty.kill("SIGTERM");
+    } catch {
+      // Ignore races with already-exited terminals.
+    }
+  }
+}
+
 async function finalizeLiveTerminal(state: LiveTerminalState, exitCode: number) {
   activeTerminals.delete(buildLiveResourceKey(state.workspacePath, state.id));
   state.transcriptStream.end();

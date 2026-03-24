@@ -11,7 +11,8 @@
   "scripts": {
     "postinstall": "tsx scripts/patch-oracle.mts && electron-builder install-app-deps",
     "generate:icons": "tsx scripts/generate-icons.mts",
-    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:mobile-client\" \"npm:dev:main\" \"npm:dev:electron\"",
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
+    "dev:full": "concurrently -k \"npm:dev:renderer\" \"npm:dev:mobile-client\" \"npm:dev:main\" \"npm:dev:electron\"",
     "dev:renderer": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "dev:mobile-client": "vite --config vite.mobile.config.ts --host 0.0.0.0 --port 4173 --strictPort",
     "dev:main": "npm run generate:icons && tsup src/main/index.ts src/main/preload.ts --format cjs --out-dir dist-electron --external electron --external node-pty --watch",

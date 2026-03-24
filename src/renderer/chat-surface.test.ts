@@ -61,6 +61,22 @@ describe("chat surface", () => {
     ).toBe("Investigate the preview reuse trade-off.");
   });
 
+  it("prefers the latest session display objective over the canonical internal objective", () => {
+    expect(
+      resolveAutomationObjective({
+        project: { name: "Probe project" } as ProjectSnapshot["project"],
+        memory: null,
+        activeThread: null,
+        latestDecision: null,
+        latestAutomationSession: {
+          objective:
+            "parameter-golf 프로젝트에서 이 맥북에어 M2 8GB 환경 기준으로 자동 연구를 시작해줘.\n\n목표:\n- baseline 1~2개 실행",
+          displayObjective: "연구 자동화 다시 시작 이어서"
+        } as ProjectSnapshot["latestAutomationSession"]
+      })
+    ).toBe("연구 자동화 다시 시작 이어서");
+  });
+
   it("shows pending chat state only on the active thread", () => {
     expect(isPendingChatVisible("TH001", "TH001")).toBe(true);
     expect(isPendingChatVisible("TH001", "TH002")).toBe(false);

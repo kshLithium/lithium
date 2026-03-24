@@ -1,4 +1,5 @@
 import type { ChatRouteDecision, LithiumHandoff } from "../../shared/types";
+import { isOperationalAutomationMessage } from "../../shared/handoff-utils";
 
 const STRATEGIST_MARKER = "LITHIUM_HANDOFF";
 const BUILDER_MARKER = "LITHIUM_STATUS";
@@ -18,6 +19,8 @@ export function parseOracleOutput(rawOutput: string): LithiumHandoff {
     schemaVersion: "lithium_handoff_v1",
     role: "strategist",
     summary: extractTaggedLine(rawOutput, "SUMMARY") || extractFallbackStrategistSummary(rawOutput),
+    machineSummary: extractTaggedLine(rawOutput, "MACHINE_SUMMARY") || extractTaggedLine(rawOutput, "SUMMARY") || extractFallbackStrategistSummary(rawOutput),
+    userMessage: extractTaggedLine(rawOutput, "USER_MESSAGE") || extractVisibleStrategistMessage(rawOutput) || undefined,
     rationale:
       extractTaggedLine(rawOutput, "RATIONALE") || "Oracle did not return a structured rationale.",
     files: parseTaggedList(rawOutput, "FILES"),
@@ -42,6 +45,11 @@ export function parseBuilderOutput(finalMessage: string): LithiumHandoff {
     summary:
       extractTaggedLine(finalMessage, "SUMMARY") ||
       stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180),
+    machineSummary:
+      extractTaggedLine(finalMessage, "MACHINE_SUMMARY") ||
+      extractTaggedLine(finalMessage, "SUMMARY") ||
+      stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180),
+    userMessage: extractTaggedLine(finalMessage, "USER_MESSAGE") || extractVisibleBuilderMessage(finalMessage) || undefined,
     result: normalizeResultTag(extractTaggedLine(finalMessage, "RESULT")),
     files: parseTaggedList(finalMessage, "FILES"),
     risks: parseTaggedList(finalMessage, "RISKS"),
@@ -112,11 +120,20 @@ export function describeIncompleteStrategistOutput(rawOutput: string) {
 
 function normalizeStrategistHandoff(value: unknown, rawOutput: string): LithiumHandoff {
   const candidate = toRecord(value);
+  const machineSummary =
+    readString(candidate.machine_summary, candidate.machineSummary, candidate.summary) ||
+    extractFallbackStrategistSummary(rawOutput);
+  const userMessage =
+    readString(candidate.user_message, candidate.userMessage) ||
+    extractVisibleStrategistMessage(rawOutput) ||
+    undefined;
 
   return {
     schemaVersion: "lithium_handoff_v1",
     role: "strategist",
-    summary: readString(candidate.summary) || extractFallbackStrategistSummary(rawOutput),
+    summary: machineSummary,
+    machineSummary,
+    userMessage,
     rationale:
       readString(candidate.rationale) || "Oracle did not return a structured rationale.",
     files: readStringList(candidate.files),
@@ -132,13 +149,20 @@ function normalizeStrategistHandoff(value: unknown, rawOutput: string): LithiumH
 
 function normalizeBuilderHandoff(value: unknown, finalMessage: string): LithiumHandoff {
   const candidate = toRecord(value);
+  const machineSummary =
+    readString(candidate.machine_summary, candidate.machineSummary, candidate.summary) ||
+    stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180);
+  const userMessage =
+    readString(candidate.user_message, candidate.userMessage) ||
+    extractVisibleBuilderMessage(finalMessage) ||
+    undefined;
 
   return {
     schemaVersion: "lithium_handoff_v1",
     role: "builder",
-    summary:
-      readString(candidate.summary) ||
-      stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180),
+    summary: machineSummary,
+    machineSummary,
+    userMessage,
     result: normalizeResultTag(readString(candidate.result)),
     files: readStringList(candidate.files),
     risks: readStringList(candidate.risks),
@@ -193,6 +217,26 @@ function parseWholeJsonBlock(rawText: string) {
 
 function stripMarkedBlock(rawText: string, marker: string) {
   return rawText.replace(new RegExp(`\\n*${marker}\\s*\\n[\\s\\S]*$`, "i"), "").trim();
+}
+
+function extractVisibleStrategistMessage(rawOutput: string) {
+  const stripped = stripMarkedBlock(rawOutput, STRATEGIST_MARKER).trim();
+
+  if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
+    return "";
+  }
+
+  return stripped;
+}
+
+function extractVisibleBuilderMessage(finalMessage: string) {
+  const stripped = stripMarkedBlock(finalMessage, BUILDER_MARKER).trim();
+
+  if (!stripped || looksLikeStructuredBuilderOnly(stripped) || isOperationalAutomationMessage(stripped)) {
+    return "";
+  }
+
+  return stripped;
 }
 
 function extractJsonObjectBlock(value: string) {
@@ -298,6 +342,52 @@ function parseTaggedList(rawOutput: string, tag: string) {
     .map((entry) => entry.replace(/^[-*]\s*/, "").trim())
     .filter(Boolean)
     .filter((entry) => !/^(none|n\/a|na)$/i.test(entry));
+}
+
+function looksLikeStructuredStrategistOnly(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return true;
+  }
+
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || trimmed === STRATEGIST_MARKER) {
+    return true;
+  }
+
+  const meaningfulLines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return meaningfulLines.every((line) =>
+    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+      line
+    )
+  );
+}
+
+function looksLikeStructuredBuilderOnly(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return true;
+  }
+
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || trimmed === BUILDER_MARKER) {
+    return true;
+  }
+
+  const meaningfulLines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return meaningfulLines.every((line) =>
+    /^(summary|machine_summary|user_message|result|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+      line
+    )
+  );
 }
 
 function firstNonEmptyLine(rawOutput: string) {

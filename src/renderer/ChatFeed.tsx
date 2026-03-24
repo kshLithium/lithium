@@ -1,4 +1,4 @@
-import type { ComponentPropsWithoutRef } from "react";
+import { memo, useMemo, type ComponentPropsWithoutRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -23,9 +23,12 @@ function normalizeMathMarkdown(value: string) {
       }
 
       return block
-        .split(/(`[^`\n]+`)/g)
+        .split(/(`[^`\n]+`|!?\[[^\]]+\]\([^\n)]+\))/g)
         .map((segment) => {
-          if (segment.startsWith("`") && segment.endsWith("`")) {
+          if (
+            (segment.startsWith("`") && segment.endsWith("`")) ||
+            /^!?\[[^\]]+\]\([^\n)]+\)$/.test(segment)
+          ) {
             return segment;
           }
 
@@ -122,6 +125,61 @@ function createMarkdownComponents(onOpenArtifact?: (path: string) => void, works
   };
 }
 
+type ChatMessageProps = ChatItem & {
+  compact: boolean;
+  markdownComponents: ReturnType<typeof createMarkdownComponents>;
+};
+
+const ChatMessage = memo(
+  function ChatMessage({
+    body,
+    compact,
+    markdownComponents,
+    pending,
+    role,
+    timestamp,
+    title,
+    variant
+  }: ChatMessageProps) {
+    const normalizedBody = useMemo(() => normalizeChatMarkdown(body), [body]);
+    const visualRole = role === "system" ? "assistant" : role;
+
+    return (
+      <article
+        className={`message ${visualRole} ${variant}${pending ? " pending" : ""} ${compact ? "compact" : ""}`}
+      >
+        <div className="message-meta">
+          <span>{title}</span>
+          <span>{formatTime(timestamp)}</span>
+        </div>
+        {visualRole === "assistant" ? (
+          <div className="message-body markdown chat-markdown">
+            <ReactMarkdown
+              components={markdownComponents}
+              rehypePlugins={rehypePlugins}
+              remarkPlugins={remarkPlugins}
+            >
+              {normalizedBody}
+            </ReactMarkdown>
+          </div>
+        ) : (
+          <div className="message-body plain">{body}</div>
+        )}
+      </article>
+    );
+  },
+  (previous, next) =>
+    previous.id === next.id &&
+    previous.role === next.role &&
+    previous.variant === next.variant &&
+    previous.title === next.title &&
+    previous.body === next.body &&
+    previous.timestamp === next.timestamp &&
+    previous.pending === next.pending &&
+    previous.compact === next.compact &&
+    previous.markdownComponents === next.markdownComponents
+);
+
 type ChatFeedProps = {
   items: ChatItem[];
   researchGoal?: string | null;
@@ -131,38 +189,21 @@ type ChatFeedProps = {
 };
 
 export function ChatFeed({ items, compact = false, onOpenArtifact, workspacePath }: ChatFeedProps) {
-  const markdownComponents = createMarkdownComponents(onOpenArtifact, workspacePath);
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(onOpenArtifact, workspacePath),
+    [onOpenArtifact, workspacePath]
+  );
 
   return (
     <div className={compact ? "chat-feed compact" : "chat-feed"}>
-      {items.map((item) => {
-        const visualRole = item.role === "system" ? "assistant" : item.role;
-
-        return (
-          <article
-            key={item.id}
-            className={`message ${visualRole} ${item.variant}${item.pending ? " pending" : ""} ${compact ? "compact" : ""}`}
-          >
-            <div className="message-meta">
-              <span>{item.title}</span>
-              <span>{formatTime(item.timestamp)}</span>
-            </div>
-            {visualRole === "assistant" ? (
-              <div className="message-body markdown chat-markdown">
-                <ReactMarkdown
-                  components={markdownComponents}
-                  rehypePlugins={rehypePlugins}
-                  remarkPlugins={remarkPlugins}
-                >
-                  {normalizeChatMarkdown(item.body)}
-                </ReactMarkdown>
-              </div>
-            ) : (
-              <div className="message-body plain">{item.body}</div>
-            )}
-          </article>
-        );
-      })}
+      {items.map((item) => (
+        <ChatMessage
+          key={item.id}
+          {...item}
+          compact={compact}
+          markdownComponents={markdownComponents}
+        />
+      ))}
     </div>
   );
 }

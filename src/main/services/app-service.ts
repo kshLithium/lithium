@@ -68,6 +68,10 @@ import type {
   WorkspaceSelectionResult
 } from "../../shared/types";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types";
+import {
+  handoffMachineSummary,
+  handoffUserMessage
+} from "../../shared/handoff-utils";
 import { ProjectStore } from "./project-store";
 import { OracleRunner, normalizeOracleSessionId, resolveOracleLaunchOptions } from "./oracle-runner";
 import { CodexRunner } from "./codex-runner";
@@ -120,7 +124,7 @@ import {
   mergeStrategistLiveProgress,
   readLiveOracleSessionProgress
 } from "./strategist-progress";
-import { terminateProcessTree } from "./process-tree";
+import { isProcessAlive, readProcessCommand, terminateProcessTree } from "./process-tree";
 
 type AppServiceDependencies = {
   store?: ProjectStore;
@@ -394,6 +398,10 @@ export class AppService {
       request.objective.trim() ||
       snapshot.memory?.researchGoal?.trim() ||
       "Advance the active research workspace with the highest-value next step.";
+    const displayObjective =
+      request.displayObjective?.trim() ||
+      request.objective.trim() ||
+      objective;
 
     if (request.objective.trim()) {
       await this.store.appendPromptLog(workspacePath, {
@@ -411,6 +419,7 @@ export class AppService {
       id: allocation.id,
       threadId: activeThread.id,
       objective,
+      displayObjective,
       mode: request.mode ?? "continuous",
       status: "idle",
       allowedActions: [
@@ -466,14 +475,10 @@ export class AppService {
     controller.stopRequested = false;
     controller.redirectInstruction = "";
 
-    await this.store.writeAutomationSession(workspacePath, {
-      ...session,
-      status: "running",
+    await this.writeRunningAutomationSession(workspacePath, session, {
       currentStepSummary:
         session.status === "idle" ? "Automation started. Planning the next bounded step." : session.currentStepSummary,
-      startedAt: session.startedAt ?? new Date().toISOString(),
-      endedAt: undefined,
-      updatedAt: new Date().toISOString()
+      startedAt: session.startedAt ?? new Date().toISOString()
     });
     await this.store.appendPromptLog(workspacePath, {
       kind: "automation.session.started",
@@ -507,13 +512,8 @@ export class AppService {
     const controller = this.getAutomationController(workspacePath, session.id);
     controller.pauseRequested = false;
     controller.stopRequested = false;
-    await this.store.writeAutomationSession(workspacePath, {
-      ...session,
-      status: "running",
-      currentStepSummary: "Automation resumed.",
-      stopReason: undefined,
-      endedAt: undefined,
-      updatedAt: new Date().toISOString()
+    await this.writeRunningAutomationSession(workspacePath, session, {
+      currentStepSummary: "Automation resumed."
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation resumed`);
     void this.runAutomationLoop(workspacePath, session.id);
@@ -604,15 +604,14 @@ export class AppService {
       activityMessage: `${session.id} automation update recorded`
     });
 
-    await this.store.writeAutomationSession(workspacePath, {
-      ...session,
-      status: "running",
+    await this.writeRunningAutomationSession(workspacePath, session, {
       currentStepSummary: shouldQueueRedirect
-        ? "Continuing the current step. The latest instruction will be applied next."
+        ? buildQueuedAutomationStepSummary(
+            resolveAutomationUiLanguage([instruction, session.displayObjective ?? "", session.objective])
+          )
         : session.currentStepSummary,
       lastUserInstruction: shouldQueueRedirect ? instruction : session.lastUserInstruction,
-      queuedUserInstruction: shouldQueueRedirect ? instruction : session.queuedUserInstruction,
-      updatedAt: new Date().toISOString()
+      queuedUserInstruction: shouldQueueRedirect ? instruction : session.queuedUserInstruction
     });
     await this.store.appendPromptLog(workspacePath, {
       kind: "automation.interrupt",
@@ -659,14 +658,11 @@ export class AppService {
       controller.redirectInstruction = request.response.trim();
     }
 
-    await this.store.writeAutomationSession(workspacePath, {
-      ...session,
-      status: "running",
+    await this.writeRunningAutomationSession(workspacePath, session, {
       latestCheckpointId: checkpoint.id,
       currentStepSummary: "Checkpoint approved. Continuing automation.",
       lastUserInstruction: request.response?.trim() || session.lastUserInstruction,
-      queuedUserInstruction: request.response?.trim() || session.queuedUserInstruction,
-      updatedAt: new Date().toISOString()
+      queuedUserInstruction: request.response?.trim() || session.queuedUserInstruction
     });
     await this.store.appendPromptLog(workspacePath, {
       kind: "automation.checkpoint.approved",
@@ -839,7 +835,8 @@ export class AppService {
         latestDecisionSummary: snapshot.latestDecision?.summary,
         latestTaskPrompt: snapshot.latestTask?.prompt,
         latestRunSummary:
-          snapshot.latestRun?.handoff?.summary ?? extractRunSummary(snapshot.latestRun?.finalMessage ?? ""),
+          handoffMachineSummary(snapshot.latestRun?.handoff) ||
+          extractRunSummary(snapshot.latestRun?.finalMessage ?? ""),
         latestRunStatus: snapshot.latestRun?.status,
         stdoutPath: routePaths.stdoutPath,
         stderrPath: routePaths.stderrPath,
@@ -1307,7 +1304,7 @@ export class AppService {
       status,
       finalMessage: result.finalMessage,
       changedFiles,
-      summary: handoff.summary
+      summary: handoffMachineSummary(handoff) || handoff.summary
     });
     await this.store.appendActivity(workspacePath, `${runPaths.id} finished with status ${status}`);
     await this.store.updateSessionSummary(workspacePath);
@@ -1337,9 +1334,22 @@ export class AppService {
       throw new Error("No builder task is available yet. Enter a task prompt or create one from the latest context.");
     }
 
-    const activeRun = snapshot.runs.find(
-      (run) => run.status === "running" && getLiveProcess(workspacePath, run.id)
-    );
+    let activeRun =
+      snapshot.runs.find((run) => run.status === "running" && getLiveProcess(workspacePath, run.id)) ?? null;
+
+    if (!activeRun) {
+      for (const candidate of snapshot.runs) {
+        if (candidate.status !== "running") {
+          continue;
+        }
+
+        if (await this.isRecoverableDetachedBuilderRun(candidate)) {
+          activeRun = candidate;
+          break;
+        }
+      }
+    }
+
     if (activeRun) {
       if (activeRun.prompt.trim() === prompt) {
         return snapshot;
@@ -1521,35 +1531,40 @@ export class AppService {
       return null;
     }
 
-    const snapshot = await this.store.getSnapshot(workspacePath);
     const run = request.runId
       ? await this.store.readRun(workspacePath, request.runId)
-      : snapshot.latestRun;
+      : (await this.store.getSnapshot(workspacePath)).latestRun;
 
     if (!run) {
       return null;
     }
 
     const activeHandle = getLiveProcess(workspacePath, run.id);
+    const detachedProcessActive = !activeHandle && (await this.isRecoverableDetachedBuilderRun(run));
+    const runActive = Boolean(activeHandle) || detachedProcessActive;
     const fileState = await inspectLiveProcessFiles({
       stdoutPath: run.stdoutPath,
       stderrPath: run.stderrPath,
-      outputPath: run.finalMessagePath
+      outputPath: run.finalMessagePath,
+      stdoutTailBytes: 96 * 1024,
+      stderrTailBytes: 32 * 1024
     });
     const quietForMs = fileState.lastTouched
       ? Math.max(0, Date.now() - fileState.lastTouched)
       : Math.max(0, Date.now() - new Date(run.startedAt).getTime());
     const parsedChangedFiles = parseChangedFilesFromFinalMessage(fileState.outputText);
-    const gitChangedFiles = await collectGitChangedFiles(workspacePath);
+    const shouldCollectGitChangedFiles =
+      !runActive && (run.finalization !== null || parsedChangedFiles.length > 0);
+    const gitChangedFiles = shouldCollectGitChangedFiles ? await collectGitChangedFiles(workspacePath) : [];
     const changedFiles = mergeChangedFiles(run.changedFiles ?? [], parsedChangedFiles, gitChangedFiles);
     const progress = parseCodexProgressLog(fileState.stdout);
 
     return {
       run: changedFiles.length === (run.changedFiles ?? []).length ? run : { ...run, changedFiles },
-      active: Boolean(activeHandle),
+      active: runActive,
       pid: activeHandle?.pid ?? run.pid,
-      stdoutTail: await readTailText(run.stdoutPath),
-      stderrTail: await readTailText(run.stderrPath),
+      stdoutTail: fileState.stdout,
+      stderrTail: fileState.stderr,
       outputText: fileState.outputText,
       changedFiles,
       progressSummary: progress.progressSummary,
@@ -1557,7 +1572,7 @@ export class AppService {
       activeCommand: progress.activeCommand,
       suggestedStatus: inferRunStatus({
         run,
-        active: Boolean(activeHandle),
+        active: runActive,
         quietForMs,
         outputText: fileState.outputText,
         activeCommand: progress.activeCommand
@@ -1757,7 +1772,7 @@ export class AppService {
       status: finalizedRun.status,
       finalMessage: finalizedRun.finalMessage,
       changedFiles,
-      summary: handoff.summary
+      summary: handoffMachineSummary(handoff) || handoff.summary
     });
 
     const task = snapshot.tasks.find((item) => item.id === run.taskId);
@@ -2343,7 +2358,7 @@ export class AppService {
 
     const controller = this.automationControllers.get(`${workspacePath}::${session.id}`);
 
-    if (controller) {
+    if (controller?.running) {
       return;
     }
 
@@ -2371,6 +2386,20 @@ export class AppService {
     const refreshedRun = refreshedStep?.runId
       ? refreshedSnapshot.runs.find((run) => run.id === refreshedStep.runId) ?? null
       : null;
+
+    if (
+      refreshedStep?.status === "running" &&
+      refreshedStep.lane === "builder" &&
+      refreshedStep.runId &&
+      refreshedRun
+    ) {
+      await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
+        currentStepSummary: "Resuming the in-flight builder step after Lithium restarted."
+      });
+      void this.runAutomationLoop(workspacePath, refreshedSession.id);
+      return;
+    }
+
     const interruptedSummary = summarizeInterruptedAutomationSession(refreshedStep, refreshedRun);
 
     if (refreshedStep?.status === "running") {
@@ -2411,6 +2440,10 @@ export class AppService {
   }
 
   private async reconcileStaleBuilderRun(workspacePath: string, run: RunRecord) {
+    if (await this.isRecoverableDetachedBuilderRun(run)) {
+      return;
+    }
+
     const terminatedDetachedProcess = await this.terminateRecordedBuilderProcess(run);
     const recoveredOutput = (await readTextFile(run.finalMessagePath)).trim();
     const finalMessage = recoveredOutput
@@ -2446,6 +2479,50 @@ export class AppService {
     }).catch(() => null);
 
     return Boolean(termination?.matched && termination.terminated);
+  }
+
+  private async stopTrackedBuilderRunProcess(workspacePath: string, run: RunRecord) {
+    if (stopLiveProcess(workspacePath, run.id)) {
+      return true;
+    }
+
+    return await this.terminateRecordedBuilderProcess(run);
+  }
+
+  private async isRecoverableDetachedBuilderRun(run: RunRecord) {
+    if (
+      run.finalization !== null &&
+      run.status !== "running"
+    ) {
+      return false;
+    }
+
+    const pid = Number.isFinite(run.pid) && (run.pid ?? 0) > 0 ? (run.pid as number) : null;
+
+    if (!pid || !(await isProcessAlive(pid))) {
+      return false;
+    }
+
+    const commandLine = await readProcessCommand(pid);
+
+    return this.recordedBuilderProcessMatchesRun(run, commandLine);
+  }
+
+  private recordedBuilderProcessMatchesRun(run: RunRecord, commandLine: string) {
+    const normalizedCommandLine = commandLine.trim();
+
+    if (!normalizedCommandLine) {
+      return false;
+    }
+
+    const expectedSnippets = [
+      run.finalMessagePath,
+      run.stdoutPath
+    ]
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    return expectedSnippets.some((snippet) => normalizedCommandLine.includes(snippet));
   }
 
   private async prepareModelContext(input: {
@@ -2669,6 +2746,30 @@ export class AppService {
     return session;
   }
 
+  private buildRunningAutomationSession(
+    session: AutomationSessionRecord,
+    patch: Partial<AutomationSessionRecord> = {}
+  ): AutomationSessionRecord {
+    return {
+      ...session,
+      ...patch,
+      status: "running",
+      stopReason: undefined,
+      endedAt: undefined,
+      updatedAt: patch.updatedAt ?? new Date().toISOString()
+    };
+  }
+
+  private async writeRunningAutomationSession(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    patch: Partial<AutomationSessionRecord> = {}
+  ) {
+    const nextSession = this.buildRunningAutomationSession(session, patch);
+    await this.store.writeAutomationSession(workspacePath, nextSession);
+    return nextSession;
+  }
+
   private getAutomationController(workspacePath: string, sessionId: string) {
     const key = `${workspacePath}::${sessionId}`;
     const existing = this.automationControllers.get(key);
@@ -2687,6 +2788,298 @@ export class AppService {
     };
     this.automationControllers.set(key, created);
     return created;
+  }
+
+  private async resumeInFlightAutomationBuilderStep(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    controller: AutomationControllerState
+  ) {
+    const stepId = session.latestStepId;
+
+    if (!stepId) {
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    const steps = await this.store.listAutomationSteps(workspacePath);
+    const builderStep = steps.find((record) => record.id === stepId);
+
+    if (!builderStep || builderStep.status !== "running" || builderStep.lane !== "builder" || !builderStep.runId) {
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    const run = await this.store.readRun(workspacePath, builderStep.runId).catch(() => null);
+
+    if (!run) {
+      return {
+        handled: false,
+        shouldStopLoop: false
+      };
+    }
+
+    if (!/resuming the in-flight builder step/i.test(session.currentStepSummary)) {
+      await this.writeRunningAutomationSession(workspacePath, session, {
+        currentStepSummary: "Resuming the in-flight builder step after Lithium restarted."
+      });
+    }
+
+    let latestRun: RunRecord | null = null;
+    let runStatus: RecordStatus = "failed";
+    let runSummary = "";
+    let runChangedFiles: string[] = [];
+    let runEvidence: string[] = [];
+    let runRisks: string[] = [];
+    let runActions: string[] = [];
+
+    try {
+      const inspection = await this.inspectBuilderRun({
+        workspacePath,
+        runId: run.id
+      });
+      controller.activeRunId = run.id;
+      const completedSnapshot =
+        inspection?.run && inspection.run.finalization !== null && inspection.run.status !== "running"
+          ? await this.store.getSnapshot(workspacePath)
+          : await this.waitForAutomationRun(workspacePath, run.id, controller);
+      controller.activeRunId = null;
+      latestRun =
+        completedSnapshot.runs.find((record) => record.id === run.id) ??
+        (completedSnapshot.latestRun?.id === run.id ? completedSnapshot.latestRun : null);
+      runStatus = latestRun?.status ?? "failed";
+      runSummary = handoffMachineSummary(latestRun?.handoff) || extractRunSummary(latestRun?.finalMessage ?? "");
+      runChangedFiles = latestRun?.changedFiles ?? [];
+      runEvidence = buildAutomationEvidence(latestRun);
+      runRisks = latestRun?.handoff?.risks ?? [];
+      runActions = latestRun?.handoff?.runActions ?? [];
+    } catch (error) {
+      controller.activeRunId = null;
+      runStatus = "failed";
+      runSummary = error instanceof Error ? error.message : String(error);
+      runEvidence = runSummary ? [runSummary] : [];
+      runRisks = runSummary ? [runSummary] : [];
+    }
+
+    const snapshot = await this.store.getSnapshot(workspacePath);
+    const activeSession = await this.requireAutomationSession(workspacePath, session.id);
+    const shouldStopLoop = await this.applyAutomationBuilderOutcome(workspacePath, {
+      session: activeSession,
+      controller,
+      builderStep,
+      latestDecision: snapshot.latestDecision,
+      latestRun,
+      redirectInstruction: "",
+      runStatus,
+      runSummary,
+      runChangedFiles,
+      runEvidence,
+      runRisks,
+      runActions
+    });
+
+    return {
+      handled: true,
+      shouldStopLoop
+    };
+  }
+
+  private async applyAutomationBuilderOutcome(
+    workspacePath: string,
+    input: {
+      session: AutomationSessionRecord;
+      controller: AutomationControllerState;
+      builderStep: AutomationStepRecord;
+      latestDecision: DecisionRecord | null;
+      latestRun: RunRecord | null;
+      redirectInstruction: string;
+      runStatus: RecordStatus;
+      runSummary: string;
+      runChangedFiles: string[];
+      runEvidence: string[];
+      runRisks: string[];
+      runActions: string[];
+    }
+  ) {
+    const {
+      session,
+      controller,
+      builderStep,
+      latestDecision,
+      latestRun,
+      redirectInstruction,
+      runStatus,
+      runSummary,
+      runChangedFiles,
+      runEvidence,
+      runRisks,
+      runActions
+    } = input;
+
+    if (controller.stopRequested) {
+      await this.completeAutomationStep(workspacePath, builderStep, {
+        status: "cancelled",
+        summary: "Stopped by the user.",
+        runId: latestRun?.id,
+        changedFiles: [],
+        evidence: []
+      });
+      return true;
+    }
+
+    await this.completeAutomationStep(workspacePath, builderStep, {
+      status:
+        runStatus === "completed"
+          ? "completed"
+          : runStatus === "cancelled"
+          ? "cancelled"
+          : "failed",
+      summary: runSummary || "Builder run finished without a usable summary.",
+      runId: latestRun?.id,
+      changedFiles: runChangedFiles,
+      evidence: runEvidence
+    });
+
+    if (session.paperWriteEnabled && runStatus === "completed") {
+      const paperStep = await this.createAutomationStep(workspacePath, session, {
+        kind: "paper-sync",
+        lane: "writer",
+        title: "Sync manuscript state",
+        prompt: "Update manuscript projections from the latest decision and run."
+      });
+      const manuscriptSnapshot = await this.updateManuscript(workspacePath);
+      let paperSummary = manuscriptSnapshot.manuscript
+        ? "Updated the internal manuscript projection from the latest artifacts."
+        : "No manuscript projection was available to update.";
+
+      if ((latestRun?.changedFiles ?? []).some(isPaperRelatedPath)) {
+        try {
+          await this.compilePaper(workspacePath);
+          paperSummary = `${paperSummary} Recompiled the paper.`;
+        } catch (error) {
+          paperSummary = `${paperSummary} Paper compile failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+        }
+      }
+
+      await this.completeAutomationStep(workspacePath, paperStep, {
+        status: "completed",
+        summary: paperSummary,
+        changedFiles: manuscriptSnapshot.manuscript ? [manuscriptSnapshot.manuscript.path] : [],
+        evidence: latestRun?.id ? [latestRun.id] : []
+      });
+    }
+
+    const nextUsedSteps = session.budget.usedSteps + 1;
+    const runFailed = runStatus === "failed" || runStatus === "cancelled";
+    const nextUsedRetries = runFailed ? session.budget.usedRetries + 1 : session.budget.usedRetries;
+    const retryBudgetExhausted = runFailed && nextUsedRetries >= session.budget.maxRetries;
+    const requiresUserCheckpoint = shouldRequireAutomationCheckpoint({
+      decision: latestDecision,
+      run: latestRun
+    });
+    const needsCheckpoint =
+      controller.pauseRequested ||
+      session.mode === "checkpoint" ||
+      (runFailed && (retryBudgetExhausted || requiresUserCheckpoint));
+
+    if (runFailed && !needsCheckpoint) {
+      await this.createAutomationCheckpoint(workspacePath, session, {
+        title: "Automation update",
+        summary: summarizeAutomationFailureRecovery({
+          runStatus,
+          runSummary,
+          usedRetries: nextUsedRetries,
+          maxRetries: session.budget.maxRetries,
+          language: resolveAutomationUiLanguage([
+            redirectInstruction,
+            session.displayObjective ?? "",
+            session.objective,
+            runSummary
+          ])
+        }),
+        whatChanged: runChangedFiles,
+        evidence: runEvidence,
+        risks: [
+          ...(latestDecision?.handoff?.risks ?? []),
+          ...runRisks
+        ],
+        nextActions:
+          runActions.length > 0
+            ? runActions
+            : [
+                "Diagnose the failure, gather any missing context, and attempt the next bounded fix."
+              ],
+        status: "approved",
+        approvedAt: new Date().toISOString(),
+        activityMessage: `${session.id} automation retry queued after failed run`
+      });
+    }
+
+    if (needsCheckpoint) {
+      const checkpoint = await this.createAutomationCheckpoint(workspacePath, session, {
+        title:
+          runFailed
+            ? "Automation needs review after a failed run"
+            : controller.pauseRequested
+            ? "Automation paused after the latest step"
+            : "Checkpoint ready",
+        summary:
+          runSummary || latestDecision?.summary || "The latest automation cycle finished.",
+        whatChanged: runChangedFiles,
+        evidence: runEvidence,
+        risks: [
+          ...(latestDecision?.handoff?.risks ?? []),
+          ...runRisks
+        ],
+        nextActions:
+          runActions.length || latestDecision?.handoff?.runActions.length
+            ? [
+                ...latestDecision?.handoff?.runActions ?? [],
+                ...runActions
+              ]
+            : latestDecision?.handoff?.openQuestions?.length
+            ? latestDecision.handoff.openQuestions
+            : [latestDecision?.summary || "Review the latest research note and decide the next move."]
+      });
+
+      await this.store.writeAutomationSession(workspacePath, {
+        ...session,
+        status: "idle",
+        latestCheckpointId: checkpoint.id,
+        currentStepSummary:
+          controller.pauseRequested
+            ? "Stopped after finishing the current step."
+            : "Waiting for your direction.",
+        budget: {
+          ...session.budget,
+          usedSteps: nextUsedSteps,
+          usedRetries: nextUsedRetries
+        },
+        updatedAt: new Date().toISOString()
+      });
+      controller.pauseRequested = false;
+      controller.stopRequested = false;
+      return true;
+    }
+
+    await this.writeRunningAutomationSession(workspacePath, session, {
+      currentStepSummary: runFailed
+        ? `Recovering after ${latestRun?.id ?? "the latest failed cycle"}.`
+        : `Continuing after ${latestRun?.id ?? "the latest cycle"}.`,
+      budget: {
+        ...session.budget,
+        usedSteps: nextUsedSteps,
+        usedRetries: nextUsedRetries
+      }
+    });
+    await this.store.updateSessionSummary(workspacePath);
+    return false;
   }
 
   private async runAutomationLoop(workspacePath: string, sessionId: string) {
@@ -2723,6 +3116,20 @@ export class AppService {
             updatedAt: new Date().toISOString()
           });
           return;
+        }
+
+        const resumedBuilderStep = await this.resumeInFlightAutomationBuilderStep(
+          workspacePath,
+          session,
+          controller
+        );
+
+        if (resumedBuilderStep.handled) {
+          if (resumedBuilderStep.shouldStopLoop) {
+            return;
+          }
+
+          continue;
         }
 
         if (
@@ -2779,7 +3186,7 @@ export class AppService {
           session.budget.usedSteps === 0 ||
           Boolean(redirectInstruction) ||
           !snapshot.latestDecision ||
-          shouldReplanAfterFailedRun(snapshot.latestRun);
+          shouldReplanAfterFailedRun(snapshot.latestRun, snapshot.latestAutomationCheckpoint);
         let latestDecision = snapshot.latestDecision;
 
         if (shouldConsultStrategist) {
@@ -2787,7 +3194,8 @@ export class AppService {
             session,
             redirectInstruction,
             appSettings.autopilotPromptLanguage,
-            snapshot.latestRun
+            snapshot.latestRun,
+            snapshot.latestAutomationCheckpoint
           );
           const strategistSessionSlug = buildStrategistOracleSessionId(
             workspacePath,
@@ -2843,9 +3251,8 @@ export class AppService {
             ...session,
             queuedUserInstruction: undefined
           };
-          await this.store.writeAutomationSession(workspacePath, {
-            ...session,
-            updatedAt: new Date().toISOString()
+          session = await this.writeRunningAutomationSession(workspacePath, session, {
+            queuedUserInstruction: undefined
           });
         }
 
@@ -2857,12 +3264,10 @@ export class AppService {
             ...session,
             paperWriteEnabled: nextPaperWriteEnabled
           };
-          await this.store.writeAutomationSession(workspacePath, {
-            ...session,
+          session = await this.writeRunningAutomationSession(workspacePath, session, {
             currentStepSummary: nextPaperWriteEnabled
               ? "Paper phase activated after the latest strategist decision."
-              : session.currentStepSummary,
-            updatedAt: new Date().toISOString()
+              : session.currentStepSummary
           });
         }
 
@@ -2901,7 +3306,7 @@ export class AppService {
           controller.activeRunId = null;
           latestRun = completedSnapshot.latestRun;
           runStatus = latestRun?.status ?? "failed";
-          runSummary = latestRun?.handoff?.summary || extractRunSummary(latestRun?.finalMessage ?? "");
+          runSummary = handoffMachineSummary(latestRun?.handoff) || extractRunSummary(latestRun?.finalMessage ?? "");
           runChangedFiles = latestRun?.changedFiles ?? [];
           runEvidence = buildAutomationEvidence(latestRun);
           runRisks = latestRun?.handoff?.risks ?? [];
@@ -2916,163 +3321,24 @@ export class AppService {
           runActions = [];
         }
 
-        if (controller.stopRequested) {
-          await this.completeAutomationStep(workspacePath, builderStep, {
-            status: "cancelled",
-            summary: "Stopped by the user.",
-            runId: latestRun?.id,
-            changedFiles: [],
-            evidence: []
-          });
+        const shouldStopLoop = await this.applyAutomationBuilderOutcome(workspacePath, {
+          session,
+          controller,
+          builderStep,
+          latestDecision,
+          latestRun,
+          redirectInstruction,
+          runStatus,
+          runSummary,
+          runChangedFiles,
+          runEvidence,
+          runRisks,
+          runActions
+        });
+
+        if (shouldStopLoop) {
           return;
         }
-
-        await this.completeAutomationStep(workspacePath, builderStep, {
-          status:
-            runStatus === "completed"
-              ? "completed"
-              : runStatus === "cancelled"
-              ? "cancelled"
-              : "failed",
-          summary: runSummary || "Builder run finished without a usable summary.",
-          runId: latestRun?.id,
-          changedFiles: runChangedFiles,
-          evidence: runEvidence
-        });
-
-        if (session.paperWriteEnabled && runStatus === "completed") {
-          const paperStep = await this.createAutomationStep(workspacePath, session, {
-            kind: "paper-sync",
-            lane: "writer",
-            title: "Sync manuscript state",
-            prompt: "Update manuscript projections from the latest decision and run."
-          });
-          const manuscriptSnapshot = await this.updateManuscript(workspacePath);
-          let paperSummary = manuscriptSnapshot.manuscript
-            ? "Updated the internal manuscript projection from the latest artifacts."
-            : "No manuscript projection was available to update.";
-
-          if ((latestRun?.changedFiles ?? []).some(isPaperRelatedPath)) {
-            try {
-              await this.compilePaper(workspacePath);
-              paperSummary = `${paperSummary} Recompiled the paper.`;
-            } catch (error) {
-              paperSummary = `${paperSummary} Paper compile failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`;
-            }
-          }
-
-          await this.completeAutomationStep(workspacePath, paperStep, {
-            status: "completed",
-            summary: paperSummary,
-            changedFiles: manuscriptSnapshot.manuscript ? [manuscriptSnapshot.manuscript.path] : [],
-            evidence: latestRun?.id ? [latestRun.id] : []
-          });
-        }
-
-        const nextUsedSteps = session.budget.usedSteps + 1;
-        const runFailed = runStatus === "failed" || runStatus === "cancelled";
-        const nextUsedRetries = runFailed ? session.budget.usedRetries + 1 : session.budget.usedRetries;
-        const retryBudgetExhausted = runFailed && nextUsedRetries >= session.budget.maxRetries;
-        const requiresUserCheckpoint = shouldRequireAutomationCheckpoint({
-          decision: latestDecision,
-          run: latestRun
-        });
-        const needsCheckpoint =
-          controller.pauseRequested ||
-          session.mode === "checkpoint" ||
-          (runFailed && (retryBudgetExhausted || requiresUserCheckpoint));
-
-        if (runFailed && !needsCheckpoint) {
-          await this.createAutomationCheckpoint(workspacePath, session, {
-            title: "Automation update",
-            summary: summarizeAutomationFailureRecovery({
-              runStatus,
-              runSummary,
-              usedRetries: nextUsedRetries,
-              maxRetries: session.budget.maxRetries
-            }),
-            whatChanged: runChangedFiles,
-            evidence: runEvidence,
-            risks: [
-              ...(latestDecision?.handoff?.risks ?? []),
-              ...runRisks
-            ],
-            nextActions: runActions.length
-              ? runActions
-              : [
-                  "Diagnose the failure, gather any missing context, and attempt the next bounded fix."
-                ],
-            status: "approved",
-            approvedAt: new Date().toISOString(),
-            activityMessage: `${session.id} automation retry queued after failed run`
-          });
-        }
-
-        if (needsCheckpoint) {
-          const checkpoint = await this.createAutomationCheckpoint(workspacePath, session, {
-            title:
-              runFailed
-                ? "Automation needs review after a failed run"
-                : controller.pauseRequested
-                ? "Automation paused after the latest step"
-                : "Checkpoint ready",
-            summary:
-              runSummary || latestDecision?.summary || "The latest automation cycle finished.",
-            whatChanged: runChangedFiles,
-            evidence: runEvidence,
-            risks: [
-              ...(latestDecision?.handoff?.risks ?? []),
-              ...runRisks
-            ],
-            nextActions:
-              runActions.length || latestDecision?.handoff?.runActions.length
-                ? [
-                    ...latestDecision?.handoff?.runActions ?? [],
-                    ...runActions
-                  ]
-                : latestDecision?.handoff?.openQuestions?.length
-                ? latestDecision.handoff.openQuestions
-                : [latestDecision?.summary || "Review the latest research note and decide the next move."]
-          });
-
-          await this.store.writeAutomationSession(workspacePath, {
-            ...session,
-            status: "idle",
-            latestCheckpointId: checkpoint.id,
-            currentStepSummary:
-              controller.pauseRequested
-                ? "Stopped after finishing the current step."
-                : "Waiting for your direction.",
-            budget: {
-              ...session.budget,
-              usedSteps: nextUsedSteps,
-              usedRetries: nextUsedRetries
-            },
-            updatedAt: new Date().toISOString()
-          });
-          controller.pauseRequested = false;
-          controller.stopRequested = false;
-          return;
-        }
-
-        await this.store.writeAutomationSession(workspacePath, {
-          ...session,
-          status: "running",
-          currentStepSummary: runFailed
-            ? `Recovering after ${latestRun?.id ?? "the latest failed cycle"}.`
-            : `Continuing after ${latestRun?.id ?? "the latest cycle"}.`,
-          budget: {
-            ...session.budget,
-            usedSteps: nextUsedSteps,
-            usedRetries: nextUsedRetries
-          },
-          stopReason: undefined,
-          endedAt: undefined,
-          updatedAt: new Date().toISOString()
-        });
-        await this.store.updateSessionSummary(workspacePath);
       }
     } catch (error) {
       const session = await this.store.readAutomationSession(workspacePath, sessionId).catch(() => null);
@@ -3134,7 +3400,7 @@ export class AppService {
 
         try {
           if (inspection.active) {
-            stopLiveProcess(workspacePath, runId);
+            await this.stopTrackedBuilderRunProcess(workspacePath, inspection.run);
           }
 
           return await this.finalizeBuilderRun(
@@ -3163,7 +3429,7 @@ export class AppService {
 
         try {
           if (inspection.active) {
-            stopLiveProcess(workspacePath, runId);
+            await this.stopTrackedBuilderRunProcess(workspacePath, inspection.run);
           }
 
           return await this.finalizeBuilderRun(
@@ -3223,8 +3489,7 @@ export class AppService {
     };
 
     await this.store.writeAutomationStep(workspacePath, step);
-    await this.store.writeAutomationSession(workspacePath, {
-      ...session,
+    await this.writeRunningAutomationSession(workspacePath, session, {
       latestStepId: step.id,
       currentStepSummary: input.title,
       updatedAt: now
@@ -3378,35 +3643,58 @@ function summarizeAutomationInterrupt(input: {
 }) {
   const latestDecisionSummary = input.snapshot.latestDecision?.summary?.trim() || "";
   const latestRunSummary =
-    input.snapshot.latestRun?.handoff?.summary?.trim() ||
+    handoffMachineSummary(input.snapshot.latestRun?.handoff) ||
     extractRunSummary(input.snapshot.latestRun?.finalMessage ?? "");
+  const language = resolveAutomationUiLanguage([
+    input.instruction,
+    input.session.displayObjective ?? "",
+    input.session.objective,
+    latestRunSummary,
+    latestDecisionSummary
+  ]);
   const liveStepSummary =
     input.builderInspection?.progressSummary?.trim() ||
     input.chatProgress?.progressSummary?.trim() ||
     input.session.currentStepSummary.trim();
+  const liveFocus = humanizeAutomationUiStepSummary(liveStepSummary, language);
+  const latestResult = latestRunSummary || latestDecisionSummary;
 
   if (!input.queueRedirect) {
+    if (language === "ko") {
+      return [
+        "현재 단계 작업을 계속 진행하고 있습니다.",
+        liveFocus ? `현재 포커스: ${liveFocus}` : "",
+        latestResult ? `최근 결과: ${latestResult}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
     return [
       "Lithium is still working on the current step.",
-      liveStepSummary ? `Current focus: ${liveStepSummary}` : "",
-      latestRunSummary || latestDecisionSummary ? `Latest result: ${latestRunSummary || latestDecisionSummary}` : ""
+      liveFocus ? `Current focus: ${liveFocus}` : "",
+      latestResult ? `Latest result: ${latestResult}` : ""
     ]
       .filter(Boolean)
       .join(". ");
   }
 
-  return [
-    "I recorded your latest instruction.",
-    "I’ll finish the current step first, then switch to it."
-  ]
+  if (language === "ko") {
+    return ["방금 지시를 기록했습니다.", "현재 단계는 마저 끝내고 다음 단계부터 반영하겠습니다."]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return ["I recorded your latest instruction.", "I’ll finish the current step first, then switch to it."]
     .filter(Boolean)
     .join(" ");
 }
 
 function extractRunSummary(finalMessage: string) {
   const handoff = parseBuilderOutput(finalMessage);
-  if (handoff.summary) {
-    return handoff.summary;
+  const machineSummary = handoffMachineSummary(handoff);
+  if (machineSummary) {
+    return machineSummary;
   }
 
   return finalMessage
@@ -3420,17 +3708,18 @@ function buildAutomationStrategistPrompt(
   session: AutomationSessionRecord,
   redirectInstruction: string,
   languagePreference: AppSettings["autopilotPromptLanguage"],
-  latestRun?: RunRecord | null
+  latestRun?: RunRecord | null,
+  latestCheckpoint?: AutomationCheckpointRecord | null
 ) {
   const latestInstruction =
     redirectInstruction.trim() ||
     session.objective;
 
-  if (!shouldReplanAfterFailedRun(latestRun)) {
+  if (!shouldReplanAfterFailedRun(latestRun, latestCheckpoint)) {
     return latestInstruction.trim();
   }
 
-  const failureSummary = latestRun?.handoff?.summary?.trim() || extractRunSummary(latestRun?.finalMessage ?? "");
+  const failureSummary = handoffMachineSummary(latestRun?.handoff) || extractRunSummary(latestRun?.finalMessage ?? "");
   const failureRisks = latestRun?.handoff?.risks ?? [];
   const promptLanguage = resolveAutomationPromptLanguage(languagePreference, [
     latestInstruction,
@@ -3465,8 +3754,34 @@ function buildAutomationStrategistPrompt(
     .join("\n\n");
 }
 
-function shouldReplanAfterFailedRun(run?: RunRecord | null) {
-  return run?.status === "failed" || run?.status === "cancelled";
+function shouldReplanAfterFailedRun(
+  run?: RunRecord | null,
+  latestCheckpoint?: AutomationCheckpointRecord | null
+) {
+  if (!run || (run.status !== "failed" && run.status !== "cancelled")) {
+    return false;
+  }
+
+  return !isRestartInterruptedAutomationState(run, latestCheckpoint);
+}
+
+function isRestartInterruptedAutomationState(
+  run?: RunRecord | null,
+  latestCheckpoint?: AutomationCheckpointRecord | null
+) {
+  if (!run) {
+    return false;
+  }
+
+  const runTimestamp = run.endedAt || run.startedAt || run.createdAt;
+  const checkpointMatches = Boolean(
+    latestCheckpoint &&
+      /^automation interrupted after app restart$/i.test(latestCheckpoint.title) &&
+      latestCheckpoint.createdAt >= runTimestamp
+  );
+  const runSummary = handoffMachineSummary(run.handoff) || extractRunSummary(run.finalMessage || "");
+
+  return checkpointMatches || /detached builder process after an app restart left it running without an active session/i.test(runSummary);
 }
 
 function shouldRequireAutomationCheckpoint(input: {
@@ -3485,18 +3800,75 @@ function summarizeAutomationFailureRecovery(input: {
   runSummary: string;
   usedRetries: number;
   maxRetries: number;
+  language: "ko" | "en";
 }) {
+  if (input.language === "ko") {
+    const base =
+      input.runStatus === "cancelled"
+        ? "직전 단계가 끝나기 전에 중단되었습니다."
+        : "직전 단계가 깔끔하게 끝나지 않았습니다.";
+    return [base, input.runSummary.trim(), "자동으로 다음 복구 경로를 정리하고 있습니다."]
+      .filter(Boolean)
+      .join(" ");
+  }
+
   const base =
     input.runStatus === "cancelled"
       ? "The latest step was cancelled before it finished."
       : "The latest step did not finish cleanly.";
-  return [
-    base,
-    input.runSummary.trim(),
-    "Lithium is already planning the next recovery step."
-  ]
+  return [base, input.runSummary.trim(), "Lithium is already planning the next recovery step."]
     .filter(Boolean)
     .join(" ");
+}
+
+function resolveAutomationUiLanguage(samples: string[]) {
+  return samples.some(containsHangul) ? "ko" : "en";
+}
+
+function humanizeAutomationUiStepSummary(value: string, language: "ko" | "en") {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return "";
+  }
+
+  if (language === "ko") {
+    if (/^thinking[.…]*$/i.test(trimmed)) {
+      return "필요한 맥락을 정리하고 있습니다.";
+    }
+
+    if (/^finishing[.…]*$/i.test(trimmed)) {
+      return "마무리하고 있습니다.";
+    }
+
+    if (/plan the next bounded research step/i.test(trimmed)) {
+      return "다음 연구 단계를 작게 쪼개서 정리하고 있습니다.";
+    }
+
+    if (/let codex choose and execute the next bounded step/i.test(trimmed)) {
+      return "다음으로 검증할 실험이나 구현 단계를 고르고 있습니다.";
+    }
+
+    if (/continuing the current step\. the latest instruction will be applied next/i.test(trimmed)) {
+      return "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다.";
+    }
+
+    if (/^recovering after\b/i.test(trimmed)) {
+      return "직전 단계 이후 복구 경로를 진행하고 있습니다.";
+    }
+
+    if (/^continuing after\b/i.test(trimmed)) {
+      return "방금 끝난 단계에 이어 다음 작업을 진행하고 있습니다.";
+    }
+  }
+
+  return trimmed;
+}
+
+function buildQueuedAutomationStepSummary(language: "ko" | "en") {
+  return language === "ko"
+    ? "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다."
+    : "Continuing the current step. The latest instruction will be applied next.";
 }
 
 function describeAutomationControllerFailure(message: string) {
@@ -3545,7 +3917,7 @@ function buildContextDrivenBuilderPrompt(
   languagePreference: AppSettings["autopilotPromptLanguage"]
 ) {
   const primaryObjective = objective.trim();
-  const strategistAnswer = extractVisibleStrategistReply(decision?.rawOutput ?? "");
+  const strategistAnswer = extractVisibleStrategistReply(decision?.rawOutput ?? "") || handoffUserMessage(decision?.handoff);
   const strategistSummary = decision?.summary?.trim() ?? "";
   const strategistRationale = decision?.rationale?.trim() ?? "";
   const promptLanguage = resolveAutomationPromptLanguage(languagePreference, [
@@ -3558,7 +3930,7 @@ function buildContextDrivenBuilderPrompt(
   const suggestedFiles = decision?.handoff?.files ?? [];
   const openQuestions = decision?.handoff?.openQuestions ?? [];
   const summaryLine =
-    strategistSummary && !isRedundantBuilderContext(strategistSummary, strategistAnswer)
+    strategistSummary && !strategistAnswer && !isRedundantBuilderContext(strategistSummary, strategistAnswer)
       ? `Strategist summary: ${strategistSummary}`
       : "";
   const rationaleLine = strategistRationale ? `Strategist rationale: ${strategistRationale}` : "";
@@ -3631,7 +4003,7 @@ function looksLikeStructuredStrategistOnly(value: string) {
     .filter(Boolean);
 
   return meaningfulLines.every((line) =>
-    /^(summary|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
       line
     )
   );
@@ -3694,7 +4066,7 @@ function buildAutomationEvidence(run?: RunRecord | null) {
       [
         run.id,
         `status:${run.status}`,
-        run.handoff?.summary?.trim() ?? "",
+        handoffMachineSummary(run.handoff),
         ...run.changedFiles.slice(0, 8)
       ].filter(Boolean)
     )
@@ -3944,8 +4316,10 @@ function looksLikeCodexTranscript(value: string) {
 }
 
 function looksLikeBuilderPromptTemplate(handoff: LithiumHandoff) {
+  const summary = handoffMachineSummary(handoff) || handoff.summary;
+
   return (
-    handoff.summary.includes("<what changed>") ||
+    summary.includes("<what changed>") ||
     handoff.files.some((entry) => entry.includes("<relative path>")) ||
     handoff.risks.some((entry) => entry.includes("<risk")) ||
     handoff.paperActions.some((entry) => entry.includes("<paper")) ||
@@ -4054,6 +4428,7 @@ function createSyntheticBuilderFinalMessage(summary: string, result: "success" |
     "LITHIUM_STATUS",
     JSON.stringify({
       summary,
+      machine_summary: summary,
       result,
       files: [],
       risks: [],

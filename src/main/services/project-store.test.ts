@@ -127,7 +127,15 @@ describe("ProjectStore", () => {
       summary: "Summarize the current orchestration trade-off.",
       nextTask: "Update notes/runtime-context.md with the missing context fields.",
       rationale: "The next run needs a sharper handoff.",
-      rawOutput: "SUMMARY: Summarize the current orchestration trade-off.",
+      rawOutput: [
+        "Summarize the current orchestration trade-off in one clean builder-facing plan.",
+        "",
+        "LITHIUM_HANDOFF",
+        JSON.stringify({
+          summary: "Summarize the current orchestration trade-off.",
+          rationale: "The next run needs a sharper handoff."
+        })
+      ].join("\n"),
       command: { command: "npx", args: ["oracle"], cwd: workspace },
       engine: "browser",
       status: "completed",
@@ -164,6 +172,9 @@ describe("ProjectStore", () => {
     expect(runtimeContext.content).toContain("## Active Attachments");
     expect(runtimeContext.content).toContain("Open Questions: Should runtime context carry explicit open questions?");
     expect(runtimeContext.content).toContain("Active Hypotheses: The builder should see the strategist next task directly.");
+    expect(runtimeContext.content).toContain(
+      "Latest strategist reply: Summarize the current orchestration trade-off in one clean builder-facing plan."
+    );
     expect(runtimeContext.content).toContain(
       "Latest Task Prompt: Update notes/runtime-context.md with the missing context fields."
     );

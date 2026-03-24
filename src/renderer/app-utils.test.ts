@@ -262,7 +262,7 @@ describe("app utils", () => {
     ].join("\n"));
   });
 
-  it("hides repeated synthetic automation prompts when the same steering is reused across steps", () => {
+  it("keeps internal automation step prompts out of the visible chat timeline", () => {
     const repeatedPrompt =
       "다음 step부터는 github records 상위 접근법들을 3~5개 baseline family로 먼저 묶어라.";
     const snapshot: ProjectSnapshot = {
@@ -381,9 +381,10 @@ describe("app utils", () => {
     };
 
     const items = buildChatItems(snapshot, [], "/tmp/workspace");
-    expect(items.filter((item) => item.role === "user").map((item) => item.body)).toEqual([
-      "parameter-golf를 연구해줘",
-      repeatedPrompt
+    expect(items.filter((item) => item.role === "user").map((item) => item.body)).toEqual(["parameter-golf를 연구해줘"]);
+    expect(items.filter((item) => item.role === "assistant").map((item) => item.body)).toEqual([
+      "첫 baseline을 정리했습니다.",
+      "두 번째 baseline을 정리했습니다."
     ]);
   });
 
@@ -424,6 +425,98 @@ describe("app utils", () => {
     expect(formatBuilderBody(run)).toBe(
       "직전 단계가 깔끔하게 끝나지 않았습니다. 자동으로 다음 복구 경로를 정리하고 있습니다."
     );
+  });
+
+  it("prefers the builder's natural reply body over the compact autopilot summary", () => {
+    const run: RunRecord = {
+      id: "R003",
+      threadId: "TH001",
+      taskId: "T003",
+      prompt: "[autopilot] continue",
+      displayPrompt: "[autopilot] continue",
+      model: "gpt-5.4",
+      status: "completed",
+      exitCode: 0,
+      pid: null,
+      command: { command: "codex", args: ["exec"], cwd: "/tmp/workspace" },
+      stdoutPath: "/tmp/workspace/.lithium/runs/R003.stdout.log",
+      stderrPath: "/tmp/workspace/.lithium/runs/R003.stderr.log",
+      finalMessagePath: "/tmp/workspace/.lithium/runs/R003.output.txt",
+      finalMessage: [
+        "지금은 full-prefix 256/256 쪽으로 정상 진행 중입니다. 끝나면 기존 proxy 결과와 바로 수치 비교가 가능합니다.",
+        "",
+        "LITHIUM_STATUS",
+        '{"summary":"Executed a true full MLX eval for the current budget-safe champion.","result":"success"}'
+      ].join("\n"),
+      changedFiles: [],
+      handoff: {
+        schemaVersion: "lithium_handoff_v1",
+        role: "builder",
+        summary: "Executed a true full MLX eval for the current budget-safe champion.",
+        result: "success",
+        files: [],
+        risks: [],
+        paperActions: [],
+        runActions: [],
+        successCriteria: [],
+        openQuestions: []
+      },
+      finalization: "auto",
+      createdAt: "2026-03-19T00:03:00.000Z",
+      startedAt: "2026-03-19T00:03:00.000Z",
+      endedAt: "2026-03-19T00:05:00.000Z"
+    };
+
+    expect(formatBuilderBody(run)).toBe(
+      "지금은 full-prefix 256/256 쪽으로 정상 진행 중입니다. 끝나면 기존 proxy 결과와 바로 수치 비교가 가능합니다."
+    );
+  });
+
+  it("prefers the handoff user message over an internal builder summary", () => {
+    const run: RunRecord = {
+      id: "R003A",
+      threadId: "TH001",
+      taskId: "T003A",
+      prompt: "[autopilot] continue",
+      displayPrompt: "[autopilot] continue",
+      model: "gpt-5.4",
+      status: "completed",
+      exitCode: 0,
+      pid: null,
+      command: { command: "codex", args: ["exec"], cwd: "/tmp/workspace" },
+      stdoutPath: "/tmp/workspace/.lithium/runs/R003A.stdout.log",
+      stderrPath: "/tmp/workspace/.lithium/runs/R003A.stderr.log",
+      finalMessagePath: "/tmp/workspace/.lithium/runs/R003A.output.txt",
+      finalMessage: [
+        "LITHIUM_STATUS",
+        JSON.stringify({
+          user_message: "평가를 다시 걸어서 비교 수치를 확인하겠습니다.",
+          machine_summary: "detached builder cleanup summary",
+          result: "partial"
+        })
+      ].join("\n"),
+      changedFiles: [],
+      handoff: {
+        schemaVersion: "lithium_handoff_v1",
+        role: "builder",
+        summary: "detached builder cleanup summary",
+        machineSummary: "detached builder cleanup summary",
+        userMessage: "평가를 다시 걸어서 비교 수치를 확인하겠습니다.",
+        result: "partial",
+        files: [],
+        risks: [],
+        paperActions: [],
+        runActions: [],
+        successCriteria: [],
+        openQuestions: []
+      },
+      finalization: "auto",
+      createdAt: "2026-03-19T00:03:00.000Z",
+      startedAt: "2026-03-19T00:03:00.000Z",
+      endedAt: "2026-03-19T00:05:00.000Z"
+    };
+
+    expect(formatBuilderBody(run)).toBe("평가를 다시 걸어서 비교 수치를 확인하겠습니다.");
   });
 
   it("starts code explorer folders collapsed and expands the selected file ancestors", () => {
@@ -976,6 +1069,90 @@ describe("app utils", () => {
     expect(items[0]?.body).toBe("Natural strategist reply.");
   });
 
+  it("shows the strategist's visible reply for autopilot decisions instead of the truncated internal summary", () => {
+    const decision: DecisionRecord = {
+      id: "D901",
+      threadId: "TH001",
+      prompt: "Internal automation strategize prompt",
+      displayPrompt: "[Autopilot] Advance the benchmark.",
+      rawOutput: [
+        "이번 실패는 MLX 학습 자체의 확정적 크래시라기보다, 빌더가 마지막 답변을 못 쓰고 종료된 오케스트레이션 실패로 보는 게 맞습니다.",
+        "",
+        "LITHIUM_HANDOFF",
+        JSON.stringify({
+          summary:
+            "이번 실패는 MLX 학습 자체의 확정적 크래시라기보다, 빌더가 마지막 답변을 못 쓰고 종료된 오케스트레이션 실패로 보는 게 맞습니다. 업로드된 runtime에는 latest builder summary가 그대로…"
+        })
+      ].join("\n"),
+      summary:
+        "이번 실패는 MLX 학습 자체의 확정적 크래시라기보다, 빌더가 마지막 답변을 못 쓰고 종료된 오케스트레이션 실패로 보는 게 맞습니다. 업로드된 runtime에는 latest builder summary가 그대로…",
+      nextTask: "",
+      rationale: "",
+      model: "gpt-5.4",
+      engine: "browser",
+      status: "completed",
+      command: { command: "npx", args: ["oracle"], cwd: "/tmp/workspace" },
+      stdoutPath: "/tmp/workspace/.lithium/decisions/D901.stdout.log",
+      stderrPath: "/tmp/workspace/.lithium/decisions/D901.stderr.log",
+      outputPath: "/tmp/workspace/.lithium/decisions/D901.output.txt",
+      createdAt: "2026-03-19T00:00:00.000Z"
+    };
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "workspace",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/.lithium/manuscript/sections/results.md",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Working on the workspace.",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Working on the workspace.",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [decision],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: decision,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, [], "/tmp/workspace");
+
+    expect(items.map((item) => item.role)).toEqual(["assistant"]);
+    expect(items[0]?.body).toBe(
+      "이번 실패는 MLX 학습 자체의 확정적 크래시라기보다, 빌더가 마지막 답변을 못 쓰고 종료된 오케스트레이션 실패로 보는 게 맞습니다."
+    );
+  });
+
   it("renders automation interruption prompts as visible chat items", () => {
     const snapshot: ProjectSnapshot = {
       project: {
@@ -1108,6 +1285,138 @@ describe("app utils", () => {
     expect(items[0]?.body).toBe("델타 게이티드 어텐션을 개선해줘");
     expect(items[1]?.body).toBe("지금까지 진행사항 보고좀");
     expect(items[2]?.body).toBe("잠시 멈춘 상태입니다. 이어서 어떻게 진행할지 알려주세요.");
+  });
+
+  it("hides the original automation objective after a later user steering message exists", () => {
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "workspace",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/.lithium/manuscript/sections/results.md",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Working on the workspace.",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Working on the workspace.",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [
+        {
+          id: "AU001",
+          threadId: "TH001",
+          objective: "parameter-golf 프로젝트에서 이 맥북에어 M2 8GB 환경 기준으로 자동 연구를 시작해줘.\n\n목표:\n- baseline 1~2개 실행",
+          mode: "continuous",
+          status: "running",
+          allowedActions: ["strategize", "code-edit", "checkpoint"],
+          paperWriteEnabled: false,
+          evidenceMode: "strict",
+          budget: {
+            maxSteps: 64,
+            maxRuntimeMinutes: 1440,
+            maxRetries: 8,
+            usedSteps: 4,
+            usedRetries: 1
+          },
+          currentStepSummary: "Plan the next bounded research step",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:05:00.000Z"
+        }
+      ],
+      automationSteps: [],
+      automationCheckpoints: [
+        {
+          id: "AC010",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "approved",
+          title: "Automation update",
+          summary: "Automation is still running.",
+          whatChanged: [],
+          evidence: [],
+          risks: [],
+          nextActions: [],
+          userResponse: "연구 자동화 다시 시작 이어서",
+          createdAt: "2026-03-19T00:06:00.000Z",
+          updatedAt: "2026-03-19T00:06:30.000Z",
+          approvedAt: "2026-03-19T00:06:30.000Z"
+        }
+      ],
+      latestAutomationSession: {
+        id: "AU001",
+        threadId: "TH001",
+        objective: "parameter-golf 프로젝트에서 이 맥북에어 M2 8GB 환경 기준으로 자동 연구를 시작해줘.\n\n목표:\n- baseline 1~2개 실행",
+        mode: "continuous",
+        status: "running",
+        allowedActions: ["strategize", "code-edit", "checkpoint"],
+        paperWriteEnabled: false,
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 64,
+          maxRuntimeMinutes: 1440,
+          maxRetries: 8,
+          usedSteps: 4,
+          usedRetries: 1
+        },
+        currentStepSummary: "Plan the next bounded research step",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:05:00.000Z"
+      },
+      latestAutomationCheckpoint: {
+        id: "AC010",
+        sessionId: "AU001",
+        threadId: "TH001",
+        status: "approved",
+        title: "Automation update",
+        summary: "Automation is still running.",
+        whatChanged: [],
+        evidence: [],
+        risks: [],
+        nextActions: [],
+        userResponse: "연구 자동화 다시 시작 이어서",
+        createdAt: "2026-03-19T00:06:00.000Z",
+        updatedAt: "2026-03-19T00:06:30.000Z",
+        approvedAt: "2026-03-19T00:06:30.000Z"
+      },
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, [], "/tmp/workspace");
+    const userBodies = items.filter((item) => item.role === "user").map((item) => item.body);
+
+    expect(userBodies).toEqual(["연구 자동화 다시 시작 이어서"]);
   });
 
   it("renders non-blocking automation updates as assistant replies", () => {
@@ -1639,6 +1948,389 @@ describe("app utils", () => {
       "브라우저가 필요한 strategist 단계에서 막혔습니다. 다시 시도할지, 방향을 바꿀지 알려주세요."
     );
     expect(items[1]?.details).toBeUndefined();
+  });
+
+  it("hides resolved operational checkpoint bodies after automation resumes", () => {
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "workspace",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/.lithium/manuscript/sections/results.md",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Working on the workspace.",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Working on the workspace.",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [
+        {
+          id: "AU001",
+          threadId: "TH001",
+          objective: "parameter-golf를 리서치해줘",
+          mode: "continuous",
+          status: "running",
+          allowedActions: ["strategize", "code-edit", "checkpoint"],
+          paperWriteEnabled: false,
+          evidenceMode: "strict",
+          budget: {
+            maxSteps: 64,
+            maxRuntimeMinutes: 1440,
+            maxRetries: 8,
+            usedSteps: 4,
+            usedRetries: 1
+          },
+          latestCheckpointId: "AC004",
+          currentStepSummary: "Plan the next bounded research step",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:05:00.000Z"
+        }
+      ],
+      automationSteps: [],
+      automationCheckpoints: [
+        {
+          id: "AC003",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "approved",
+          title: "Automation needs review after a failed run",
+          summary: "Builder run ended without writing a final answer.",
+          whatChanged: [],
+          evidence: [],
+          risks: [],
+          nextActions: ["Inspect the latest checkpoint and resume."],
+          userResponse: "같은 목표로 계속 진행해",
+          createdAt: "2026-03-19T00:04:00.000Z",
+          updatedAt: "2026-03-19T00:04:30.000Z",
+          approvedAt: "2026-03-19T00:04:30.000Z"
+        },
+        {
+          id: "AC004",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "approved",
+          title: "Automation interrupted after app restart",
+          summary: "Automation stopped when Lithium restarted during the builder step.",
+          whatChanged: [],
+          evidence: [],
+          risks: ["Automation stopped when Lithium restarted during the builder step."],
+          nextActions: ["Resume automation to continue from the latest saved state."],
+          userResponse: "연구 자동화 다시 시작 이어서",
+          createdAt: "2026-03-19T00:05:00.000Z",
+          updatedAt: "2026-03-19T00:05:30.000Z",
+          approvedAt: "2026-03-19T00:05:30.000Z"
+        },
+        {
+          id: "AC005",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "approved",
+          title: "Automation update",
+          summary: "Automation is still running. 4 steps completed, 1 retries used.",
+          whatChanged: [],
+          evidence: [],
+          risks: [],
+          nextActions: [],
+          userResponse: "지금 상태 보고",
+          createdAt: "2026-03-19T00:06:00.000Z",
+          updatedAt: "2026-03-19T00:06:30.000Z",
+          approvedAt: "2026-03-19T00:06:30.000Z"
+        }
+      ],
+      latestAutomationSession: {
+        id: "AU001",
+        threadId: "TH001",
+        objective: "parameter-golf를 리서치해줘",
+        mode: "continuous",
+        status: "running",
+        allowedActions: ["strategize", "code-edit", "checkpoint"],
+        paperWriteEnabled: false,
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 64,
+          maxRuntimeMinutes: 1440,
+          maxRetries: 8,
+          usedSteps: 4,
+          usedRetries: 1
+        },
+        latestCheckpointId: "AC004",
+        currentStepSummary: "Plan the next bounded research step",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:05:00.000Z"
+      },
+      latestAutomationCheckpoint: {
+        id: "AC005",
+        sessionId: "AU001",
+        threadId: "TH001",
+        status: "approved",
+        title: "Automation update",
+        summary: "Automation is still running. 4 steps completed, 1 retries used.",
+        whatChanged: [],
+        evidence: [],
+        risks: [],
+        nextActions: [],
+        userResponse: "지금 상태 보고",
+        createdAt: "2026-03-19T00:06:00.000Z",
+        updatedAt: "2026-03-19T00:06:30.000Z",
+        approvedAt: "2026-03-19T00:06:30.000Z"
+      },
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, [], "/tmp/workspace");
+    const bodies = items.map((item) => item.body);
+
+    expect(bodies).toContain("같은 목표로 계속 진행해");
+    expect(bodies).toContain("연구 자동화 다시 시작 이어서");
+    expect(bodies).toContain("지금 상태 보고");
+    expect(bodies).toContain("다음 연구 단계를 작게 쪼개서 정리하고 있습니다.");
+    expect(bodies).not.toContain(
+      "직전 단계가 깔끔하게 끝나지 않았습니다. 같은 경로를 계속 복구할지, 방향을 바꿀지 알려주세요."
+    );
+    expect(bodies).not.toContain("Automation stopped when Lithium restarted during the builder step.");
+  });
+
+  it("hides superseded operational automation bodies once a newer interruption checkpoint exists", () => {
+    const run: RunRecord = {
+      id: "R043",
+      threadId: "TH001",
+      taskId: "T043",
+      prompt: "[autopilot] continue",
+      displayPrompt: "[autopilot] continue",
+      model: "gpt-5.4",
+      status: "cancelled",
+      exitCode: null,
+      pid: null,
+      command: { command: "codex", args: ["exec"], cwd: "/tmp/workspace" },
+      stdoutPath: "/tmp/workspace/.lithium/runs/R043.stdout.log",
+      stderrPath: "/tmp/workspace/.lithium/runs/R043.stderr.log",
+      finalMessagePath: "/tmp/workspace/.lithium/runs/R043.output.txt",
+      finalMessage: [
+        "Lithium terminated a detached builder process after an app restart left it running without an active session.",
+        "",
+        "LITHIUM_STATUS",
+        '{"summary":"Lithium terminated a detached builder process after an app restart left it running without an active session.","result":"partial"}'
+      ].join("\n"),
+      handoff: {
+        schemaVersion: "lithium_handoff_v1",
+        role: "builder",
+        summary: "Lithium terminated a detached builder process after an app restart left it running without an active session.",
+        machineSummary: "Lithium terminated a detached builder process after an app restart left it running without an active session.",
+        result: "partial",
+        files: [],
+        risks: [],
+        paperActions: [],
+        runActions: [],
+        successCriteria: [],
+        openQuestions: []
+      },
+      changedFiles: [],
+      finalization: "auto",
+      createdAt: "2026-03-19T00:03:00.000Z",
+      startedAt: "2026-03-19T00:03:00.000Z",
+      endedAt: "2026-03-19T00:05:00.000Z"
+    };
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "workspace",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/.lithium/manuscript/sections/results.md",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Working on the workspace.",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Working on the workspace.",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [run],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: run,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [
+        {
+          id: "AU001",
+          threadId: "TH001",
+          objective: "parameter-golf를 리서치해줘",
+          mode: "continuous",
+          status: "idle",
+          allowedActions: ["strategize", "code-edit", "checkpoint"],
+          paperWriteEnabled: false,
+          evidenceMode: "strict",
+          budget: {
+            maxSteps: 64,
+            maxRuntimeMinutes: 1440,
+            maxRetries: 8,
+            usedSteps: 4,
+            usedRetries: 1
+          },
+          latestCheckpointId: "AC016",
+          currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+          stopReason: "Automation stopped when Lithium restarted during the builder step.",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:06:30.000Z",
+          endedAt: "2026-03-19T00:06:30.000Z"
+        }
+      ],
+      automationSteps: [
+        {
+          id: "AS054",
+          sessionId: "AU001",
+          threadId: "TH001",
+          kind: "experiment-run",
+          lane: "builder",
+          title: "Let Codex choose and execute the next bounded step",
+          prompt: "continue",
+          status: "failed",
+          summary: "Automation stopped when Lithium restarted during the builder step.",
+          changedFiles: [],
+          evidence: [],
+          checkpointRequired: true,
+          createdAt: "2026-03-19T00:05:20.000Z",
+          updatedAt: "2026-03-19T00:06:30.000Z",
+          completedAt: "2026-03-19T00:06:30.000Z"
+        }
+      ],
+      automationCheckpoints: [
+        {
+          id: "AC001",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "approved",
+          title: "Automation blocked on the strategist run",
+          summary: "The strategist browser step needs help before automation can continue.",
+          whatChanged: [],
+          evidence: [],
+          risks: [],
+          nextActions: ["Keep the strategist Chrome window open until completion, then retry."],
+          createdAt: "2026-03-19T00:04:00.000Z",
+          updatedAt: "2026-03-19T00:04:30.000Z",
+          approvedAt: "2026-03-19T00:04:30.000Z"
+        },
+        {
+          id: "AC016",
+          sessionId: "AU001",
+          threadId: "TH001",
+          status: "pending",
+          title: "Automation interrupted after app restart",
+          summary: "Automation stopped when Lithium restarted during the builder step.",
+          whatChanged: [],
+          evidence: ["AS054"],
+          risks: ["Automation stopped when Lithium restarted during the builder step."],
+          nextActions: ["Resume automation to continue from the latest saved state."],
+          createdAt: "2026-03-19T00:06:30.000Z",
+          updatedAt: "2026-03-19T00:06:30.000Z"
+        }
+      ],
+      latestAutomationSession: {
+        id: "AU001",
+        threadId: "TH001",
+        objective: "parameter-golf를 리서치해줘",
+        mode: "continuous",
+        status: "idle",
+        allowedActions: ["strategize", "code-edit", "checkpoint"],
+        paperWriteEnabled: false,
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 64,
+          maxRuntimeMinutes: 1440,
+          maxRetries: 8,
+          usedSteps: 4,
+          usedRetries: 1
+        },
+        latestCheckpointId: "AC016",
+        currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+        stopReason: "Automation stopped when Lithium restarted during the builder step.",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:06:30.000Z",
+        endedAt: "2026-03-19T00:06:30.000Z"
+      },
+      latestAutomationCheckpoint: {
+        id: "AC016",
+        sessionId: "AU001",
+        threadId: "TH001",
+        status: "pending",
+        title: "Automation interrupted after app restart",
+        summary: "Automation stopped when Lithium restarted during the builder step.",
+        whatChanged: [],
+        evidence: ["AS054"],
+        risks: ["Automation stopped when Lithium restarted during the builder step."],
+        nextActions: ["Resume automation to continue from the latest saved state."],
+        createdAt: "2026-03-19T00:06:30.000Z",
+        updatedAt: "2026-03-19T00:06:30.000Z"
+      },
+      logs: []
+    };
+
+    const bodies = buildChatItems(snapshot, [], "/tmp/workspace").map((item) => item.body);
+
+    expect(bodies).not.toContain(
+      "Lithium terminated a detached builder process after an app restart left it running without an active session."
+    );
+    expect(bodies).not.toContain("The strategist browser step needs help before automation can continue.");
+    expect(bodies).not.toContain("Automation stopped when Lithium restarted during the builder step.");
+    expect(bodies).toContain("잠시 멈춘 상태입니다. 다음에 무엇을 할지 알려주세요.");
   });
 
   it("resolves system theme using the current platform preference", () => {

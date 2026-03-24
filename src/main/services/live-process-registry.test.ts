@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { getLiveProcess, startLiveProcess } from "./live-process-registry";
+import { getLiveProcess, startLiveProcess, stopAllLiveProcesses } from "./live-process-registry";
 
 describe("live-process-registry", () => {
   it("keeps live builder-style processes running without a timeout", async () => {
@@ -47,6 +47,30 @@ describe("live-process-registry", () => {
     const result = await handle.done;
 
     expect(result.timedOut).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+    expect(getLiveProcess(tempDir, handle.id)).toBeNull();
+  });
+
+  it("terminates every tracked live process during shutdown cleanup", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "lithium-live-process-"));
+    const handle = startLiveProcess({
+      id: "R-test-stop-all",
+      workspacePath: tempDir,
+      spec: {
+        command: process.execPath,
+        args: ["-e", "setInterval(() => {}, 1_000)"],
+        cwd: tempDir
+      },
+      stdoutPath: path.join(tempDir, "stdout.log"),
+      stderrPath: path.join(tempDir, "stderr.log")
+    });
+
+    expect(getLiveProcess(tempDir, handle.id)?.pid).toBe(handle.pid);
+
+    stopAllLiveProcesses();
+
+    const result = await handle.done;
+
     expect(result.exitCode).not.toBe(0);
     expect(getLiveProcess(tempDir, handle.id)).toBeNull();
   });

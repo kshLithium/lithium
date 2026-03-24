@@ -7,6 +7,7 @@ import type { CommandSpec } from "../../shared/types";
 import type { CommandResult } from "./process-runner";
 import { buildLiveResourceKey } from "./live-resource-key";
 import { terminateProcessTree } from "./process-tree";
+import { readTailText } from "./run-artifacts";
 
 export type LiveProcessHandle = {
   id: string;
@@ -44,6 +45,7 @@ type LiveProcessState = {
 };
 
 const activeProcesses = new Map<string, LiveProcessState>();
+const MAX_CAPTURED_OUTPUT_BYTES = 256 * 1024;
 
 export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessHandle {
   const startedAt = new Date().toISOString();
@@ -91,8 +93,8 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
       try {
         await stdoutReady;
         await stderrReady;
-        await writeFile(options.stdoutPath, stdout, "utf8");
-        await writeFile(options.stderrPath, stderr, "utf8");
+        await writeCaptureFile(options.stdoutPath, stdout);
+        await writeCaptureFile(options.stderrPath, stderr);
       } catch (error) {
         reject(error);
         return;
@@ -121,13 +123,13 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
 
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      stdout += text;
+      stdout = appendTailBuffer(stdout, text, MAX_CAPTURED_OUTPUT_BYTES);
       stdoutStream.write(text);
     });
 
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
-      stderr += text;
+      stderr = appendTailBuffer(stderr, text, MAX_CAPTURED_OUTPUT_BYTES);
       stderrStream.write(text);
     });
 
@@ -215,14 +217,40 @@ export function stopLiveProcess(workspacePath: string, id: string) {
   return true;
 }
 
+export function stopAllLiveProcesses() {
+  for (const state of activeProcesses.values()) {
+    void terminateProcessTree(state.child.pid ?? -1).catch(() => {
+      try {
+        state.child.kill("SIGTERM");
+      } catch {
+        // Ignore races with already-exited children.
+      }
+    });
+  }
+}
+
 export async function inspectLiveProcessFiles(input: {
   stdoutPath: string;
   stderrPath: string;
   outputPath?: string;
+  stdoutTailBytes?: number;
+  stderrTailBytes?: number;
+  outputTailBytes?: number;
 }) {
-  const stdout = await readMaybe(input.stdoutPath);
-  const stderr = await readMaybe(input.stderrPath);
-  const outputText = input.outputPath ? await readMaybe(input.outputPath) : "";
+  const stdout =
+    typeof input.stdoutTailBytes === "number" && input.stdoutTailBytes > 0
+      ? await readTailText(input.stdoutPath, input.stdoutTailBytes).catch(() => "")
+      : await readMaybe(input.stdoutPath);
+  const stderr =
+    typeof input.stderrTailBytes === "number" && input.stderrTailBytes > 0
+      ? await readTailText(input.stderrPath, input.stderrTailBytes).catch(() => "")
+      : await readMaybe(input.stderrPath);
+  const outputText =
+    input.outputPath
+      ? typeof input.outputTailBytes === "number" && input.outputTailBytes > 0
+        ? await readTailText(input.outputPath, input.outputTailBytes).catch(() => "")
+        : await readMaybe(input.outputPath)
+      : "";
   const timestamps = await Promise.all([
     statMaybe(input.stdoutPath),
     statMaybe(input.stderrPath),
@@ -254,4 +282,31 @@ async function statMaybe(filePath: string) {
   } catch {
     return null;
   }
+}
+
+async function writeCaptureFile(filePath: string, content: string) {
+  try {
+    await writeFile(filePath, content, "utf8");
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function appendTailBuffer(current: string, nextChunk: string, maxBytes: number) {
+  const combined = current + nextChunk;
+  const buffer = Buffer.from(combined, "utf8");
+
+  if (buffer.byteLength <= maxBytes) {
+    return combined;
+  }
+
+  return buffer.subarray(buffer.byteLength - maxBytes).toString("utf8");
+}
+
+function isMissingPathError(error: unknown) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }

@@ -110,7 +110,9 @@ export function canSubmitComposerPrompt(
 export function resolveAutomationObjective(
   snapshot: Pick<ProjectSnapshot, "project" | "memory" | "activeThread" | "latestDecision" | "latestAutomationSession">
 ) {
-  const existingObjective = snapshot.latestAutomationSession?.objective?.trim();
+  const existingObjective =
+    snapshot.latestAutomationSession?.displayObjective?.trim() ||
+    snapshot.latestAutomationSession?.objective?.trim();
 
   if (existingObjective) {
     return existingObjective;
