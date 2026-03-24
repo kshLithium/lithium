@@ -1,9 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
-  AppSettings,
   AutomationCheckpointRecord,
   AutomationSessionControlRequest,
   AutomationSessionCreateRequest,
@@ -30,6 +30,7 @@ import type {
 import { buildChatItems, formatLiveProgressBody, resolveAutomationCheckpointTone } from "../../renderer/app-utils";
 
 const JSON_BODY_LIMIT_BYTES = 256_000;
+const MOBILE_COOKIE_NAME = "lithium_mobile_token";
 const PRIVATE_IPV4_PREFIXES = ["10.", "192.168.", "127."];
 const INDEX_FILE_NAME = "index.html";
 
@@ -59,13 +60,16 @@ export class MobileBridgeServer {
   private readonly staticRoot: string;
   private readonly port: number;
   private readonly log: (message: string) => void;
+  private readonly authToken: string;
   private readonly dependencies: Omit<MobileBridgeDependencies, "staticRoot" | "port" | "log">;
   private server: Server | null = null;
+  private boundPort: number | null = null;
 
   constructor(dependencies: MobileBridgeDependencies) {
     this.staticRoot = dependencies.staticRoot;
     this.port = dependencies.port;
     this.log = dependencies.log ?? (() => undefined);
+    this.authToken = randomBytes(18).toString("hex");
     this.dependencies = {
       getAppState: dependencies.getAppState,
       getProjectSnapshot: dependencies.getProjectSnapshot,
@@ -99,13 +103,16 @@ export class MobileBridgeServer {
     });
 
     this.server = server;
-    const urls = resolvePrivateNetworkUrls(this.port);
+    const address = server.address();
+    this.boundPort = typeof address === "object" && address ? address.port : this.port;
+    const urls = resolvePrivateNetworkUrls(this.boundPort, this.authToken);
     this.log(`[mobile] listening on ${urls.join(", ")}`);
   }
 
   async stop() {
     const activeServer = this.server;
     this.server = null;
+    this.boundPort = null;
 
     if (!activeServer) {
       return;
@@ -135,7 +142,19 @@ export class MobileBridgeServer {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
       if (url.pathname.startsWith("/api/mobile")) {
+        if (!this.authorize(request, response, url)) {
+          this.sendJson(response, 401, {
+            error: "Missing or invalid mobile access token."
+          });
+          return;
+        }
+
         await this.handleApiRequest(request, response, url);
+        return;
+      }
+
+      if (!this.authorize(request, response, url)) {
+        this.sendHtml(response, 401, renderAuthGate(this.boundPort ?? this.port));
         return;
       }
 
@@ -275,6 +294,26 @@ export class MobileBridgeServer {
     });
   }
 
+  private authorize(request: IncomingMessage, response: ServerResponse, url: URL) {
+    const queryToken = url.searchParams.get("token")?.trim() || "";
+    const headerToken = readHeaderToken(request);
+    const cookieToken = readCookieToken(request);
+
+    if (queryToken === this.authToken) {
+      this.setAuthCookie(response);
+      return true;
+    }
+
+    return headerToken === this.authToken || cookieToken === this.authToken;
+  }
+
+  private setAuthCookie(response: ServerResponse) {
+    response.setHeader(
+      "Set-Cookie",
+      `${MOBILE_COOKIE_NAME}=${this.authToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`
+    );
+  }
+
   private async buildBootstrap(snapshotOverride?: ProjectSnapshot): Promise<MobileBootstrap> {
     const appState = await this.dependencies.getAppState();
     const snapshot =
@@ -363,13 +402,13 @@ export class MobileBridgeServer {
 
   private async serveStaticAsset(response: ServerResponse, pathname: string) {
     const hasAssetExtension = Boolean(path.extname(pathname));
-    const relativePath =
+    const requestedPath =
       pathname === "/" || !hasAssetExtension
         ? INDEX_FILE_NAME
-        : pathname.replace(/^\/+/, "");
-    const filePath = path.resolve(this.staticRoot, relativePath);
+        : normalizeStaticPath(pathname);
+    const filePath = path.resolve(this.staticRoot, requestedPath);
 
-    if (!filePath.startsWith(path.resolve(this.staticRoot))) {
+    if (!isSafeStaticPath(this.staticRoot, filePath)) {
       this.sendText(response, 403, "Forbidden");
       return;
     }
@@ -407,6 +446,14 @@ export class MobileBridgeServer {
   private sendText(response: ServerResponse, statusCode: number, body: string) {
     response.writeHead(statusCode, {
       "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store"
+    });
+    response.end(body);
+  }
+
+  private sendHtml(response: ServerResponse, statusCode: number, body: string) {
+    response.writeHead(statusCode, {
+      "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store"
     });
     response.end(body);
@@ -511,8 +558,9 @@ function contentTypeForPath(filePath: string) {
   }
 }
 
-function resolvePrivateNetworkUrls(port: number) {
-  const urls = new Set<string>([`http://127.0.0.1:${port}`]);
+function resolvePrivateNetworkUrls(port: number, authToken?: string) {
+  const suffix = authToken ? `/?token=${authToken}` : "";
+  const urls = new Set<string>([`http://127.0.0.1:${port}${suffix}`]);
   const interfaces = os.networkInterfaces();
 
   for (const entries of Object.values(interfaces)) {
@@ -521,11 +569,38 @@ function resolvePrivateNetworkUrls(port: number) {
         continue;
       }
 
-      urls.add(`http://${entry.address}:${port}`);
+      urls.add(`http://${entry.address}:${port}${suffix}`);
     }
   }
 
   return [...urls];
+}
+
+function readHeaderToken(request: IncomingMessage) {
+  const value = request.headers["x-lithium-mobile-token"];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readCookieToken(request: IncomingMessage) {
+  const cookieHeader = request.headers.cookie || "";
+  const cookies = cookieHeader.split(";").map((entry) => entry.trim());
+  const tokenEntry = cookies.find((entry) => entry.startsWith(`${MOBILE_COOKIE_NAME}=`));
+
+  if (!tokenEntry) {
+    return "";
+  }
+
+  return tokenEntry.slice(MOBILE_COOKIE_NAME.length + 1).trim();
+}
+
+function normalizeStaticPath(pathname: string) {
+  return pathname.replace(/^\/+/, "");
+}
+
+export function isSafeStaticPath(root: string, filePath: string) {
+  const normalizedRoot = path.resolve(root);
+  const normalizedFile = path.resolve(filePath);
+  return normalizedFile === normalizedRoot || normalizedFile.startsWith(`${normalizedRoot}${path.sep}`);
 }
 
 function isPrivateClientAddress(value: string | undefined | null) {
@@ -559,4 +634,58 @@ function isPrivateClientAddress(value: string | undefined | null) {
 
 function normalizeRemoteAddress(value: string) {
   return value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value;
+}
+
+function renderAuthGate(port: number) {
+  const hint = resolvePrivateNetworkUrls(port)
+    .map((entry) => `${entry}?token=...`)
+    .join(" or ");
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lithium Mobile</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(180deg, #06101d, #0a1626);
+        color: #eef5ff;
+        font-family: "IBM Plex Sans", "Helvetica Neue", sans-serif;
+      }
+      main {
+        width: min(92vw, 540px);
+        padding: 24px;
+        border-radius: 24px;
+        background: rgba(10, 19, 34, 0.92);
+        border: 1px solid rgba(157, 181, 216, 0.18);
+      }
+      h1 { margin: 0 0 12px; font-size: 28px; }
+      p { margin: 0 0 12px; line-height: 1.6; color: rgba(230, 239, 255, 0.76); }
+      code {
+        display: block;
+        margin-top: 16px;
+        padding: 14px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.04);
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Lithium Mobile</h1>
+      <p>Open the exact mobile URL from the desktop log so the access token can be stored for this browser session.</p>
+      <code>${escapeHtml(hint)}</code>
+    </main>
+  </body>
+</html>`;
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

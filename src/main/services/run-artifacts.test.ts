@@ -157,6 +157,11 @@ describe("run-artifacts", () => {
     expect(normalizeGitChangedPath("README.md", workspacePath, gitRoot)).toBeNull();
   });
 
+  it("dequotes porcelain paths before normalizing them", () => {
+    expect(normalizeGitChangedPath('"file with space.txt"', "/repo", "/repo")).toBe("file with space.txt");
+    expect(normalizeGitChangedPath('"caf\\303\\251.txt"', "/repo", "/repo")).toBe("café.txt");
+  });
+
   it("reads a tracked file diff relative to the workspace", async () => {
     const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-diff-"));
     const filePath = path.join(workspacePath, "notes.md");
@@ -201,5 +206,17 @@ describe("run-artifacts", () => {
     expect(diff?.relativePath).toBe("official/notes.md");
     expect(diff?.status).toBe("modified");
     expect(diff?.diffText).toContain("+nested");
+  });
+
+  it("collects untracked files with spaces from porcelain output", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-quoted-status-"));
+    execFileSync("git", ["init"], { cwd: workspacePath });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: workspacePath });
+    execFileSync("git", ["config", "user.name", "Lithium Test"], { cwd: workspacePath });
+    await writeFile(path.join(workspacePath, "file with space.txt"), "hello\n", "utf8");
+
+    const changedFiles = await collectGitChangedFiles(workspacePath);
+
+    expect(changedFiles).toContain("file with space.txt");
   });
 });

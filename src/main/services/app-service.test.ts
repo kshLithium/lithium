@@ -4919,6 +4919,31 @@ describe("AppService", () => {
     expect(snapshot.project?.workspacePath).toBe(workspace);
   });
 
+  it("fails remote paper compilation when artifact sync back to the mirror workspace fails", async () => {
+    const workspace = await createWorkspace();
+    await mkdir(path.join(workspace, "paper"), { recursive: true });
+    await writeFile(
+      path.join(workspace, "paper", "main.tex"),
+      "\\documentclass{article}\n\\begin{document}\nRemote\n\\end{document}\n",
+      "utf8"
+    );
+    await writeFile(path.join(workspace, "paper", "main.pdf"), "existing-pdf", "utf8");
+
+    const remoteWorkspace = createRemoteWorkspaceServiceMock(workspace, {
+      pullWorkspaceFiles: vi.fn(async () => {
+        throw new Error("Failed to download remote workspace files: paper/main.pdf");
+      })
+    });
+    const app = new AppService(workspace, {
+      remoteWorkspaceService: remoteWorkspace.service
+    });
+
+    await expect(app.compilePaper(workspace)).rejects.toThrow(
+      "Failed to download remote workspace files: paper/main.pdf"
+    );
+    await expect(readFile(path.join(workspace, "paper", "main.pdf"), "utf8")).resolves.toBe("existing-pdf");
+  });
+
   it("defaults terminal sessions to the remote workspace bootstrap command", async () => {
     const workspace = await createWorkspace();
     const remoteWorkspace = createRemoteWorkspaceServiceMock(workspace, {

@@ -7,7 +7,6 @@ import {
   readdir,
   rm,
   stat,
-  unlink,
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
@@ -106,8 +105,9 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
 
   async pushWorkspaceFile(workspacePath: string, relativePath: string): Promise<void> {
     const metadata = await this.requireMetadata(workspacePath);
+    const normalizedRelativePath = requireRemoteSyncRelativePath(relativePath);
     await this.withSftp(metadata.profile, async (sftp) => {
-      await this.uploadFile(sftp, metadata, relativePath);
+      await this.uploadFile(sftp, metadata, normalizedRelativePath);
     });
   }
 
@@ -127,14 +127,19 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
   async pullWorkspaceFiles(workspacePath: string, relativePaths: string[]): Promise<string[]> {
     const metadata = await this.requireMetadata(workspacePath);
     const deduped = uniqueRelativePaths(relativePaths);
+    const failedPaths: string[] = [];
 
     await this.withSftp(metadata.profile, async (sftp) => {
       for (const relativePath of deduped) {
-        await this.downloadFile(sftp, metadata, relativePath).catch(async () => {
-          await unlink(path.join(metadata.mirrorPath, relativePath)).catch(() => undefined);
+        await this.downloadFile(sftp, metadata, relativePath).catch(() => {
+          failedPaths.push(relativePath);
         });
       }
     });
+
+    if (failedPaths.length > 0) {
+      throw new Error(buildRemoteSyncErrorMessage("download", failedPaths));
+    }
 
     return deduped;
   }
@@ -289,21 +294,23 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
   }
 
   private async downloadFile(sftp: SFTPWrapper, metadata: RemoteWorkspaceMetadata, relativePath: string) {
-    const localPath = path.join(metadata.mirrorPath, relativePath);
-    const remotePath = joinRemotePath(metadata.profile.remotePath, toRemoteRelativePath(relativePath));
+    const normalizedRelativePath = requireRemoteSyncRelativePath(relativePath);
+    const localPath = path.join(metadata.mirrorPath, normalizedRelativePath);
+    const remotePath = joinRemotePath(metadata.profile.remotePath, normalizedRelativePath);
     await mkdir(path.dirname(localPath), { recursive: true });
     await copyRemoteFileToLocal(sftp, remotePath, localPath);
   }
 
   private async uploadFile(sftp: SFTPWrapper, metadata: RemoteWorkspaceMetadata, relativePath: string) {
-    const localPath = path.join(metadata.mirrorPath, relativePath);
+    const normalizedRelativePath = requireRemoteSyncRelativePath(relativePath);
+    const localPath = path.join(metadata.mirrorPath, normalizedRelativePath);
     const localStat = await stat(localPath).catch(() => null);
 
     if (!localStat || !localStat.isFile()) {
       return;
     }
 
-    const remotePath = joinRemotePath(metadata.profile.remotePath, toRemoteRelativePath(relativePath));
+    const remotePath = joinRemotePath(metadata.profile.remotePath, normalizedRelativePath);
     await ensureRemoteDirectory(sftp, remoteDirname(remotePath));
     await copyLocalFileToRemote(sftp, localPath, remotePath);
   }
@@ -820,11 +827,43 @@ function resolveWorkspaceRelativePath(workspacePath: string, targetPath: string)
 
 function toRemoteRelativePath(value: string) {
   return value
-    .split(path.sep)
+    .replaceAll("\\", path.posix.sep)
+    .split(/[\\/]+/)
     .filter(Boolean)
     .join(path.posix.sep);
 }
 
 function uniqueRelativePaths(relativePaths: string[]) {
-  return [...new Set(relativePaths.map((value) => toRemoteRelativePath(value.trim())).filter(Boolean))];
+  return [
+    ...new Set(
+      relativePaths
+        .map((value) => normalizeRemoteSyncRelativePath(value))
+        .filter((value): value is string => Boolean(value))
+    )
+  ];
+}
+
+function normalizeRemoteSyncRelativePath(value: string) {
+  const normalized = path.posix.normalize(toRemoteRelativePath(value.trim()));
+
+  if (!normalized || normalized === "." || normalized.startsWith("/") || normalized === "..") {
+    return null;
+  }
+
+  return normalized.startsWith("../") ? null : normalized;
+}
+
+function requireRemoteSyncRelativePath(value: string) {
+  const normalized = normalizeRemoteSyncRelativePath(value);
+
+  if (!normalized) {
+    throw new Error(`Remote workspace sync paths must stay inside the workspace: ${value}`);
+  }
+
+  return normalized;
+}
+
+function buildRemoteSyncErrorMessage(action: "download" | "upload", failedPaths: string[]) {
+  const verb = action === "download" ? "download" : "upload";
+  return `Failed to ${verb} remote workspace files: ${failedPaths.join(", ")}`;
 }

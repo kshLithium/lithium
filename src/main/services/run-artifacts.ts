@@ -96,7 +96,7 @@ export async function collectGitChangedFiles(workspacePath: string) {
     return [];
   }
 
-  const child = spawn("git", ["status", "--porcelain", "--untracked-files=all"], {
+  const child = spawn("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
     cwd: gitRoot,
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -116,13 +116,7 @@ export async function collectGitChangedFiles(workspacePath: string) {
     return [];
   }
 
-  return stdout
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim())
-    .flatMap((entry) => entry.split(" -> ").slice(-1))
-    .map((entry) => entry.trim())
+  return parseGitStatusEntries(stdout)
     .map((entry) => normalizeGitChangedPath(entry, canonicalWorkspacePath, gitRoot))
     .filter((entry): entry is string => Boolean(entry))
     .map((entry) => entry.replaceAll(path.sep, "/"))
@@ -188,7 +182,8 @@ export async function readWorkspaceFileDiff(
 }
 
 export function normalizeGitChangedPath(entry: string, workspacePath: string, gitRoot: string) {
-  const absolutePath = path.resolve(gitRoot, entry);
+  const decodedEntry = decodeGitPath(entry);
+  const absolutePath = path.resolve(gitRoot, decodedEntry);
   const relativePath = path.relative(workspacePath, absolutePath);
 
   if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
@@ -234,6 +229,88 @@ async function inspectGitFileStatus(
   }
 
   return "modified";
+}
+
+function parseGitStatusEntries(output: string) {
+  const entries = output.split("\0");
+  const changedPaths: string[] = [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+
+    if (!entry) {
+      continue;
+    }
+
+    const statusCode = entry.slice(0, 2);
+    const rawPath = entry.slice(3).trim();
+
+    if (rawPath) {
+      changedPaths.push(rawPath);
+    }
+
+    if (statusCode.includes("R") || statusCode.includes("C")) {
+      index += 1;
+    }
+  }
+
+  return changedPaths;
+}
+
+function decodeGitPath(value: string) {
+  const trimmed = value.trim();
+
+  if (!(trimmed.startsWith("\"") && trimmed.endsWith("\""))) {
+    return trimmed;
+  }
+
+  const bytes: number[] = [];
+
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    const char = trimmed[index];
+
+    if (char !== "\\") {
+      bytes.push(...Buffer.from(char, "utf8"));
+      continue;
+    }
+
+    const octal = trimmed.slice(index + 1, index + 4);
+
+    if (/^[0-7]{3}$/.test(octal)) {
+      bytes.push(Number.parseInt(octal, 8));
+      index += 3;
+      continue;
+    }
+
+    const escaped = trimmed[index + 1];
+
+    if (!escaped) {
+      break;
+    }
+
+    switch (escaped) {
+      case "n":
+        bytes.push(...Buffer.from("\n"));
+        break;
+      case "r":
+        bytes.push(...Buffer.from("\r"));
+        break;
+      case "t":
+        bytes.push(...Buffer.from("\t"));
+        break;
+      case "\"":
+      case "\\":
+        bytes.push(...Buffer.from(escaped));
+        break;
+      default:
+        bytes.push(...Buffer.from(escaped, "utf8"));
+        break;
+    }
+
+    index += 1;
+  }
+
+  return Buffer.from(bytes).toString("utf8");
 }
 
 async function buildTrackedFileDiff(gitRoot: string, relativePath: string, contextLines: number) {

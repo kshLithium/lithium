@@ -2767,11 +2767,19 @@ export class AppService {
     await writeFile(runPaths.outputPath, finalMessage, "utf8");
 
     if (remoteWorkspace) {
-      await this.remoteWorkspaceService.pullWorkspaceFiles(resolvedWorkspacePath, [
-        "paper/main.pdf",
-        "paper/main.synctex.gz",
-        "paper/main.log"
-      ]);
+      try {
+        await this.remoteWorkspaceService.pullWorkspaceFiles(resolvedWorkspacePath, [
+          "paper/main.pdf",
+          "paper/main.synctex.gz",
+          "paper/main.log"
+        ]);
+      } catch (error) {
+        await this.store.appendActivity(
+          resolvedWorkspacePath,
+          "paper compiled remotely with tectonic: failed while syncing artifacts"
+        );
+        throw error;
+      }
     }
 
     if (result.exitCode === 0) {
