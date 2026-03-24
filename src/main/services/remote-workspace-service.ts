@@ -19,7 +19,6 @@ import { runCommand, type CommandResult } from "./process-runner";
 
 const REMOTE_METADATA_DIR = ".lithium";
 const REMOTE_METADATA_FILE = "remote-workspace.json";
-const DEFAULT_REMOTE_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_SYNCED_FILE_BYTES = 32 * 1024 * 1024;
 const REMOTE_DIRECTORY_IGNORES = new Set([
   ".git",
@@ -68,7 +67,7 @@ export interface RemoteWorkspaceServiceLike {
     options: {
       stdoutPath: string;
       stderrPath: string;
-      timeoutMs?: number;
+      timeoutMs?: number | null;
     }
   ): Promise<RemoteWorkspaceCommandResult>;
 }
@@ -156,7 +155,7 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
     options: {
       stdoutPath: string;
       stderrPath: string;
-      timeoutMs?: number;
+      timeoutMs?: number | null;
     }
   ): Promise<RemoteWorkspaceCommandResult> {
     const metadata = await this.requireMetadata(workspacePath);
@@ -165,7 +164,7 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
     if (command.transport === "local") {
       const result = await runCommand({
         spec: command.command,
-        timeoutMs: options.timeoutMs ?? DEFAULT_REMOTE_TIMEOUT_MS,
+        timeoutMs: options.timeoutMs,
         stdoutPath: options.stdoutPath,
         stderrPath: options.stderrPath
       });
@@ -179,7 +178,7 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
     const result = await this.runRemoteHostCommand(metadata.profile, command.commandString, {
       stdoutPath: options.stdoutPath,
       stderrPath: options.stderrPath,
-      timeoutMs: options.timeoutMs ?? DEFAULT_REMOTE_TIMEOUT_MS
+      timeoutMs: options.timeoutMs
     });
 
     return {
@@ -352,7 +351,7 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
     options: {
       stdoutPath: string;
       stderrPath: string;
-      timeoutMs: number;
+      timeoutMs?: number | null;
     }
   ): Promise<CommandResult> {
     await Promise.all([writeFile(options.stdoutPath, "", "utf8"), writeFile(options.stderrPath, "", "utf8")]);
@@ -364,6 +363,7 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
         let stderr = "";
         let settled = false;
         let timedOut = false;
+        let timeoutId: NodeJS.Timeout | null = null;
 
         const finalize = async (payload: Omit<CommandResult, "startedAt">) => {
           if (settled) {
@@ -371,21 +371,32 @@ export class RemoteWorkspaceService implements RemoteWorkspaceServiceLike {
           }
 
           settled = true;
-          clearTimeout(timeoutId);
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
           resolve({
             startedAt,
             ...payload
           });
         };
 
-        const timeoutId = setTimeout(() => {
-          timedOut = true;
-          connection.end();
-        }, options.timeoutMs);
+        const normalizedTimeoutMs =
+          typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+            ? options.timeoutMs
+            : null;
+
+        if (normalizedTimeoutMs !== null) {
+          timeoutId = setTimeout(() => {
+            timedOut = true;
+            connection.end();
+          }, normalizedTimeoutMs);
+        }
 
         connection.exec(commandString, (error, stream) => {
           if (error) {
-            clearTimeout(timeoutId);
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
             reject(error);
             return;
           }
@@ -539,8 +550,7 @@ async function buildConnectConfig(profile: RemoteWorkspaceProfile): Promise<Conn
   const config: ConnectConfig = {
     host: profile.host,
     port: profile.port ?? 22,
-    username: profile.username,
-    readyTimeout: 30_000
+    username: profile.username
   };
 
   if (profile.privateKeyPath) {

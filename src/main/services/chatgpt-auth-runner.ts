@@ -11,15 +11,13 @@ import {
 
 const CHATGPT_LOGIN_URL = "https://chatgpt.com/auth/login";
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
-const AUTH_TIMEOUT_MS = 10 * 60 * 1000;
-const REUSE_TIMEOUT_MS = 30 * 1000;
 const AUTH_POLL_INTERVAL_MS = 1_000;
 const REQUIRED_STABLE_POLLS = 2;
 const SESSION_URLS = ["https://chatgpt.com", "https://auth.openai.com", "https://openai.com"];
 const FIRST_PARTY_AUTH_COOKIE_NAMES = ["oai-client-auth-info"];
 
 type ChatgptAuthOptions = {
-  timeoutMs?: number;
+  timeoutMs?: number | null;
 };
 
 type ChatgptCookie = {
@@ -55,11 +53,11 @@ export class ChatgptAuthRunner {
     let browser: Browser | null = null;
 
     try {
-      browser = await connectToChrome(port, loginProcess, options.timeoutMs ?? AUTH_TIMEOUT_MS);
+      browser = await connectToChrome(port, loginProcess, options.timeoutMs);
       const cookies = await waitForReusableChatgptSession(
         browser,
         loginProcess,
-        options.timeoutMs ?? AUTH_TIMEOUT_MS
+        options.timeoutMs
       );
       await exportInlineCookies(cookies);
     } finally {
@@ -100,11 +98,11 @@ export class ChatgptAuthRunner {
     let browser: Browser | null = null;
 
     try {
-      browser = await connectToChrome(port, probeProcess, options.timeoutMs ?? REUSE_TIMEOUT_MS);
+      browser = await connectToChrome(port, probeProcess, options.timeoutMs);
       const cookies = await waitForReusableChatgptSession(
         browser,
         probeProcess,
-        options.timeoutMs ?? REUSE_TIMEOUT_MS
+        options.timeoutMs
       );
       await exportInlineCookies(cookies);
     } catch (error) {
@@ -214,14 +212,17 @@ export function hasReusableChatgptSession(
 async function waitForReusableChatgptSession(
   browser: Browser,
   process: ChildProcess,
-  timeoutMs: number
+  timeoutMs?: number | null
 ) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? Date.now() + timeoutMs
+      : null;
   let stablePolls = 0;
   let lastCookies: ChatgptCookie[] = [];
   let homeHydrationRequested = false;
 
-  while (Date.now() < deadline) {
+  while (deadline === null || Date.now() < deadline) {
     if (process.exitCode !== null) {
       throw new Error("ChatGPT sign-in window was closed before login finished.");
     }
@@ -288,8 +289,7 @@ async function hydrateChatgptHomeSession(browser: Browser) {
 
   const page = context.pages()[0] ?? (await context.newPage());
   await page.goto(CHATGPT_HOME_URL, {
-    waitUntil: "domcontentloaded",
-    timeout: 30_000
+    waitUntil: "domcontentloaded"
   }).catch(() => undefined);
 }
 
@@ -315,11 +315,14 @@ async function exportInlineCookies(cookies: ChatgptCookie[]) {
   await writeFile(ORACLE_BROWSER_INLINE_COOKIES_PATH, JSON.stringify(filtered, null, 2), "utf8");
 }
 
-async function connectToChrome(port: number, process: ChildProcess, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs;
+async function connectToChrome(port: number, process: ChildProcess, timeoutMs?: number | null) {
+  const deadline =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? Date.now() + timeoutMs
+      : null;
   let lastError: unknown = null;
 
-  while (Date.now() < deadline) {
+  while (deadline === null || Date.now() < deadline) {
     if (process.exitCode !== null) {
       throw new Error("ChatGPT sign-in window closed before Lithium could attach to it.");
     }

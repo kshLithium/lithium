@@ -21,7 +21,7 @@ export type CommandSession = {
 
 type RunCommandOptions = {
   spec: CommandSpec;
-  timeoutMs: number;
+  timeoutMs?: number | null;
   stdoutPath: string;
   stderrPath: string;
   env?: NodeJS.ProcessEnv;
@@ -86,10 +86,15 @@ export async function startCommand(options: RunCommandOptions): Promise<CommandS
     });
   };
 
-  timeoutTimer = setTimeout(() => {
-    timedOut = true;
-    void terminateProcessTree(child.pid ?? -1).catch(() => undefined);
-  }, timeoutMs);
+  const normalizedTimeoutMs =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : null;
+
+  if (normalizedTimeoutMs !== null) {
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      void terminateProcessTree(child.pid ?? -1).catch(() => undefined);
+    }, normalizedTimeoutMs);
+  }
 
   child.stdout.on("data", (chunk) => {
     const text = chunk.toString();

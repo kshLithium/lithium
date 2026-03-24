@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ChatFeed } from "./ChatFeed";
+import { ChatFeed, resolveArtifactLinkTarget } from "./ChatFeed";
 import type { ChatItem } from "./app-types";
 
 describe("ChatFeed", () => {
@@ -134,5 +134,23 @@ describe("ChatFeed", () => {
     expect(html).toContain("Automation is still running.");
     expect(html).not.toContain("message-badges");
     expect(html).not.toContain("process-card");
+  });
+
+  it("resolves workspace-local file links for in-app opening", () => {
+    expect(
+      resolveArtifactLinkTarget(
+        "/Users/rubidium/project/lithium/src/renderer/App.tsx#L42",
+        "/Users/rubidium/project/lithium"
+      )
+    ).toBe("/Users/rubidium/project/lithium/src/renderer/App.tsx");
+    expect(
+      resolveArtifactLinkTarget(
+        "/Users/rubidium/other-project/src/index.ts#L7",
+        "/Users/rubidium/project/lithium"
+      )
+    ).toBeNull();
+    expect(
+      resolveArtifactLinkTarget("https://example.com/spec", "/Users/rubidium/project/lithium")
+    ).toBeNull();
   });
 });

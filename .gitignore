@@ -1,5 +1,6 @@
 node_modules
 dist
+dist-mobile
 dist-electron
 release
 .lithium

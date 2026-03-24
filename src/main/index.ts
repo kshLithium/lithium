@@ -28,6 +28,7 @@ import { AppService } from "./services/app-service";
 import { AppSettingsStore, sanitizeThemePreference } from "./services/app-settings-store";
 import { detectChromePath } from "./services/chrome-detection";
 import { DiscordBotService, resolveDiscordBotConfig } from "./services/discord-bot-service";
+import { MobileBridgeServer } from "./services/mobile-bridge-server";
 import { onLiveTerminalEvent } from "./services/terminal-pty-registry";
 import {
   APP_PROTOCOL,
@@ -40,6 +41,7 @@ import {
   resolveWindowBackgroundColor,
   type InitialSurface
 } from "./services/window-policy";
+import { MOBILE_BRIDGE_FEATURE_ENABLED, MOBILE_BRIDGE_PORT } from "../shared/feature-flags";
 
 const DEFAULT_WORKSPACE_PATH = process.env.LITHIUM_WORKSPACE ?? "";
 const INITIAL_SURFACE = resolveInitialSurface(process.env.LITHIUM_INITIAL_SURFACE);
@@ -95,6 +97,35 @@ const discordBotService = new DiscordBotService({
     },
     inspectBuilderRun: async (request) => appService.inspectBuilderRun(request)
   },
+  log: (message) => {
+    console.log(message);
+  }
+});
+const mobileBridgeServer = new MobileBridgeServer({
+  staticRoot: path.join(__dirname, "../dist-mobile"),
+  port: MOBILE_BRIDGE_PORT,
+  getAppState: async () => getRuntimeAppState(),
+  getProjectSnapshot: async (workspacePath) => appService.getSnapshot(workspacePath),
+  createThread: async (request) => appService.createThread(request),
+  selectThread: async (request) => appService.selectThread(request),
+  sendChatMessage: async (request) => {
+    const settings = await appSettingsStore.read();
+    const snapshot = await appService.sendChatMessage(request, {
+      strategistSessionReady: settings.strategistSessionReady
+    });
+
+    if (!settings.strategistSessionReady && snapshot.latestDecision) {
+      await appSettingsStore.update({ strategistSessionReady: true });
+    }
+
+    return snapshot;
+  },
+  createAutomationSession: async (request) => appService.createAutomationSession(request),
+  startAutomationSession: async (request) => appService.startAutomationSession(request),
+  pauseAutomationSession: async (request) => appService.pauseAutomationSession(request),
+  resumeAutomationSession: async (request) => appService.resumeAutomationSession(request),
+  interruptAutomationSession: async (request) => appService.interruptAutomationSession(request),
+  inspectChatProgress: async (request) => appService.inspectChatProgress(request),
   log: (message) => {
     console.log(message);
   }
@@ -394,6 +425,16 @@ app.whenReady().then(async () => {
 
   if (!DEFAULT_WORKSPACE_PATH && settings.lastWorkspacePath.trim()) {
     appService.setSelectedWorkspacePath(settings.lastWorkspacePath.trim());
+  }
+
+  if (MOBILE_BRIDGE_FEATURE_ENABLED) {
+    try {
+      await mobileBridgeServer.start();
+    } catch (error) {
+      console.error(
+        `[mobile] failed to start bridge: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   nativeTheme.on("updated", () => {
@@ -716,6 +757,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   void discordBotService.stop("shutdown");
+  void mobileBridgeServer.stop();
 });
 
 function contentTypeForAsset(filePath: string) {

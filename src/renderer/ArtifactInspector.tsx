@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import type { ResolvedTheme, WorkspaceFileDiff, WorkspaceFileRecord } from "../shared/types";
 
 const EditorSurface = lazy(async () => {
@@ -46,6 +46,9 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [diffValue, setDiffValue] = useState<WorkspaceFileDiff | null>(null);
   const [viewMode, setViewMode] = useState<"diff" | "file">("file");
+  const dirtyRef = useRef(false);
+  const loadedFilePathRef = useRef("");
+  const loadRequestRef = useRef(0);
   const dirty = canEdit && textValue !== savedValue;
   const hasRenderableDiff = Boolean(
     diffEligible &&
@@ -54,6 +57,10 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
       diffValue.status !== "unavailable" &&
       diffValue.diffText.trim()
   );
+
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
 
   useEffect(() => {
     if (!blobUrl) {
@@ -67,6 +74,8 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
 
   useEffect(() => {
     if (!file || !props.workspacePath) {
+      loadedFilePathRef.current = "";
+      loadRequestRef.current += 1;
       setTextValue("");
       setSavedValue("");
       setBytesValue(null);
@@ -78,9 +87,14 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
     }
 
     let cancelled = false;
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
+    const targetPath = file.path;
+    const shouldReloadTextValue = !canEdit || targetPath !== loadedFilePathRef.current || !dirtyRef.current;
+    const showLoadingState = shouldReloadTextValue || isPdf || isImage;
 
     const load = async () => {
-      setLoading(true);
+      setLoading(showLoadingState);
       setError(null);
 
       try {
@@ -88,7 +102,7 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
           diffEligible && changedFile && typeof window.lithium.readWorkspaceDiff === "function"
             ? window.lithium.readWorkspaceDiff({
                 workspacePath: props.workspacePath,
-                path: file.path
+                path: targetPath
               })
             : Promise.resolve(null);
 
@@ -96,16 +110,17 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
           const [bytes, nextDiff] = await Promise.all([
             window.lithium.readWorkspaceFileBytes({
               workspacePath: props.workspacePath,
-              path: file.path
+              path: targetPath
             }),
             diffPromise
           ]);
 
-          if (cancelled) {
+          if (cancelled || loadRequestRef.current !== requestId) {
             return;
           }
 
           const normalized = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          loadedFilePathRef.current = "";
           setBytesValue(normalized);
           setDiffValue(nextDiff);
           setTextValue("");
@@ -135,19 +150,25 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
         }
 
         const [nextFile, nextDiff] = await Promise.all([
-          window.lithium.readWorkspaceFile({
-            workspacePath: props.workspacePath,
-            path: file.path
-          }),
+          shouldReloadTextValue
+            ? window.lithium.readWorkspaceFile({
+                workspacePath: props.workspacePath,
+                path: targetPath
+              })
+            : Promise.resolve(null),
           diffPromise
         ]);
 
-        if (cancelled) {
+        if (cancelled || loadRequestRef.current !== requestId) {
           return;
         }
 
-        setTextValue(nextFile.content);
-        setSavedValue(nextFile.content);
+        if (nextFile) {
+          loadedFilePathRef.current = targetPath;
+          setTextValue(nextFile.content);
+          setSavedValue(nextFile.content);
+        }
+
         setBytesValue(null);
         setDiffValue(nextDiff);
         setBlobUrl((current) => {
@@ -157,15 +178,20 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
           return null;
         });
       } catch (nextError) {
-        if (!cancelled) {
+        if (!cancelled && loadRequestRef.current === requestId) {
           setError(nextError instanceof Error ? nextError.message : String(nextError));
-          setTextValue("");
-          setSavedValue("");
-          setBytesValue(null);
+
+          if (!(canEdit && dirtyRef.current && targetPath === loadedFilePathRef.current)) {
+            loadedFilePathRef.current = "";
+            setTextValue("");
+            setSavedValue("");
+            setBytesValue(null);
+          }
+
           setDiffValue(null);
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && loadRequestRef.current === requestId) {
           setLoading(false);
         }
       }
@@ -217,6 +243,7 @@ export function ArtifactInspector(props: ArtifactInspectorProps) {
         path: file.path,
         content: textValue
       });
+      loadedFilePathRef.current = file.path;
       setTextValue(saved.content);
       setSavedValue(saved.content);
       await props.onRefresh();

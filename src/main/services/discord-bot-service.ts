@@ -20,7 +20,6 @@ import type {
 const DISCORD_MESSAGE_LIMIT = 1_900;
 const THREAD_TITLE_LIMIT = 64;
 const RUN_POLL_INTERVAL_MS = 2_000;
-const RUN_POLL_TIMEOUT_MS = 35 * 60 * 1_000;
 const STATE_FILE_DIR = path.join(".lithium", "integrations");
 const STATE_FILE_NAME = "discord-bot.json";
 const STATUS_MARKER = "LITHIUM_STATUS";
@@ -419,9 +418,7 @@ export class DiscordBotService {
   }
 
   private async waitForRunCompletion(workspacePath: string, runId: string) {
-    const deadline = Date.now() + RUN_POLL_TIMEOUT_MS;
-
-    while (Date.now() < deadline) {
+    while (true) {
       const inspection = await this.bridge.inspectBuilderRun({
         workspacePath,
         runId
@@ -438,8 +435,6 @@ export class DiscordBotService {
 
       await delay(RUN_POLL_INTERVAL_MS);
     }
-
-    return null;
   }
 
   private async readState(workspacePath: string): Promise<DiscordConversationState> {

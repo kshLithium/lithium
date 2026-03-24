@@ -13,6 +13,7 @@ import type {
   ThreadRecord,
   WorkspaceFileRecord
 } from "../shared/types";
+import { WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
 import type { ChatItem, ExplorerRow, MemoryDraft, PaperOutlineRow, ThreadMemoryDraft } from "./app-types";
 
 export const UNTITLED_CODE_PREFIX = "untitled:";
@@ -706,7 +707,11 @@ export function resolveInitialSurface() {
 
   const value = new URLSearchParams(window.location.search).get("surface");
 
-  if (value === "paper" || value === "memory") {
+  if (value === "memory") {
+    return value;
+  }
+
+  if (value === "paper" && WORKBENCH_SURFACES_ENABLED) {
     return value;
   }
 

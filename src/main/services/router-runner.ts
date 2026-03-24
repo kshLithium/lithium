@@ -41,7 +41,6 @@ export class RouterRunner {
     );
     const result = await runCommand({
       spec: command,
-      timeoutMs: 5 * 60 * 1000,
       stdoutPath: options.stdoutPath,
       stderrPath: options.stderrPath
     });

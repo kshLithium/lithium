@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AppSettings,
   AppSettingsUpdate,
@@ -54,12 +54,70 @@ export function SettingsPanel(props: SettingsPanelProps) {
   const [discordTokenVisible, setDiscordTokenVisible] = useState(false);
   const [discordBotSaving, setDiscordBotSaving] = useState(false);
   const [discordBotError, setDiscordBotError] = useState("");
+  const panelRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const hiddenProbeReady = Boolean(props.appState.oracleChromePath && props.settings.strategistSessionReady);
   const discordBotStatus = props.appState.discordBotStatus;
 
   useEffect(() => {
     setDiscordBotDraft(createDiscordBotDraft(props.settings.discordBot));
   }, [props.settings.discordBot]);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const panel = panelRef.current;
+
+      if (!panel) {
+        return;
+      }
+
+      const focusable = getFocusableElements(panel);
+
+      if (!focusable.length) {
+        return;
+      }
+
+      const activeElement = document.activeElement as HTMLElement | null;
+      const currentIndex = activeElement ? focusable.indexOf(activeElement) : -1;
+
+      if (event.shiftKey) {
+        if (currentIndex > 0) {
+          return;
+        }
+
+        event.preventDefault();
+        focusable[focusable.length - 1]?.focus();
+        return;
+      }
+
+      if (currentIndex >= 0 && currentIndex < focusable.length - 1) {
+        return;
+      }
+
+      event.preventDefault();
+      focusable[0]?.focus();
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [props.onClose]);
 
   const updateProfiles = (profiles: TerminalConnectionProfile[]) => {
     void props.onUpdateSettings({
@@ -167,6 +225,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
         aria-labelledby="settings-title"
         aria-modal="true"
         className="settings-panel"
+        ref={panelRef}
         role="dialog"
       >
         <div className="settings-header">
@@ -178,6 +237,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
             aria-label="Close settings"
             className="settings-close"
             onClick={props.onClose}
+            ref={closeButtonRef}
             type="button"
           >
             ×
@@ -1399,6 +1459,14 @@ function resolveDiscordBotBadgeLabel(status: DiscordBotRuntimeStatus) {
     default:
       return "Disabled";
   }
+}
+
+function getFocusableElements(container: HTMLElement) {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true");
 }
 
 function toErrorMessage(error: unknown) {

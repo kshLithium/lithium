@@ -247,9 +247,7 @@ export class OracleRunner {
         "--browser-auto-reattach-delay",
         "5s",
         "--browser-auto-reattach-interval",
-        "3s",
-        "--browser-auto-reattach-timeout",
-        "60s"
+        "3s"
       );
 
       if (input.files.length > 0) {
@@ -271,7 +269,7 @@ export class OracleRunner {
       }
 
       if (input.launch.keepBrowser) {
-        args.push("--browser-keep-browser", "--browser-input-timeout", "120000");
+        args.push("--browser-keep-browser");
       }
 
       if (input.launch.chatgptUrl) {
@@ -293,8 +291,6 @@ export class OracleRunner {
 
     args.push(
       "--force",
-      "--timeout",
-      "20m",
       "--write-output",
       input.outputPath,
       "--slug",
@@ -380,7 +376,6 @@ export class OracleRunner {
   ) {
     const session = await startCommand({
       spec: command,
-      timeoutMs: 20 * 60 * 1000,
       stdoutPath: options.stdoutPath,
       stderrPath: options.stderrPath,
       env

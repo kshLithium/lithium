@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
 import type { AppSettings, AttachmentRecord } from "../shared/types";
-import { TERMINAL_FEATURE_ENABLED } from "../shared/feature-flags";
+import { TERMINAL_FEATURE_ENABLED, WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
 
 type ComposerProps = {
   attachments: AttachmentRecord[];
@@ -352,32 +352,36 @@ export function Composer(props: ComposerProps) {
       value: "/plan ",
       keywords: ["plan", "planning", "strategy", "next step"]
     },
-    {
-      id: "code-panel",
-      section: "Workspace",
-      label: "Code",
-      description: props.canOpenCode
-        ? "Open the code workbench."
-        : "Open a workspace first.",
-      disabled: !props.canOpenCode,
-      icon: "code",
-      kind: "action",
-      action: "open-code",
-      keywords: ["code", "editor", "canvas", "files", "workbench"]
-    },
-    {
-      id: "paper-panel",
-      section: "Workspace",
-      label: "Paper",
-      description: props.canOpenPaper
-        ? "Open the manuscript workbench."
-        : "No manuscript is ready yet.",
-      disabled: !props.canOpenPaper,
-      icon: "file",
-      kind: "action",
-      action: "open-paper",
-      keywords: ["paper", "latex", "tex", "manuscript", "preview"]
-    },
+    ...(WORKBENCH_SURFACES_ENABLED
+      ? ([
+          {
+            id: "code-panel",
+            section: "Workspace",
+            label: "Code",
+            description: props.canOpenCode
+              ? "Open the code workbench."
+              : "Open a workspace first.",
+            disabled: !props.canOpenCode,
+            icon: "code",
+            kind: "action",
+            action: "open-code",
+            keywords: ["code", "editor", "canvas", "files", "workbench"]
+          },
+          {
+            id: "paper-panel",
+            section: "Workspace",
+            label: "Paper",
+            description: props.canOpenPaper
+              ? "Open the manuscript workbench."
+              : "No manuscript is ready yet.",
+            disabled: !props.canOpenPaper,
+            icon: "file",
+            kind: "action",
+            action: "open-paper",
+            keywords: ["paper", "latex", "tex", "manuscript", "preview"]
+          }
+        ] satisfies SlashCommand[])
+      : []),
     {
       id: "chat-view",
       section: "Workspace",

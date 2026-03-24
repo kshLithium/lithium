@@ -1,6 +1,7 @@
 import {
   startTransition,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -71,18 +72,18 @@ import {
 } from "./chat-surface";
 import { useAppPreferences } from "./useAppPreferences";
 import { useCodeWorkbenchState } from "./useCodeWorkbenchState";
-import { TERMINAL_FEATURE_ENABLED } from "../shared/feature-flags";
+import { TERMINAL_FEATURE_ENABLED, WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
 
 const INITIAL_SURFACE = resolveInitialSurface();
 const THREAD_MENU_WIDTH = 168;
+const INITIAL_DRAWER_TAB: DrawerTab =
+  INITIAL_SURFACE === "chat" ? "none" : !WORKBENCH_SURFACES_ENABLED && INITIAL_SURFACE === "paper" ? "none" : INITIAL_SURFACE;
 
 export default function App() {
   const [appState, setAppState] = useState<RuntimeAppState | null>(null);
   const [snapshot, setSnapshot] = useState<ProjectSnapshot>(emptySnapshot);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileRecord[]>([]);
-  const [drawerTab, setDrawerTab] = useState<DrawerTab>(
-    INITIAL_SURFACE === "chat" ? "none" : INITIAL_SURFACE
-  );
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>(INITIAL_DRAWER_TAB);
   const [codeCanvasOpen, setCodeCanvasOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [composerValue, setComposerValue] = useState("");
@@ -104,7 +105,7 @@ export default function App() {
   const [chatProgress, setChatProgress] = useState<ChatProgressInspection | null>(null);
   const [strategistProbeResult, setStrategistProbeResult] = useState<StrategistBrowserProbeResponse | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_APP_SETTINGS.sidebarWidth);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [threadMenuOpenId, setThreadMenuOpenId] = useState<string | null>(null);
   const [threadMenuPosition, setThreadMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [codeCanvasWidth, setCodeCanvasWidth] = useState(DEFAULT_APP_SETTINGS.codeCanvasWidth);
@@ -115,6 +116,9 @@ export default function App() {
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const lastChatScrollKeyRef = useRef("");
   const paperDraftRef = useRef("");
+  const paperDirtyRef = useRef(false);
+  const paperLoadRequestRef = useRef(0);
+  const sidebarWidthRef = useRef(DEFAULT_APP_SETTINGS.sidebarWidth);
   const hasBridge =
     typeof window !== "undefined" &&
     typeof window.lithium !== "undefined" &&
@@ -124,7 +128,8 @@ export default function App() {
   const projectReady = Boolean(snapshot.project);
   const surfaceTitle = resolveWorkspaceSurfaceTitle(snapshot.project?.name, appState);
   const canUseChatRouter = Boolean(hasBridge && typeof window.lithium.sendChatMessage === "function");
-  const surfaceMode: SurfaceMode = drawerTab === "none" ? "chat" : drawerTab;
+  const surfaceMode: SurfaceMode =
+    drawerTab === "none" || (!WORKBENCH_SURFACES_ENABLED && drawerTab === "paper") ? "chat" : drawerTab;
   const activeThreadId = snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? null;
   const {
     appSettings,
@@ -227,6 +232,7 @@ export default function App() {
     toggleCodeFolder,
     updateCodeDraft
   } = useCodeWorkbenchState({
+    enabled: WORKBENCH_SURFACES_ENABLED,
     changedFiles,
     codeExplorerFiles,
     codeFiles,
@@ -283,7 +289,7 @@ export default function App() {
       latestAutomationCheckpoint.status === "pending"
   );
   const automationObjective = resolveAutomationObjective(snapshot);
-  const inspectorOpen = Boolean(selectedInspectorFile);
+  const inspectorOpen = WORKBENCH_SURFACES_ENABLED && Boolean(selectedInspectorFile);
   const automationRunning = automationStatus === "running";
   const automationInteractive = automationRunning || automationCheckpointPending;
   const composerStartsAutomation = !automationInteractive;
@@ -292,7 +298,7 @@ export default function App() {
       ? resolveAutomationCheckpointTone(latestAutomationCheckpoint, latestAutomationSession ?? undefined)
       : undefined;
   const showAutomationHeaderAction = automationRunning || automationCheckpointPending;
-  const terminalOpen = TERMINAL_FEATURE_ENABLED && logsOpen;
+  const terminalOpen = WORKBENCH_SURFACES_ENABLED && TERMINAL_FEATURE_ENABLED && logsOpen;
   const composerPlaceholder = automationRunning
     ? "Ask for status or steer the next step."
     : automationCheckpointPending && automationCheckpointTone === "blocked"
@@ -303,6 +309,44 @@ export default function App() {
     ? "Reply to resume or redirect autopilot."
     : "Ask, steer, or inspect.";
   const railHeading = resolveRailHeading();
+
+  const handleAppCommand = useEffectEvent((command: string) => {
+    if (command === "open-workspace") {
+      void handlePickWorkspace();
+      return;
+    }
+
+    if (command === "open-new-thread") {
+      void handleCreateThread();
+      return;
+    }
+
+    if (command === "new-code-file") {
+      void handleNewCodeFile();
+      return;
+    }
+
+    if (command === "toggle-sidebar") {
+      handleToggleSidebar();
+      return;
+    }
+
+    if (command === "toggle-terminal") {
+      if (TERMINAL_FEATURE_ENABLED) {
+        handleToggleTerminal();
+      }
+      return;
+    }
+
+    if (command === "open-settings") {
+      openSettings();
+      return;
+    }
+
+    if (command === "save-current-surface") {
+      void handleSaveCurrentSurface();
+    }
+  });
 
   useEffect(() => {
     if (!pendingChatItems.length || !isPendingChatVisible(pendingChatThreadId, activeThreadId)) {
@@ -482,6 +526,10 @@ export default function App() {
   }, [appSettings.sidebarWidth, appState]);
 
   useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
     if (!appState) {
       return;
     }
@@ -555,56 +603,9 @@ export default function App() {
     }
 
     return window.lithium.onAppCommand((command) => {
-      const nextCommand = command as string;
-
-      if (nextCommand === "open-workspace") {
-        void handlePickWorkspace();
-        return;
-      }
-
-      if (nextCommand === "open-new-thread") {
-        void handleCreateThread();
-        return;
-      }
-
-      if (nextCommand === "new-code-file") {
-        void handleNewCodeFile();
-        return;
-      }
-
-      if (nextCommand === "toggle-sidebar") {
-        handleToggleSidebar();
-        return;
-      }
-
-      if (nextCommand === "toggle-terminal") {
-        if (TERMINAL_FEATURE_ENABLED) {
-          handleToggleTerminal();
-        }
-        return;
-      }
-
-      if (nextCommand === "open-settings") {
-        openSettings();
-        return;
-      }
-
-      if (nextCommand === "save-current-surface") {
-        void handleSaveCurrentSurface();
-      }
+      handleAppCommand(command as string);
     });
-  }, [
-    hasBridge,
-    surfaceMode,
-    workspacePath,
-    selectedCodePath,
-    selectedPaperPath,
-    codeDirty,
-    paperDirty,
-    memoryDraft,
-    snapshot.activeThreadId,
-    snapshot.threads
-  ]);
+  }, [hasBridge]);
 
   useEffect(() => {
     if (!workspacePath) {
@@ -616,6 +617,12 @@ export default function App() {
   }, [workspacePath]);
 
   useEffect(() => {
+    if (!WORKBENCH_SURFACES_ENABLED) {
+      setSelectedPaperPath("");
+      setPaperFocusLine(undefined);
+      return;
+    }
+
     if (!selectedPaperPath || !paperWorkbenchFiles.some((file) => file.path === selectedPaperPath)) {
       setSelectedPaperPath(selectPreferredPaperPath(paperExplorerFiles, Boolean(snapshot.latestRun)));
       setPaperFocusLine(undefined);
@@ -633,7 +640,20 @@ export default function App() {
   }, [snapshot.activeThread?.id, snapshot.activeThread?.memory, snapshot.activeThread?.updatedAt]);
 
   useEffect(() => {
+    paperDirtyRef.current = paperDirty;
+  }, [paperDirty]);
+
+  useEffect(() => {
+    if (!WORKBENCH_SURFACES_ENABLED) {
+      paperLoadRequestRef.current += 1;
+      setPaperDraft("");
+      paperDraftRef.current = "";
+      setPaperDirty(false);
+      return;
+    }
+
     if (!workspacePath || !selectedPaperPath) {
+      paperLoadRequestRef.current += 1;
       setPaperDraft("");
       paperDraftRef.current = "";
       setPaperDirty(false);
@@ -641,18 +661,20 @@ export default function App() {
     }
 
     let cancelled = false;
+    const requestId = paperLoadRequestRef.current + 1;
+    paperLoadRequestRef.current = requestId;
 
     void window.lithium
       .readWorkspaceFile({ workspacePath, path: selectedPaperPath })
       .then((file) => {
-        if (!cancelled) {
+        if (!cancelled && paperLoadRequestRef.current === requestId && !paperDirtyRef.current) {
           setPaperDraft(file.content);
           paperDraftRef.current = file.content;
           setPaperDirty(false);
         }
       })
       .catch((nextError: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && paperLoadRequestRef.current === requestId) {
           setError(toErrorMessage(nextError));
         }
       });
@@ -663,6 +685,11 @@ export default function App() {
   }, [selectedPaperPath, workspacePath]);
 
   useEffect(() => {
+    if (!WORKBENCH_SURFACES_ENABLED) {
+      setPdfPreviewBytes(null);
+      return;
+    }
+
     if (surfaceMode !== "paper" || !workspacePath || !pdfPreviewPath) {
       setPdfPreviewBytes(null);
       return;
@@ -894,13 +921,13 @@ export default function App() {
       }
 
       if (resizeTarget === "code-canvas") {
-        const maxWidth = Math.max(320, window.innerWidth - sidebarWidth - 320);
+        const maxWidth = Math.max(320, window.innerWidth - sidebarWidthRef.current - 320);
         setCodeCanvasWidth(clamp(window.innerWidth - event.clientX, 320, maxWidth));
         return;
       }
 
       if (resizeTarget === "paper-preview") {
-        const maxWidth = Math.max(460, window.innerWidth - sidebarWidth - 360);
+        const maxWidth = Math.max(460, window.innerWidth - sidebarWidthRef.current - 360);
         setPaperPreviewWidth(clamp(window.innerWidth - event.clientX, 420, maxWidth));
       }
     };
@@ -950,7 +977,7 @@ export default function App() {
       window.removeEventListener("mousemove", handlePointerMove);
       window.removeEventListener("mouseup", handlePointerUp);
     };
-  }, [resizeTarget, sidebarWidth]);
+  }, [resizeTarget]);
 
   useEffect(() => {
     if (!appState || resizeTarget === "sidebar") {
@@ -1267,7 +1294,6 @@ export default function App() {
 
       setSnapshot(nextSnapshot);
       resetThreadSurface();
-      setSidebarCollapsed(true);
     });
   }
 
@@ -1388,7 +1414,6 @@ export default function App() {
     const latestBuilderTaskPrompt = resolveLatestTaskPrompt(snapshot.latestTask?.prompt, "");
     const shouldStartAutomation =
       !automationInteractive && !/^\/(?:research|build|mixed|plan)\b/i.test(rawPrompt);
-    const collapseRailAfterFirstMessage = !sidebarCollapsed && surfaceMode === "chat" && visibleChatItems.length === 0;
     const targetThreadId = activeThreadId;
 
     if (!canSubmitComposerPrompt(rawPrompt, latestBuilderTaskPrompt)) {
@@ -1416,9 +1441,6 @@ export default function App() {
     setPendingChatItems([pendingItem]);
     setPendingChatThreadId(targetThreadId ?? UNASSIGNED_PENDING_THREAD_ID);
     setComposerValue("");
-    if (collapseRailAfterFirstMessage) {
-      setSidebarCollapsed(true);
-    }
 
     await withBusy("Running chat", async () => {
       try {
@@ -1489,43 +1511,49 @@ export default function App() {
           setPendingChatItems([]);
           setPendingChatThreadId(null);
 
-          const requestedPaperSurface = promptRequestsPaperSurface(rawPrompt);
-          const requestedCodeSurface = promptRequestsCodeSurface(rawPrompt);
-          const openPaperSurface = requestedPaperSurface || shouldAutoOpenPaperSurface(nextSnapshot);
-          const openCodeSurface =
-            !openPaperSurface &&
-            (requestedCodeSurface || shouldAutoOpenCodeSurface(nextSnapshot));
+          if (WORKBENCH_SURFACES_ENABLED) {
+            const requestedPaperSurface = promptRequestsPaperSurface(rawPrompt);
+            const requestedCodeSurface = promptRequestsCodeSurface(rawPrompt);
+            const openPaperSurface = requestedPaperSurface || shouldAutoOpenPaperSurface(nextSnapshot);
+            const openCodeSurface =
+              !openPaperSurface &&
+              (requestedCodeSurface || shouldAutoOpenCodeSurface(nextSnapshot));
 
-          if (openPaperSurface) {
-            const nextPaperPath = selectPreferredPaperPath(
-              sortPaperExplorerFiles(selectPaperWorkbenchFiles(files.filter((file) => file.kind === "paper"))),
-              Boolean(nextSnapshot.latestRun)
-            );
-
-            if (nextPaperPath) {
-              setSelectedPaperPath(nextPaperPath);
-              setInspectorPath(nextPaperPath);
-            }
-
-            setCodeCanvasOpen(false);
-            setDrawerTab("none");
-          } else {
-            setDrawerTab("none");
-
-            if (openCodeSurface) {
-              const nextCodePath = selectPreferredCodePath(
-                files.filter((file) => file.kind === "code"),
-                nextSnapshot.latestRun?.changedFiles ?? []
+            if (openPaperSurface) {
+              const nextPaperPath = selectPreferredPaperPath(
+                sortPaperExplorerFiles(selectPaperWorkbenchFiles(files.filter((file) => file.kind === "paper"))),
+                Boolean(nextSnapshot.latestRun)
               );
 
-              if (nextCodePath) {
-                setInspectorPath(nextCodePath);
+              if (nextPaperPath) {
+                setSelectedPaperPath(nextPaperPath);
+                setInspectorPath(nextPaperPath);
               }
-            } else {
-              setInspectorPath("");
-            }
 
+              setCodeCanvasOpen(false);
+              setDrawerTab("none");
+            } else {
+              setDrawerTab("none");
+
+              if (openCodeSurface) {
+                const nextCodePath = selectPreferredCodePath(
+                  files.filter((file) => file.kind === "code"),
+                  nextSnapshot.latestRun?.changedFiles ?? []
+                );
+
+                if (nextCodePath) {
+                  setInspectorPath(nextCodePath);
+                }
+              } else {
+                setInspectorPath("");
+              }
+
+              setCodeCanvasOpen(false);
+            }
+          } else {
+            setDrawerTab("none");
             setCodeCanvasOpen(false);
+            setInspectorPath("");
           }
 
           setLogsOpen(false);
@@ -1922,6 +1950,10 @@ export default function App() {
   }
 
   function handleOpenArtifact(path: string) {
+    if (!WORKBENCH_SURFACES_ENABLED) {
+      return;
+    }
+
     setDrawerTab("none");
     setCodeCanvasOpen(false);
     setLogsOpen(false);
@@ -1933,7 +1965,7 @@ export default function App() {
   }
 
   function handleOpenInspectorWorkbench() {
-    if (!selectedInspectorFile) {
+    if (!WORKBENCH_SURFACES_ENABLED || !selectedInspectorFile) {
       return;
     }
 
@@ -1951,10 +1983,19 @@ export default function App() {
   }
 
   function setSurface(nextSurface: SurfaceMode) {
+    if (!WORKBENCH_SURFACES_ENABLED && nextSurface === "paper") {
+      setDrawerTab("none");
+      return;
+    }
+
     setDrawerTab(nextSurface === "chat" ? "none" : nextSurface);
   }
 
   function handleOpenCodeTarget(path: string) {
+    if (!WORKBENCH_SURFACES_ENABLED) {
+      return;
+    }
+
     setDrawerTab("none");
     setLogsOpen(false);
     setInspectorPath(path);
@@ -1968,7 +2009,7 @@ export default function App() {
   }
 
   function handleOpenCodeSurface() {
-    if (!projectReady) {
+    if (!WORKBENCH_SURFACES_ENABLED || !projectReady) {
       return;
     }
 
@@ -1992,6 +2033,10 @@ export default function App() {
   }
 
   function handleOpenPaperSurface() {
+    if (!WORKBENCH_SURFACES_ENABLED) {
+      return;
+    }
+
     const nextPaperPath = selectedPaperPath || selectPreferredPaperPath(paperExplorerFiles, Boolean(snapshot.latestRun));
 
     if (!nextPaperPath) {
@@ -2235,7 +2280,7 @@ export default function App() {
                       <div ref={chatScrollRef} className="chat-scroll">
                         <ChatFeed
                           items={visibleChatItems}
-                          onOpenArtifact={handleOpenArtifact}
+                          onOpenArtifact={WORKBENCH_SURFACES_ENABLED ? handleOpenArtifact : undefined}
                           researchGoal={snapshot.memory?.researchGoal}
                           workspacePath={workspacePath}
                         />
@@ -2247,11 +2292,14 @@ export default function App() {
                         startsAutomation={composerStartsAutomation}
                         busy={Boolean(busyAction)}
                         canCreateThread={Boolean(workspacePath && projectReady)}
-                        canOpenCode={projectReady}
-                        canOpenPaper={Boolean(
-                          selectedPaperPath || selectPreferredPaperPath(paperExplorerFiles, Boolean(snapshot.latestRun))
-                        )}
-                        canToggleTerminal={TERMINAL_FEATURE_ENABLED && projectReady}
+                        canOpenCode={WORKBENCH_SURFACES_ENABLED && projectReady}
+                        canOpenPaper={
+                          WORKBENCH_SURFACES_ENABLED &&
+                          Boolean(
+                            selectedPaperPath || selectPreferredPaperPath(paperExplorerFiles, Boolean(snapshot.latestRun))
+                          )
+                        }
+                        canToggleTerminal={WORKBENCH_SURFACES_ENABLED && TERMINAL_FEATURE_ENABLED && projectReady}
                         onCreateThread={() => {
                           void handleCreateThread();
                         }}
@@ -2270,7 +2318,7 @@ export default function App() {
                         value={composerValue}
                       />
                     </section>
-                    {inspectorOpen ? (
+                    {WORKBENCH_SURFACES_ENABLED && inspectorOpen ? (
                       <>
                         <div
                           className="pane-resizer"
@@ -2295,7 +2343,7 @@ export default function App() {
                         </section>
                       </>
                     ) : null}
-                    {!inspectorOpen && codeCanvasOpen ? (
+                    {WORKBENCH_SURFACES_ENABLED && !inspectorOpen && codeCanvasOpen ? (
                       <>
                         <div
                           className="pane-resizer"
@@ -2353,7 +2401,7 @@ export default function App() {
               />
             ) : null}
 
-            {surfaceMode === "paper" ? (
+            {WORKBENCH_SURFACES_ENABLED && surfaceMode === "paper" ? (
               <PaperWorkbench
                 busy={Boolean(busyAction)}
                 jump={paperPreviewJump}

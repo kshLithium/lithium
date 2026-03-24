@@ -34,10 +34,22 @@
   --rail-bg: linear-gradient(180deg, #f3f3ef 0%, #f1f1ed 100%);
   --surface-frost: rgba(255, 255, 255, 0.96);
   --surface-frost-strong: rgba(255, 255, 255, 0.98);
-  --header-glass: rgba(255, 255, 255, 0.8);
-  --header-glass-end: rgba(255, 255, 255, 0.22);
+  --header-glass: rgba(255, 255, 255, 0.9);
+  --header-glass-end: rgba(255, 255, 255, 0.34);
   --header-glass-border: rgba(255, 255, 255, 0.46);
-  --surface-header-tail: linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0) 100%);
+  --surface-header-bg: linear-gradient(
+    180deg,
+    var(--header-glass) 0%,
+    color-mix(in srgb, var(--header-glass) 74%, var(--panel-soft) 26%) 58%,
+    var(--header-glass-end) 100%
+  );
+  --surface-header-tail: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.72) 0%,
+    rgba(255, 255, 255, 0.4) 44%,
+    rgba(255, 255, 255, 0.14) 76%,
+    rgba(255, 255, 255, 0) 100%
+  );
   --workbench-header-bg: rgba(255, 255, 255, 0.84);
   --chat-surface-glow: radial-gradient(circle at top, rgba(255, 255, 255, 0.8) 0%, rgba(255, 255, 255, 0) 58%);
   --process-glass: rgba(255, 255, 255, 0.72);
@@ -107,10 +119,16 @@
   --rail-bg: linear-gradient(180deg, #111820 0%, #0f151c 100%);
   --surface-frost: rgba(23, 29, 36, 0.96);
   --surface-frost-strong: rgba(27, 34, 42, 0.98);
-  --header-glass: rgba(19, 25, 32, 0.76);
-  --header-glass-end: rgba(19, 25, 32, 0.16);
+  --header-glass: rgba(19, 25, 32, 0.84);
+  --header-glass-end: rgba(19, 25, 32, 0.3);
   --header-glass-border: rgba(255, 255, 255, 0.06);
-  --surface-header-tail: linear-gradient(180deg, rgba(7, 10, 14, 0.32) 0%, rgba(7, 10, 14, 0) 100%);
+  --surface-header-tail: linear-gradient(
+    180deg,
+    rgba(10, 14, 19, 0.82) 0%,
+    rgba(10, 14, 19, 0.42) 46%,
+    rgba(10, 14, 19, 0.14) 78%,
+    rgba(10, 14, 19, 0) 100%
+  );
   --workbench-header-bg: rgba(20, 27, 34, 0.98);
   --chat-surface-glow: radial-gradient(circle at top, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 58%);
   --process-glass: rgba(28, 36, 45, 0.72);
@@ -177,10 +195,16 @@
     --rail-bg: linear-gradient(180deg, #111820 0%, #0f151c 100%);
     --surface-frost: rgba(23, 29, 36, 0.96);
     --surface-frost-strong: rgba(27, 34, 42, 0.98);
-    --header-glass: rgba(19, 25, 32, 0.76);
-    --header-glass-end: rgba(19, 25, 32, 0.16);
+    --header-glass: rgba(19, 25, 32, 0.84);
+    --header-glass-end: rgba(19, 25, 32, 0.3);
     --header-glass-border: rgba(255, 255, 255, 0.06);
-    --surface-header-tail: linear-gradient(180deg, rgba(7, 10, 14, 0.32) 0%, rgba(7, 10, 14, 0) 100%);
+    --surface-header-tail: linear-gradient(
+      180deg,
+      rgba(10, 14, 19, 0.82) 0%,
+      rgba(10, 14, 19, 0.42) 46%,
+      rgba(10, 14, 19, 0.14) 78%,
+      rgba(10, 14, 19, 0) 100%
+    );
     --workbench-header-bg: rgba(20, 27, 34, 0.98);
     --chat-surface-glow: radial-gradient(circle at top, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0) 58%);
     --process-glass: rgba(28, 36, 45, 0.72);
@@ -263,7 +287,9 @@ select {
   width: 100%;
   height: 100%;
   background: var(--bg);
-  transition: grid-template-columns 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition:
+    grid-template-columns 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 180ms ease;
 }
 
 .workspace-shell.sidebar-collapsed {
@@ -600,10 +626,19 @@ select {
 
 .surface-actions {
   justify-self: end;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease,
+    visibility 0s linear;
 }
 
 .surface-actions.hidden {
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px);
 }
 
 .chat-column {
@@ -1151,6 +1186,12 @@ select {
 .surface-panel {
   min-height: 0;
   background: var(--panel);
+  animation: surface-fade-up 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition:
+    background 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    opacity 180ms ease;
 }
 
 .split-surface {
@@ -2147,7 +2188,9 @@ select {
 .workspace-shell {
   grid-template-columns: var(--sidebar-width, 220px) 1px minmax(0, 1fr);
   background: var(--bg);
-  transition: background 180ms ease;
+  transition:
+    grid-template-columns 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 180ms ease;
 }
 
 .thread-rail {
@@ -2324,11 +2367,13 @@ select {
 }
 
 .thread-row:hover .thread-row-action,
+.thread-row:focus-within .thread-row-action,
 .thread-row-action[aria-expanded="true"] {
   opacity: 1;
 }
 
 .thread-row.has-unread:hover .thread-row-unread-dot,
+.thread-row:focus-within .thread-row-unread-dot,
 .thread-row-meta-shell.menu-open .thread-row-unread-dot {
   opacity: 0;
   transform: scale(0.7);
@@ -2437,14 +2482,11 @@ select {
   padding: 8px 16px 7px 18px;
   position: relative;
   z-index: 8;
-  background: linear-gradient(180deg, var(--header-glass) 0%, rgba(255, 255, 255, 0.64) 62%, var(--header-glass-end) 100%);
-  box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.035);
+  background: var(--surface-header-bg);
   backdrop-filter: blur(18px) saturate(145%);
   -webkit-backdrop-filter: blur(18px) saturate(145%);
   -webkit-app-region: drag;
-  transition:
-    background 180ms ease,
-    box-shadow 180ms ease;
+  transition: background 180ms ease;
 }
 
 .surface-header button,
@@ -2457,8 +2499,8 @@ select {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: -20px;
-  height: 20px;
+  bottom: -28px;
+  height: 28px;
   pointer-events: none;
   background: var(--surface-header-tail);
 }
@@ -2505,6 +2547,20 @@ select {
 .surface-icon-button svg {
   width: 15px;
   height: 15px;
+}
+
+.thread-row-main:focus-visible,
+.thread-row-action:focus-visible,
+.surface-icon-button:focus-visible,
+.rail-footer-action:focus-visible,
+.workbench-close-button:focus-visible,
+.startup-guide-close:focus-visible,
+.settings-close:focus-visible,
+.toolbar-pill:focus-visible,
+.composer-action:focus-visible,
+.send-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 @keyframes surface-fade-up {
@@ -3254,6 +3310,7 @@ select {
   border-radius: 28px;
   background: var(--overlay-panel);
   box-shadow: var(--overlay-shadow);
+  animation: surface-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .startup-guide-header {
@@ -3420,6 +3477,7 @@ select {
   border-radius: 26px;
   background: var(--overlay-panel);
   box-shadow: var(--overlay-shadow);
+  animation: surface-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .settings-header,
@@ -3758,7 +3816,6 @@ input:disabled {
   background: var(--panel-raised);
 }
 
-:root[data-theme="dark"] .surface-header,
 :root[data-theme="dark"] .composer-shell,
 :root[data-theme="dark"] .startup-guide,
 :root[data-theme="dark"] .settings-panel,
@@ -3854,7 +3911,6 @@ input:disabled {
     background: var(--panel-raised);
   }
 
-  :root[data-theme="system"] .surface-header,
   :root[data-theme="system"] .composer-shell,
   :root[data-theme="system"] .startup-guide,
   :root[data-theme="system"] .settings-panel,
@@ -4567,8 +4623,11 @@ input:disabled {
   .surface-header,
   .message,
   .process-card,
+  .surface-panel,
   .composer-shell,
-  .composer-card {
+  .composer-card,
+  .startup-guide,
+  .settings-panel {
     animation: none !important;
     transition: none !important;
   }

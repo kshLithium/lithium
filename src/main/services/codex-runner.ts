@@ -21,6 +21,7 @@ type CodexRunOptions = {
   stdoutPath: string;
   stderrPath: string;
   outputPath: string;
+  timeoutMs?: number | null;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -50,7 +51,7 @@ export class CodexRunner {
 
     const result = await runCommand({
       spec: command,
-      timeoutMs: 30 * 60 * 1000,
+      timeoutMs: options.timeoutMs,
       stdoutPath: options.stdoutPath,
       stderrPath: options.stderrPath,
       env: options.env

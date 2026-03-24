@@ -1433,7 +1433,6 @@ export class AppService {
       stdoutPath: runPaths.stdoutPath,
       stderrPath: runPaths.stderrPath,
       outputPath: runPaths.outputPath,
-      timeoutMs: 30 * 60 * 1000,
       env: executionContext.env
     });
 
@@ -1826,7 +1825,6 @@ export class AppService {
             cwd: resolvedWorkspacePath
           },
           {
-            timeoutMs: 20 * 60 * 1000,
             stdoutPath: runPaths.stdoutPath,
             stderrPath: runPaths.stderrPath
           }
@@ -1837,7 +1835,6 @@ export class AppService {
             args: ["-X", "compile", "--synctex", "paper/main.tex"],
             cwd: resolvedWorkspacePath
           },
-          timeoutMs: 20 * 60 * 1000,
           stdoutPath: runPaths.stdoutPath,
           stderrPath: runPaths.stderrPath
         });

@@ -24,6 +24,7 @@ export type RuntimeAppState = {
   codexReady: boolean;
   oracleChromePath: string | null;
   discordBotStatus: DiscordBotRuntimeStatus;
+  mobileWebStatus?: MobileWebRuntimeStatus;
   settings: AppSettings;
 };
 
@@ -81,6 +82,19 @@ export type DiscordBotRuntimeStatus = {
   botUserId: string;
   lastError: string | null;
   workspacePath: string;
+};
+
+export type MobileWebRuntimeState = "disabled" | "starting" | "running" | "error";
+
+export type MobileWebRuntimeStatus = {
+  state: MobileWebRuntimeState;
+  host: string;
+  port: number | null;
+  authToken: string;
+  localUrl: string;
+  networkUrl: string;
+  staticReady: boolean;
+  lastError: string | null;
 };
 
 export type AppSettings = {

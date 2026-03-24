@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { RuntimeAppState } from "../shared/types";
 import { buildOnboardingChecklist } from "./app-utils";
 
@@ -10,6 +11,20 @@ type OnboardingPanelProps = {
 
 export function OnboardingPanel(props: OnboardingPanelProps) {
   const checklist = buildOnboardingChecklist(props.appState, props.projectReady);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        props.onDismiss();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [props.onDismiss]);
 
   return (
     <div className="startup-guide-backdrop" role="presentation">

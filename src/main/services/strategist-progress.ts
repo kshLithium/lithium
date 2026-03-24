@@ -125,12 +125,12 @@ export async function readLiveOracleSessionProgress(sessionSlug: string): Promis
       return null;
     }
 
-    const cdpModule = (await withOracleCdpTimeout(import("chrome-remote-interface"), 1500)) as any;
+    const cdpModule = (await withOracleCdpTimeout(import("chrome-remote-interface"))) as any;
     const CDP = cdpModule.default ?? cdpModule;
-    const targets = (await withOracleCdpTimeout(
-      CDP.List({ host, port }),
-      1500
-    )) as Array<{ id?: string; url?: string }>;
+    const targets = (await withOracleCdpTimeout(CDP.List({ host, port }))) as Array<{
+      id?: string;
+      url?: string;
+    }>;
     const target =
       targets.find((entry) => entry.id === runtime?.chromeTargetId) ||
       targets.find((entry) => entry.url === runtime?.tabUrl) ||
@@ -141,7 +141,7 @@ export async function readLiveOracleSessionProgress(sessionSlug: string): Promis
       return null;
     }
 
-    const client: any = await withOracleCdpTimeout(CDP({ host, port, target }), 1500);
+    const client: any = await withOracleCdpTimeout(CDP({ host, port, target }));
 
     try {
       const { Runtime } = client;
@@ -149,8 +149,7 @@ export async function readLiveOracleSessionProgress(sessionSlug: string): Promis
         Runtime.evaluate({
           expression: buildLiveOracleProgressExpression(),
           returnByValue: true
-        }),
-        1500
+        })
       );
       const value = evaluation?.result?.value as
         | {
@@ -310,7 +309,14 @@ function buildLiveOracleProgressExpression() {
   })()`;
 }
 
-async function withOracleCdpTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+async function withOracleCdpTimeout<T>(promise: Promise<T>, timeoutMs?: number | null) {
+  const normalizedTimeoutMs =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : null;
+
+  if (normalizedTimeoutMs === null) {
+    return await promise;
+  }
+
   let timer: NodeJS.Timeout | null = null;
 
   try {
@@ -319,7 +325,7 @@ async function withOracleCdpTimeout<T>(promise: Promise<T>, timeoutMs: number) {
       new Promise<T>((_resolve, reject) => {
         timer = setTimeout(() => {
           reject(new Error("oracle-cdp-timeout"));
-        }, timeoutMs);
+        }, normalizedTimeoutMs);
       })
     ]);
   } finally {

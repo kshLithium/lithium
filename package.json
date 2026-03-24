@@ -11,13 +11,15 @@
   "scripts": {
     "postinstall": "tsx scripts/patch-oracle.mts && electron-builder install-app-deps",
     "generate:icons": "tsx scripts/generate-icons.mts",
-    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:mobile-client\" \"npm:dev:main\" \"npm:dev:electron\"",
     "dev:renderer": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:mobile-client": "vite --config vite.mobile.config.ts --host 0.0.0.0 --port 4173 --strictPort",
     "dev:main": "npm run generate:icons && tsup src/main/index.ts src/main/preload.ts --format cjs --out-dir dist-electron --external electron --external node-pty --watch",
     "dev:electron": "wait-on tcp:5173 dist-electron/index.cjs dist-electron/preload.cjs && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 \"LITHIUM_APP_NAME=Lithium Dev\" electron dist-electron/index.cjs",
-    "build": "npm run generate:icons && npm run build:main && npm run build:renderer",
+    "build": "npm run generate:icons && npm run build:main && npm run build:renderer && npm run build:mobile",
     "build:main": "tsup src/main/index.ts src/main/preload.ts --format cjs --out-dir dist-electron --external electron --external node-pty --clean",
     "build:renderer": "vite build",
+    "build:mobile": "vite build --config vite.mobile.config.ts",
     "package:dir": "npm run build && electron-builder --dir",
     "package:open": "tsx scripts/open-packaged-app.mts",
     "dev:focus": "tsx scripts/focus-dev-app.mts",
@@ -34,7 +36,8 @@
     "capture:readme": "tsx scripts/capture-readme-screens.mts",
     "probe:live": "tsx scripts/probe-live-loop.mts",
     "probe:strategist": "tsx scripts/strategist-browser-probe.mts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preview:mobile": "vite preview --config vite.mobile.config.ts --host 0.0.0.0 --port 4173"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
@@ -88,6 +91,7 @@
     },
     "files": [
       "dist/**/*",
+      "dist-mobile/**/*",
       "dist-electron/**/*",
       "build/icon.png",
       "build/icon.icns",

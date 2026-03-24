@@ -27,7 +27,7 @@ type StartLiveProcessOptions = {
   stdoutPath: string;
   stderrPath: string;
   outputPath?: string;
-  timeoutMs: number;
+  timeoutMs?: number | null;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -75,13 +75,17 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
   const stderrStream = createWriteStream(options.stderrPath, { flags: "a" });
 
   const done = new Promise<CommandResult>((resolve, reject) => {
+    let timer: NodeJS.Timeout | null = null;
+
     const finish = async (result: Omit<CommandResult, "startedAt">) => {
       if (settled) {
         return;
       }
 
       settled = true;
-      clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
       activeProcesses.delete(registryKey);
 
       try {
@@ -103,10 +107,17 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
       });
     };
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      void terminateProcessTree(child.pid ?? -1).catch(() => undefined);
-    }, options.timeoutMs);
+    const normalizedTimeoutMs =
+      typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+        ? options.timeoutMs
+        : null;
+
+    if (normalizedTimeoutMs !== null) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        void terminateProcessTree(child.pid ?? -1).catch(() => undefined);
+      }, normalizedTimeoutMs);
+    }
 
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();

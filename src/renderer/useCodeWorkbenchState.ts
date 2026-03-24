@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { WorkspaceFileRecord } from "../shared/types";
 import type { CodeTab } from "./app-types";
 import {
@@ -18,6 +18,7 @@ type UseCodeWorkbenchStateArgs = {
   changedFiles: string[];
   codeExplorerFiles: WorkspaceFileRecord[];
   codeFiles: WorkspaceFileRecord[];
+  enabled: boolean;
   onOpenCanvas: () => void;
   onRefreshWorkspace: (workspacePath?: string) => Promise<void>;
   onReportError: (message: string) => void;
@@ -30,6 +31,7 @@ export function useCodeWorkbenchState({
   changedFiles,
   codeExplorerFiles,
   codeFiles,
+  enabled,
   onOpenCanvas,
   onRefreshWorkspace,
   onReportError,
@@ -41,6 +43,7 @@ export function useCodeWorkbenchState({
   const [codeTabs, setCodeTabs] = useState<CodeTab[]>([]);
   const [collapsedCodeFolders, setCollapsedCodeFolders] = useState<Record<string, boolean>>({});
   const [hydratedCollapseStateKey, setHydratedCollapseStateKey] = useState("");
+  const codeLoadRequestRef = useRef(0);
   const collapseStateStorageKey = useMemo(
     () => buildCodeExplorerStorageKey(workspacePath),
     [workspacePath]
@@ -52,6 +55,12 @@ export function useCodeWorkbenchState({
   );
 
   useEffect(() => {
+    if (!enabled) {
+      setCollapsedCodeFolders({});
+      setHydratedCollapseStateKey("");
+      return;
+    }
+
     if (!workspacePath) {
       setCollapsedCodeFolders({});
       setHydratedCollapseStateKey("");
@@ -71,9 +80,17 @@ export function useCodeWorkbenchState({
     if (hydratedCollapseStateKey !== collapseStateStorageKey) {
       setHydratedCollapseStateKey(collapseStateStorageKey);
     }
-  }, [codeExplorerFiles, collapseStateStorageKey, hydratedCollapseStateKey, workspacePath]);
+  }, [codeExplorerFiles, collapseStateStorageKey, enabled, hydratedCollapseStateKey, workspacePath]);
 
   useEffect(() => {
+    if (!enabled) {
+      if (codeTabs.length || selectedCodePath) {
+        setCodeTabs([]);
+        setSelectedCodePath("");
+      }
+      return;
+    }
+
     const validCodePaths = new Set(codeFiles.map((file) => file.path));
     const nextTabs = codeTabs.filter((tab) => tab.isUntitled || validCodePaths.has(tab.path));
 
@@ -106,19 +123,31 @@ export function useCodeWorkbenchState({
     if (preferredPath) {
       void openCodeFile(preferredPath, { openCanvas: false });
     }
-  }, [changedFiles, codeExplorerFiles, codeFiles, codeTabs, selectedCodePath]);
+  }, [changedFiles, codeExplorerFiles, codeFiles, codeTabs, enabled, selectedCodePath]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     if (!workspacePath || !selectedCodePath || !activeCodeTab || activeCodeTab.loaded || activeCodeTab.isUntitled) {
       return;
     }
 
+    const requestId = codeLoadRequestRef.current + 1;
+    codeLoadRequestRef.current = requestId;
+    const targetPath = selectedCodePath;
+
     void window.lithium
-      .readWorkspaceFile({ workspacePath, path: selectedCodePath })
+      .readWorkspaceFile({ workspacePath, path: targetPath })
       .then((file) => {
+        if (codeLoadRequestRef.current !== requestId) {
+          return;
+        }
+
         setCodeTabs((current) =>
           current.map((tab) =>
-            tab.path === selectedCodePath
+            tab.path === targetPath && !tab.loaded && !tab.dirty
               ? {
                   ...tab,
                   draft: file.content,
@@ -129,10 +158,18 @@ export function useCodeWorkbenchState({
           )
         );
       })
-      .catch((nextError: unknown) => onReportError(toErrorMessage(nextError)));
-  }, [activeCodeTab, onReportError, selectedCodePath, workspacePath]);
+      .catch((nextError: unknown) => {
+        if (codeLoadRequestRef.current === requestId) {
+          onReportError(toErrorMessage(nextError));
+        }
+      });
+  }, [activeCodeTab, enabled, onReportError, selectedCodePath, workspacePath]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     const selectedFile = codeFiles.find((file) => file.path === selectedCodePath);
 
     if (!selectedFile) {
@@ -143,17 +180,21 @@ export function useCodeWorkbenchState({
       const nextState = expandCollapsedFolderAncestors(current, selectedFile.relativePath);
       return areCollapsedFolderStatesEqual(current, nextState) ? current : nextState;
     });
-  }, [codeFiles, selectedCodePath]);
+  }, [codeFiles, enabled, selectedCodePath]);
 
   useEffect(() => {
-    if (!workspacePath || hydratedCollapseStateKey !== collapseStateStorageKey) {
+    if (!enabled || !workspacePath || hydratedCollapseStateKey !== collapseStateStorageKey) {
       return;
     }
 
     writeCollapsedCodeFolders(collapseStateStorageKey, collapsedCodeFolders);
-  }, [collapseStateStorageKey, collapsedCodeFolders, hydratedCollapseStateKey, workspacePath]);
+  }, [collapseStateStorageKey, collapsedCodeFolders, enabled, hydratedCollapseStateKey, workspacePath]);
 
   async function openCodeFile(path: string, options: { openCanvas?: boolean } = {}) {
+    if (!enabled) {
+      return;
+    }
+
     const shouldOpenCanvas = options.openCanvas ?? true;
     const existingTab = codeTabs.find((tab) => tab.path === path);
 
@@ -196,6 +237,10 @@ export function useCodeWorkbenchState({
   }
 
   function createUntitledCodeTab(options: { openCanvas?: boolean } = {}) {
+    if (!enabled) {
+      return "";
+    }
+
     const shouldOpenCanvas = options.openCanvas ?? true;
     const reusableTab = codeTabs.find((tab) => tab.isUntitled && !tab.dirty && !tab.draft.trim());
 
@@ -230,6 +275,10 @@ export function useCodeWorkbenchState({
   }
 
   function updateCodeDraft(value: string) {
+    if (!enabled) {
+      return;
+    }
+
     setCodeTabs((current) =>
       current.map((tab) =>
         tab.path === selectedCodePath
@@ -246,6 +295,10 @@ export function useCodeWorkbenchState({
   }
 
   function handleCloseCodeTab(path: string) {
+    if (!enabled) {
+      return;
+    }
+
     const closingTab = codeTabs.find((tab) => tab.path === path);
 
     if (!closingTab) {
@@ -269,6 +322,10 @@ export function useCodeWorkbenchState({
   }
 
   function toggleCodeFolder(path: string) {
+    if (!enabled) {
+      return;
+    }
+
     setCollapsedCodeFolders((current) => ({
       ...current,
       [path]: !current[path]
@@ -282,6 +339,10 @@ export function useCodeWorkbenchState({
   }
 
   async function handleSaveCode() {
+    if (!enabled) {
+      return;
+    }
+
     if (!selectedCodePath || !activeCodeTab) {
       return;
     }
