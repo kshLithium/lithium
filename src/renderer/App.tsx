@@ -37,7 +37,6 @@ import {
   formatPaperLabel,
   formatThreadLabel,
   normalizePath,
-  resolveAutomationCheckpointTone,
   resolveInitialSurface,
   resolvePdfPreviewPath,
   resolveThreadTitle,
@@ -65,7 +64,6 @@ import {
   isPendingChatVisible,
   promptRequestsCodeSurface,
   promptRequestsPaperSurface,
-  resolveAutomationObjective,
   resolveLatestTaskPrompt,
   shouldAutoOpenCodeSurface,
   shouldAutoOpenPaperSurface
@@ -105,7 +103,7 @@ export default function App() {
   const [chatProgress, setChatProgress] = useState<ChatProgressInspection | null>(null);
   const [strategistProbeResult, setStrategistProbeResult] = useState<StrategistBrowserProbeResponse | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_APP_SETTINGS.sidebarWidth);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [threadMenuOpenId, setThreadMenuOpenId] = useState<string | null>(null);
   const [threadMenuPosition, setThreadMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [codeCanvasWidth, setCodeCanvasWidth] = useState(DEFAULT_APP_SETTINGS.codeCanvasWidth);
@@ -278,37 +276,36 @@ export default function App() {
     snapshot.latestAutomationSession?.threadId === activeThreadId
       ? snapshot.latestAutomationSession
       : null;
-  const latestAutomationCheckpoint =
-    snapshot.latestAutomationCheckpoint?.threadId === activeThreadId
-      ? snapshot.latestAutomationCheckpoint
-      : null;
-  const automationStatus = latestAutomationSession?.status ?? "idle";
-  const automationCheckpointPending = Boolean(
-    latestAutomationSession &&
-      latestAutomationCheckpoint &&
-      latestAutomationSession.latestCheckpointId === latestAutomationCheckpoint.id &&
-      latestAutomationCheckpoint.status === "pending"
-  );
-  const automationObjective = resolveAutomationObjective(snapshot);
+  const activePendingAutomationCheckpoint = useMemo(() => {
+    if (!latestAutomationSession) {
+      return null;
+    }
+
+    const checkpoints = snapshot.automationCheckpoints ?? [];
+
+    return (
+      checkpoints.find(
+        (checkpoint) =>
+          checkpoint.threadId === activeThreadId &&
+          checkpoint.sessionId === latestAutomationSession.id &&
+          checkpoint.status === "pending" &&
+          checkpoint.id === latestAutomationSession.latestCheckpointId
+      ) ||
+      checkpoints.find(
+        (checkpoint) =>
+          checkpoint.threadId === activeThreadId &&
+          checkpoint.sessionId === latestAutomationSession.id &&
+          checkpoint.status === "pending"
+      ) ||
+      null
+    );
+  }, [activeThreadId, latestAutomationSession, snapshot.automationCheckpoints]);
+  const automationCheckpointPending = Boolean(latestAutomationSession && activePendingAutomationCheckpoint);
   const inspectorOpen = WORKBENCH_SURFACES_ENABLED && Boolean(selectedInspectorFile);
-  const automationRunning = automationStatus === "running";
+  const automationRunning = latestAutomationSession?.status === "running";
   const automationInteractive = automationRunning || automationCheckpointPending;
-  const composerStartsAutomation = !automationInteractive;
-  const automationCheckpointTone =
-    automationCheckpointPending && latestAutomationCheckpoint
-      ? resolveAutomationCheckpointTone(latestAutomationCheckpoint, latestAutomationSession ?? undefined)
-      : undefined;
-  const showAutomationHeaderAction = automationRunning || automationCheckpointPending;
   const terminalOpen = WORKBENCH_SURFACES_ENABLED && TERMINAL_FEATURE_ENABLED && logsOpen;
-  const composerPlaceholder = automationRunning
-    ? "Ask for status or steer the next step."
-    : automationCheckpointPending && automationCheckpointTone === "blocked"
-    ? "Resolve the strategist blocker and say what autopilot should do next."
-    : automationCheckpointPending && automationCheckpointTone === "failed"
-    ? "Review the failure and say what autopilot should do next."
-    : automationCheckpointPending
-    ? "Reply to resume or redirect autopilot."
-    : "Ask, steer, or inspect.";
+  const composerPlaceholder = automationInteractive ? "Ask for status, or say stop." : "Start with a message.";
   const railHeading = resolveRailHeading();
 
   const handleAppCommand = useEffectEvent((command: string) => {
@@ -1497,32 +1494,6 @@ export default function App() {
           return;
         }
 
-        if (
-          latestAutomationSession &&
-          automationInteractive &&
-          !/^\/(?:research|build|mixed|plan)\b/i.test(rawPrompt)
-        ) {
-          const nextSnapshot =
-            automationCheckpointPending
-              ? await window.lithium.approveAutomationCheckpoint({
-                  workspacePath: workspacePath || undefined,
-                  sessionId: latestAutomationSession.id,
-                  checkpointId: latestAutomationCheckpoint?.id,
-                  response: rawPrompt
-                })
-              : await window.lithium.interruptAutomationSession({
-                  workspacePath: workspacePath || undefined,
-                  sessionId: latestAutomationSession.id,
-                  instruction: rawPrompt,
-                  stopNow: false
-                });
-
-          await applySnapshotUpdate(nextSnapshot);
-          setPendingChatItems([]);
-          setPendingChatThreadId(null);
-          return;
-        }
-
         if (canUseChatRouter) {
           const nextSnapshot = await window.lithium.sendChatMessage({
             workspacePath: workspacePath || undefined,
@@ -1887,91 +1858,6 @@ export default function App() {
     }
   }
 
-  async function handleStartAutomation() {
-    await withBusy("Starting automation", async () => {
-      const createdSnapshot = await window.lithium.createAutomationSession({
-        workspacePath: workspacePath || undefined,
-        threadId: snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? undefined,
-        objective: automationObjective,
-        mode: "continuous",
-        maxSteps: 64,
-        maxRuntimeMinutes: 24 * 60,
-        maxRetries: 8,
-        paperWriteEnabled: false
-      });
-      const sessionId = createdSnapshot.latestAutomationSession?.id;
-
-      if (!sessionId) {
-        throw new Error("Automation session could not be created.");
-      }
-
-      const nextSnapshot = await window.lithium.startAutomationSession({
-        workspacePath: workspacePath || undefined,
-        sessionId
-      });
-      await applySnapshotUpdate(nextSnapshot);
-    });
-  }
-
-  async function handlePauseAutomation() {
-    if (!latestAutomationSession) {
-      return;
-    }
-
-    await withBusy("Pausing automation", async () => {
-      const nextSnapshot = await window.lithium.pauseAutomationSession({
-        workspacePath: workspacePath || undefined,
-        sessionId: latestAutomationSession.id
-      });
-      await applySnapshotUpdate(nextSnapshot);
-    });
-  }
-
-  async function handleResumeAutomation() {
-    if (!latestAutomationSession) {
-      return;
-    }
-
-    await withBusy("Resuming automation", async () => {
-      const nextSnapshot = await window.lithium.resumeAutomationSession({
-        workspacePath: workspacePath || undefined,
-        sessionId: latestAutomationSession.id
-      });
-      await applySnapshotUpdate(nextSnapshot);
-    });
-  }
-
-  async function handleApproveAutomationCheckpoint() {
-    if (!latestAutomationSession) {
-      return;
-    }
-
-    await withBusy("Approving checkpoint", async () => {
-      const nextSnapshot = await window.lithium.approveAutomationCheckpoint({
-        workspacePath: workspacePath || undefined,
-        sessionId: latestAutomationSession.id,
-        checkpointId: latestAutomationCheckpoint?.id
-      });
-      await applySnapshotUpdate(nextSnapshot);
-    });
-  }
-
-  async function handleStopAutomation() {
-    if (!latestAutomationSession) {
-      return;
-    }
-
-    await withBusy("Stopping automation", async () => {
-      const nextSnapshot = await window.lithium.interruptAutomationSession({
-        workspacePath: workspacePath || undefined,
-        sessionId: latestAutomationSession.id,
-        instruction: "Stop automation and wait for further user direction.",
-        stopNow: true
-      });
-      await applySnapshotUpdate(nextSnapshot);
-    });
-  }
-
   const handleOpenArtifact = useEffectEvent((path: string) => {
     if (!WORKBENCH_SURFACES_ENABLED) {
       return;
@@ -2239,56 +2125,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div className={showAutomationHeaderAction ? "surface-actions" : "surface-actions hidden"}>
-              <button
-                aria-label={
-                  automationRunning
-                    ? "Stop autopilot"
-                    : automationCheckpointPending
-                    ? "Continue autopilot"
-                    : "Start autopilot"
-                }
-                className={
-                  automationRunning
-                    ? "surface-icon-button active"
-                    : automationCheckpointPending
-                    ? "surface-icon-button ready"
-                    : "surface-icon-button"
-                }
-                disabled={Boolean(busyAction) || !hasBridge}
-                onClick={() => {
-                  if (automationRunning) {
-                    void handleStopAutomation();
-                    return;
-                  }
-
-                  if (automationCheckpointPending) {
-                    void handleApproveAutomationCheckpoint();
-                    return;
-                  }
-
-                  void handleStartAutomation();
-                }}
-                title={
-                  automationRunning
-                    ? "Stop autopilot"
-                    : automationCheckpointPending
-                    ? "Continue autopilot"
-                    : "Start autopilot"
-                }
-                type="button"
-              >
-                {automationRunning ? (
-                  <svg aria-hidden="true" fill="currentColor" viewBox="0 0 20 20">
-                    <rect height="8.5" rx="1.6" width="8.5" x="5.75" y="5.75" />
-                  </svg>
-                ) : (
-                  <svg aria-hidden="true" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M6.4 4.8a.8.8 0 0 1 1.2-.68l7.1 4.4a.8.8 0 0 1 0 1.36l-7.1 4.4A.8.8 0 0 1 6.4 13.6V4.8Z" />
-                  </svg>
-                )}
-              </button>
-            </div>
           </header>
 
           <section className="surface-main">
@@ -2308,38 +2144,37 @@ export default function App() {
                           workspacePath={workspacePath}
                         />
                       </div>
-                      <Composer
-                        attachments={snapshot.activeThreadAttachments}
-                        appSettings={appSettings}
-                        automationInteractive={automationInteractive}
-                        startsAutomation={composerStartsAutomation}
-                        busy={Boolean(busyAction)}
-                        canCreateThread={Boolean(workspacePath && projectReady)}
-                        canOpenCode={WORKBENCH_SURFACES_ENABLED && projectReady}
-                        canOpenPaper={
-                          WORKBENCH_SURFACES_ENABLED &&
-                          Boolean(
-                            selectedPaperPath || selectPreferredPaperPath(paperExplorerFiles, Boolean(snapshot.latestRun))
-                          )
-                        }
-                        canToggleTerminal={WORKBENCH_SURFACES_ENABLED && TERMINAL_FEATURE_ENABLED && projectReady}
-                        onCreateThread={() => {
-                          void handleCreateThread();
-                        }}
-                        onDropFiles={(filePaths) => {
-                          void handleDropAttachments(filePaths);
-                        }}
-                        onOpenChatSurface={handleOpenChatSurface}
-                        onOpenCodeSurface={handleOpenCodeSurface}
-                        onOpenPaperSurface={handleOpenPaperSurface}
-                        onOpenSettings={openSettings}
-                        onRemoveAttachment={(attachmentId) => void handleRemoveAttachment(attachmentId)}
-                        onSend={handleSend}
-                        onToggleTerminal={handleToggleTerminal}
-                        onValueChange={setComposerValue}
-                        placeholder={composerPlaceholder}
-                        value={composerValue}
-                      />
+                      <div className="chat-composer-wrap">
+                        <Composer
+                          attachments={snapshot.activeThreadAttachments}
+                          busy={Boolean(busyAction)}
+                          canCreateThread={Boolean(workspacePath && projectReady)}
+                          canOpenCode={WORKBENCH_SURFACES_ENABLED && projectReady}
+                          canOpenPaper={
+                            WORKBENCH_SURFACES_ENABLED &&
+                            Boolean(
+                              selectedPaperPath || selectPreferredPaperPath(paperExplorerFiles, Boolean(snapshot.latestRun))
+                            )
+                          }
+                          canToggleTerminal={WORKBENCH_SURFACES_ENABLED && TERMINAL_FEATURE_ENABLED && projectReady}
+                          onCreateThread={() => {
+                            void handleCreateThread();
+                          }}
+                          onDropFiles={(filePaths) => {
+                            void handleDropAttachments(filePaths);
+                          }}
+                          onOpenChatSurface={handleOpenChatSurface}
+                          onOpenCodeSurface={handleOpenCodeSurface}
+                          onOpenPaperSurface={handleOpenPaperSurface}
+                          onOpenSettings={openSettings}
+                          onRemoveAttachment={(attachmentId) => void handleRemoveAttachment(attachmentId)}
+                          onSend={handleSend}
+                          onToggleTerminal={handleToggleTerminal}
+                          onValueChange={setComposerValue}
+                          placeholder={composerPlaceholder}
+                          value={composerValue}
+                        />
+                      </div>
                     </section>
                     {WORKBENCH_SURFACES_ENABLED && inspectorOpen ? (
                       <>

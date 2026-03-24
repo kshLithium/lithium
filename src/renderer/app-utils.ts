@@ -34,7 +34,7 @@ export type OnboardingChecklistItem = {
 export function buildChatItems(
   snapshot: ProjectSnapshot,
   _workspaceFiles: WorkspaceFileRecord[],
-  _workspacePath = "",
+  workspacePath = "",
   builderInspection: BuilderRunInspection | null = null
 ): ChatItem[] {
   if (!snapshot.project) {
@@ -94,7 +94,15 @@ export function buildChatItems(
       role: "assistant",
       variant: "research",
       title: "Lithium",
-      body: formatDecisionBody(decision.summary, decision.rationale, decision.rawOutput, false, decision.handoff),
+      body: formatDecisionBody(
+        decision.summary,
+        decision.rationale,
+        decision.rawOutput,
+        false,
+        decision.handoff,
+        decision.inputFiles,
+        workspacePath
+      ),
       timestamp: decision.createdAt,
       order: items.length
     });
@@ -178,7 +186,9 @@ export function buildChatItems(
       checkpoint,
       session,
       automationCheckpoints,
-      automationSteps
+      automationSteps,
+      decisions,
+      runs
     );
 
     if (tone === "recorded") {
@@ -203,9 +213,9 @@ export function buildChatItems(
 
     items.push({
       id: `automation-checkpoint:${checkpoint.id}`,
-      role: "assistant",
+      role: "system",
       variant: "neutral",
-      title: "Lithium",
+      title: "Automation",
       body: checkpointBody,
       timestamp: checkpoint.updatedAt || checkpoint.createdAt,
       order: items.length
@@ -328,6 +338,18 @@ function describeAutomationCheckpoint(
   checkpoint: AutomationCheckpointRecord,
   session?: AutomationSessionRecord
 ) {
+  if (
+    /^automation interrupted$/i.test(checkpoint.title) &&
+    checkpoint.status === "approved" &&
+    session?.status === "idle"
+  ) {
+    return "자동 연구를 멈췄습니다. 다시 시작하려면 새 메시지를 보내 주세요.";
+  }
+
+  if (/^automation stopped$/i.test(checkpoint.title)) {
+    return "자동 연구를 멈췄습니다. 다시 시작하려면 새 메시지를 보내 주세요.";
+  }
+
   const tone = resolveAutomationCheckpointTone(checkpoint, session);
   const summary = simplifyAutomationCheckpointSummary(checkpoint.summary, session);
 
@@ -490,6 +512,18 @@ export function resolveAutomationCheckpointTone(
   checkpoint: AutomationCheckpointRecord,
   session?: AutomationSessionRecord
 ): NonNullable<ChatItem["statusTone"]> {
+  if (
+    /^automation interrupted$/i.test(checkpoint.title) &&
+    checkpoint.status === "approved" &&
+    session?.status === "idle"
+  ) {
+    return "paused";
+  }
+
+  if (/^automation stopped$/i.test(checkpoint.title)) {
+    return "paused";
+  }
+
   if (/^automation update$/i.test(checkpoint.title)) {
     return "running";
   }
@@ -555,13 +589,31 @@ function shouldSuppressResolvedAutomationCheckpointBody(
   checkpoint: AutomationCheckpointRecord,
   session?: AutomationSessionRecord,
   checkpoints: AutomationCheckpointRecord[] = [],
-  steps: AutomationStepRecord[] = []
+  steps: AutomationStepRecord[] = [],
+  decisions: ProjectSnapshot["decisions"] = [],
+  runs: ProjectSnapshot["runs"] = []
 ) {
   if (!isOperationalAutomationCheckpoint(checkpoint)) {
     return false;
   }
 
-  if (hasNewerOperationalAutomationEvent(checkpoint.sessionId, checkpoint.updatedAt || checkpoint.createdAt, checkpoints, steps, checkpoint.id)) {
+  const timestamp = checkpoint.updatedAt || checkpoint.createdAt;
+
+  if (hasNewerOperationalAutomationEvent(checkpoint.sessionId, timestamp, checkpoints, steps, checkpoint.id)) {
+    return true;
+  }
+
+  if (
+    decisions.some((decision) => decision.createdAt > timestamp) ||
+    runs.some((run) => {
+      const runTimestamp = run.endedAt || run.startedAt || run.createdAt;
+      const runSummary =
+        handoffMachineSummary(run.handoff) ||
+        extractCompactBuilderSummary(run.finalMessage || "");
+
+      return runTimestamp > timestamp && !isOperationalAutomationMessage(runSummary);
+    })
+  ) {
     return true;
   }
 
@@ -940,41 +992,49 @@ export function formatDecisionBody(
   rationale: string,
   rawOutput = "",
   preferSummary = false,
-  handoff?: LithiumHandoff | null
+  handoff?: LithiumHandoff | null,
+  inputFiles: string[] = [],
+  workspacePath = ""
 ) {
+  const attachmentPrelude = formatStrategistInputFiles(
+    inputFiles,
+    workspacePath,
+    containsHangul([summary, rawOutput, handoffUserMessage(handoff)].join("\n"))
+  );
+
   if (preferSummary) {
     const normalizedSummary = simplifyStrategistDisplayText(summary);
 
     if (normalizedSummary) {
-      return normalizedSummary;
+      return combineStrategistPrelude(attachmentPrelude, normalizedSummary);
     }
   }
 
   const handoffMessage = simplifyStrategistDisplayText(handoffUserMessage(handoff));
 
   if (handoffMessage) {
-    return handoffMessage;
+    return combineStrategistPrelude(attachmentPrelude, handoffMessage);
   }
 
   const displayReply = extractVisibleStrategistReply(rawOutput);
 
   if (displayReply) {
-    return displayReply;
+    return combineStrategistPrelude(attachmentPrelude, displayReply);
   }
 
   const normalizedSummary = simplifyStrategistDisplayText(summary);
 
   if (normalizedSummary) {
-    return normalizedSummary;
+    return combineStrategistPrelude(attachmentPrelude, normalizedSummary);
   }
 
   const normalizedRationale = simplifyStrategistDisplayText(rationale);
 
   if (normalizedRationale) {
-    return normalizedRationale;
+    return combineStrategistPrelude(attachmentPrelude, normalizedRationale);
   }
 
-  return "Lithium returned a strategist note.";
+  return combineStrategistPrelude(attachmentPrelude, "Lithium returned a strategist note.");
 }
 
 function extractVisibleStrategistReply(rawOutput: string) {
@@ -989,8 +1049,45 @@ function extractVisibleStrategistReply(rawOutput: string) {
 
 function simplifyStrategistDisplayText(value: string) {
   return inlineReferenceLinks(value)
+    .replace(/\n\s*입니다\.\s*(?=\n|$)/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function combineStrategistPrelude(prelude: string, body: string) {
+  return [prelude, body].filter(Boolean).join("\n\n");
+}
+
+function formatStrategistInputFiles(inputFiles: string[], workspacePath: string, preferKorean = false) {
+  const uniqueFiles = Array.from(new Set(inputFiles.map((value) => value.trim()).filter(Boolean))).slice(0, 4);
+
+  if (!uniqueFiles.length) {
+    return "";
+  }
+
+  const labels = uniqueFiles.map((filePath) => {
+    const label = formatStrategistInputFileLabel(filePath, workspacePath);
+    return `[${label}](${filePath})`;
+  });
+  const suffix = inputFiles.length > uniqueFiles.length ? ` 외 ${inputFiles.length - uniqueFiles.length}개` : "";
+  return preferKorean
+    ? `참고한 파일: ${labels.join(", ")}${suffix}`
+    : `Referenced files: ${labels.join(", ")}${suffix}`;
+}
+
+function formatStrategistInputFileLabel(filePath: string, workspacePath: string) {
+  const trimmedPath = filePath.trim();
+  const trimmedWorkspace = workspacePath.trim();
+
+  if (trimmedWorkspace && trimmedPath.startsWith(`${trimmedWorkspace}/`)) {
+    return trimmedPath.slice(trimmedWorkspace.length + 1);
+  }
+
+  return trimmedPath.split("/").filter(Boolean).slice(-2).join("/");
+}
+
+function containsHangul(value: string) {
+  return /[\u3131-\u318E\uAC00-\uD7A3]/.test(value);
 }
 
 function looksLikeStructuredStrategistOnly(value: string) {

@@ -297,6 +297,7 @@ export type DecisionRecord = {
   threadId: string;
   prompt: string;
   displayPrompt?: string;
+  inputFiles?: string[];
   rawOutput: string;
   summary: string;
   nextTask?: string;

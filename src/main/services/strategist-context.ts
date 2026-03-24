@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import path, { basename } from "node:path";
 import type { ProjectSnapshot } from "../../shared/types";
+import { handoffMachineSummary } from "../../shared/handoff-utils";
 
 const SUPPORTED_STRATEGIST_UPLOAD_EXTENSIONS = new Set([
   ".md",
@@ -108,6 +109,10 @@ export function buildStrategistContextFingerprint(snapshot: ProjectSnapshot) {
           id: snapshot.latestRun.id,
           status: snapshot.latestRun.status,
           endedAt: snapshot.latestRun.endedAt,
+          summary:
+            handoffMachineSummary(snapshot.latestRun.handoff) ||
+            snapshot.latestRun.finalMessage?.replace(/\s+/g, " ").trim().slice(0, 280) ||
+            "",
           changedFiles: [...snapshot.latestRun.changedFiles].sort((left, right) =>
             left.localeCompare(right)
           )
@@ -116,7 +121,26 @@ export function buildStrategistContextFingerprint(snapshot: ProjectSnapshot) {
     latestTask: snapshot.latestTask
       ? {
           id: snapshot.latestTask.id,
+          prompt: snapshot.latestTask.prompt,
           updatedAt: snapshot.latestTask.updatedAt
+        }
+      : null,
+    latestAutomationSession: snapshot.latestAutomationSession
+      ? {
+          id: snapshot.latestAutomationSession.id,
+          status: snapshot.latestAutomationSession.status,
+          latestCheckpointId: snapshot.latestAutomationSession.latestCheckpointId,
+          currentStepSummary: snapshot.latestAutomationSession.currentStepSummary,
+          updatedAt: snapshot.latestAutomationSession.updatedAt
+        }
+      : null,
+    latestAutomationCheckpoint: snapshot.latestAutomationCheckpoint
+      ? {
+          id: snapshot.latestAutomationCheckpoint.id,
+          status: snapshot.latestAutomationCheckpoint.status,
+          title: snapshot.latestAutomationCheckpoint.title,
+          summary: snapshot.latestAutomationCheckpoint.summary,
+          updatedAt: snapshot.latestAutomationCheckpoint.updatedAt
         }
       : null,
     latestTerminalSession: snapshot.latestTerminalSession

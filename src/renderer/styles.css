@@ -54,7 +54,7 @@
   --chat-surface-glow: radial-gradient(circle at top, rgba(255, 255, 255, 0.8) 0%, rgba(255, 255, 255, 0) 58%);
   --process-glass: rgba(255, 255, 255, 0.72);
   --user-bubble-shadow: 0 10px 26px rgba(15, 23, 42, 0.05);
-  --bubble-user: #f1f0ec;
+  --bubble-user: #ececec;
   --shadow-soft: 0 8px 20px rgba(15, 23, 42, 0.03);
   --shadow-medium: 0 10px 28px rgba(15, 23, 42, 0.08);
   --shadow-large: 0 24px 70px rgba(15, 23, 42, 0.12);
@@ -643,8 +643,10 @@ select {
 
 .chat-column {
   min-height: 0;
+  position: relative;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas: "chat";
+  isolation: isolate;
   background: transparent;
 }
 
@@ -695,13 +697,27 @@ select {
 }
 
 .chat-scroll {
+  grid-area: chat;
   min-height: 0;
   overflow: auto;
   display: grid;
   align-content: start;
   justify-items: center;
   gap: 20px;
-  padding: 22px 16px 28px;
+  padding: 22px 16px clamp(152px, 18vh, 212px);
+}
+
+.chat-composer-wrap {
+  grid-area: chat;
+  width: 100%;
+  align-self: end;
+  padding: 0 18px 22px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.chat-composer-wrap .composer-shell {
+  pointer-events: auto;
 }
 
 .chat-feed {
@@ -787,7 +803,7 @@ select {
   min-width: 72px;
   justify-self: end;
   padding: 13px 15px;
-  border-radius: 22px;
+  border-radius: 16px;
   border: 1px solid var(--border);
   background: var(--bubble-user);
   color: var(--text);
@@ -2624,12 +2640,12 @@ select {
 
 .chat-scroll {
   gap: 18px;
-  padding: 28px 20px 40px;
+  padding: 28px 20px clamp(160px, 20vh, 220px);
   overflow-x: hidden;
   scroll-behavior: smooth;
   overscroll-behavior: contain;
   scroll-padding-top: 28px;
-  scroll-padding-bottom: 32px;
+  scroll-padding-bottom: 160px;
 }
 
 .message {
@@ -2650,9 +2666,9 @@ select {
   min-width: 72px;
   justify-self: end;
   padding: 12px 16px;
-  border-radius: 22px;
+  border-radius: 14px;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  background: #f1f0ec;
+  background: var(--bubble-user);
   color: var(--text);
   box-shadow: var(--user-bubble-shadow);
 }
@@ -2674,11 +2690,11 @@ select {
 .composer-shell {
   position: relative;
   background: transparent;
-  padding: 10px 0 16px;
+  padding: 0;
 }
 
 .composer-shell.compact {
-  padding: 6px 0 10px;
+  padding: 0;
 }
 
 .composer-slash-menu {
@@ -2686,7 +2702,7 @@ select {
   left: 50%;
   bottom: calc(100% + 12px);
   z-index: 14;
-  width: min(760px, calc(100% - 36px));
+  width: min(720px, calc(100% - 32px));
   max-height: min(440px, calc(100vh - 220px));
   display: grid;
   gap: 10px;
@@ -2828,16 +2844,19 @@ select {
 }
 
 .composer-card {
-  --composer-input-line-height: 1.52;
-  --composer-input-pad-block-start: clamp(0.68rem, 0.62rem + 0.14vw, 0.8rem);
-  --composer-input-pad-block-end: clamp(0.2rem, 0.17rem + 0.1vw, 0.32rem);
-  --composer-input-pad-inline: clamp(0.95rem, 0.9rem + 0.2vw, 1.12rem);
-  width: min(760px, calc(100% - 36px));
+  --composer-input-line-height: 1.34;
+  --composer-input-pad-block-start: clamp(0.34rem, 0.32rem + 0.06vw, 0.4rem);
+  --composer-input-pad-block-end: clamp(0.32rem, 0.3rem + 0.06vw, 0.38rem);
+  --composer-input-pad-inline: clamp(0.92rem, 0.88rem + 0.16vw, 1.02rem);
+  width: min(688px, calc(100% - 28px));
   margin: 0 auto;
-  border: 1px solid var(--border);
-  border-radius: 26px;
-  background: var(--surface-frost-strong);
-  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 78%, transparent);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--surface-frost-strong) 94%, transparent);
+  box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(20px) saturate(135%);
+  -webkit-backdrop-filter: blur(20px) saturate(135%);
+  overflow: hidden;
   transition:
     border-color 140ms ease,
     box-shadow 140ms ease,
@@ -2846,9 +2865,9 @@ select {
 }
 
 .composer-shell.compact .composer-card {
-  --composer-input-line-height: 1.48;
-  --composer-input-pad-block-start: clamp(0.58rem, 0.54rem + 0.1vw, 0.7rem);
-  --composer-input-pad-block-end: clamp(0.16rem, 0.13rem + 0.08vw, 0.26rem);
+  --composer-input-line-height: 1.32;
+  --composer-input-pad-block-start: 0.3rem;
+  --composer-input-pad-block-end: 0.28rem;
 }
 
 .composer-card.drag-active {
@@ -2858,17 +2877,16 @@ select {
 
 .composer-card:focus-within {
   border-color: rgba(71, 80, 93, 0.18);
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 22px 44px rgba(15, 23, 42, 0.16);
+  transform: translateY(-1px);
 }
 
 .composer-input {
   width: 100%;
-  min-height: calc(
-    1lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end) + 0.7rem
-  );
+  min-height: calc(1lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end) + 0.06rem);
   max-height: min(
-    28vh,
-    calc(7lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end))
+    20vh,
+    calc(5lh + var(--composer-input-pad-block-start) + var(--composer-input-pad-block-end))
   );
   margin: 0;
   padding:
@@ -2876,9 +2894,9 @@ select {
     var(--composer-input-pad-inline)
     var(--composer-input-pad-block-end);
   border: 0;
-  border-radius: 26px 26px 0 0;
+  border-radius: 20px;
   background: transparent;
-  font-size: 0.88rem;
+  font-size: 0.86rem;
   line-height: var(--composer-input-line-height);
 }
 
@@ -2890,7 +2908,7 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 0 14px 8px;
+  padding: 0 12px 12px;
 }
 
 .composer-attachment-chip {
@@ -2930,16 +2948,6 @@ select {
   color: var(--muted);
 }
 
-.composer-footer {
-  width: 100%;
-  margin: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0;
-  padding: 0 10px 10px;
-}
-
 .composer-drop-hint {
   color: var(--muted);
   font-size: 0.7rem;
@@ -2962,25 +2970,6 @@ select {
   padding: 0;
   font-size: 1.1rem;
   line-height: 1;
-}
-
-.send-button.icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
-  min-height: 34px;
-  padding: 0;
-  border-radius: 999px;
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.send-button.icon svg {
-  width: 16px;
-  height: 16px;
 }
 
 .tree-list,
@@ -4695,6 +4684,15 @@ input:disabled {
 
   .content-shell.logs-open {
     grid-template-rows: minmax(0, 1fr) 240px;
+  }
+
+  .chat-scroll {
+    padding: 24px 14px 148px;
+    scroll-padding-bottom: 148px;
+  }
+
+  .chat-composer-wrap {
+    padding: 0 12px 12px;
   }
 
   .startup-guide {

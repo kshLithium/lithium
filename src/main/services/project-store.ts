@@ -26,7 +26,11 @@ import type {
   WorkspaceFileRecord
 } from "../../shared/types";
 import { DEFAULT_PROJECT_RESEARCH_GOAL } from "../../shared/types";
-import { handoffMachineSummary, handoffUserMessage } from "../../shared/handoff-utils";
+import {
+  handoffMachineSummary,
+  handoffUserMessage,
+  isOperationalAutomationMessage
+} from "../../shared/handoff-utils";
 import { extractFinalSummary, readTailText } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
 import { parseTerminalCapture } from "./terminal-session";
@@ -480,6 +484,12 @@ export class ProjectStore {
 
     const latestStrategistSummary = snapshot.latestDecision?.summary?.trim() || "";
     const latestStrategistReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 260);
+    const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
+    const latestOperationalRun =
+      snapshot.latestRun && snapshot.latestRun.id !== latestContextRun?.id ? snapshot.latestRun : null;
+    const latestContextRunSummary = latestContextRun?.finalMessage
+      ? extractFinalSummary(latestContextRun.finalMessage)
+      : "none";
 
     const sessionSummary = [
       `Project: ${snapshot.project.name}`,
@@ -489,12 +499,13 @@ export class ProjectStore {
       latestStrategistReply && !isRedundantInlineSummary(latestStrategistReply, latestStrategistSummary)
         ? `Latest strategist reply: ${latestStrategistReply}`
         : null,
-      snapshot.latestRun
-        ? `Latest run: ${snapshot.latestRun.id} (${snapshot.latestRun.status}, exit ${snapshot.latestRun.exitCode ?? "unknown"})`
-        : "Latest run: none",
-      snapshot.latestRun?.finalMessage
-        ? `Latest builder summary: ${extractFinalSummary(snapshot.latestRun.finalMessage)}`
-        : "Latest builder summary: none"
+      latestContextRun
+        ? `Latest research run: ${latestContextRun.id} (${latestContextRun.status}, exit ${latestContextRun.exitCode ?? "unknown"})`
+        : "Latest research run: none",
+      latestContextRun ? `Latest builder summary: ${latestContextRunSummary}` : "Latest builder summary: none",
+      latestOperationalRun?.finalMessage
+        ? `Latest operational issue: ${extractFinalSummary(latestOperationalRun.finalMessage)}`
+        : null
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
@@ -718,10 +729,13 @@ export class ProjectStore {
     const memory = snapshot.memory;
     const latestStrategistSummary = snapshot.latestDecision?.summary?.trim() || "";
     const latestStrategistReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 420);
-    const latestRunChangedFiles = snapshot.latestRun?.changedFiles ?? [];
-    const latestRunSummary = snapshot.latestRun?.finalMessage
-      ? extractFinalSummary(snapshot.latestRun.finalMessage)
+    const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
+    const latestRunChangedFiles = latestContextRun?.changedFiles ?? [];
+    const latestRunSummary = latestContextRun?.finalMessage
+      ? extractFinalSummary(latestContextRun.finalMessage)
       : "none";
+    const latestOperationalRun =
+      snapshot.latestRun && snapshot.latestRun.id !== latestContextRun?.id ? snapshot.latestRun : null;
     const attachmentLines = snapshot.activeThreadAttachments.length
       ? snapshot.activeThreadAttachments
           .slice(0, 8)
@@ -742,28 +756,34 @@ export class ProjectStore {
     const latestStateLines =
       lane === "strategist"
         ? [
-            `Latest builder status: ${snapshot.latestRun?.status || "none"}`,
+            `Latest builder status: ${latestContextRun?.status || snapshot.latestRun?.status || "none"}`,
             `Latest builder summary: ${truncateInline(latestRunSummary, 220)}`,
             latestRunChangedFiles.length
               ? `Latest changed files: ${latestRunChangedFiles.slice(0, 6).join(", ")}`
               : "Latest changed files: none",
+            latestOperationalRun?.finalMessage
+              ? `Latest operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 220)}`
+              : null,
             automationState,
             snapshot.latestTerminalSession?.cwd
               ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
               : "Latest terminal cwd: none",
             snapshot.manuscript?.content ? "Manuscript content: available" : "Manuscript content: none"
-          ]
+          ].filter((line): line is string => Boolean(line))
         : [
             `Latest strategist summary: ${truncateInline(latestStrategistSummary || "none", 260)}`,
             latestStrategistReply && !isRedundantInlineSummary(latestStrategistReply, latestStrategistSummary)
               ? `Latest strategist reply: ${truncateInline(latestStrategistReply, 420)}`
               : null,
             `Latest strategist rationale: ${truncateInline(snapshot.latestDecision?.rationale || "none", 220)}`,
-            `Latest builder status: ${snapshot.latestRun?.status || "none"}`,
+            `Latest builder status: ${latestContextRun?.status || snapshot.latestRun?.status || "none"}`,
             `Latest builder summary: ${truncateInline(latestRunSummary, 220)}`,
             latestRunChangedFiles.length
               ? `Latest changed files: ${latestRunChangedFiles.slice(0, 6).join(", ")}`
               : "Latest changed files: none",
+            latestOperationalRun?.finalMessage
+              ? `Latest operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 220)}`
+              : null,
             automationState,
             snapshot.latestTerminalSession?.cwd
               ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
@@ -873,15 +893,16 @@ export class ProjectStore {
     const latestDecisionHandoff = deriveDecisionHandoff(snapshot.latestDecision);
     const latestDecisionSummary = snapshot.latestDecision?.summary?.trim() || "";
     const latestDecisionReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 500);
-    const latestRunHandoff = deriveRunHandoff(snapshot.latestRun);
-    const latestRunChangedFiles = snapshot.latestRun?.changedFiles ?? [];
+    const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
+    const latestRunHandoff = deriveRunHandoff(latestContextRun);
+    const latestRunChangedFiles = latestContextRun?.changedFiles ?? [];
     const manuscriptExcerpt = snapshot.manuscript?.content
       ? snapshot.manuscript.content.slice(0, lane === "paper" ? 1200 : 420)
       : "No manuscript content yet.";
-    const paperStatus = snapshot.latestRun
+    const paperStatus = latestContextRun
       ? [
-          `Latest paper-related run: ${snapshot.latestRun.id}`,
-          `Status: ${snapshot.latestRun.status}`,
+          `Latest paper-related run: ${latestContextRun.id}`,
+          `Status: ${latestContextRun.status}`,
           `Paper artifact changed: ${latestRunChangedFiles.includes("paper/main.pdf") ? "yes" : "no"}`
         ].join("\n")
       : "No paper compile state yet.";
@@ -1659,6 +1680,28 @@ function deriveRunHandoff(record: RunRecord | null): LithiumHandoff | null {
   );
 }
 
+function resolveLatestMeaningfulBuilderRun(runs: RunRecord[]) {
+  const latestBuilderRun = runs.find((run) => run.model !== "tectonic") ?? null;
+
+  return (
+    runs.find((run) => {
+      if (run.model === "tectonic") {
+        return false;
+      }
+
+      const summary =
+        handoffMachineSummary(run.handoff) ||
+        extractFinalSummary(run.finalMessage || "");
+
+      if (!summary) {
+        return false;
+      }
+
+      return !isOperationalAutomationMessage(summary);
+    }) ?? latestBuilderRun
+  );
+}
+
 function formatHandoff(handoff: LithiumHandoff) {
   const machineSummary = handoffMachineSummary(handoff);
   const userMessage = handoffUserMessage(handoff);
@@ -1827,7 +1870,10 @@ function truncateAttachmentExcerpt(value: string, maxLength: number) {
 }
 
 function extractVisibleStrategistReply(rawOutput: string, maxChars: number) {
-  const stripped = rawOutput.replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "").trim();
+  const stripped = rawOutput
+    .replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "")
+    .replace(/\n\s*입니다\.\s*(?=\n|$)/g, "")
+    .trim();
 
   if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
     return "";

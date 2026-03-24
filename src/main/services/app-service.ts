@@ -70,7 +70,8 @@ import type {
 import { DEFAULT_APP_SETTINGS } from "../../shared/types";
 import {
   handoffMachineSummary,
-  handoffUserMessage
+  handoffUserMessage,
+  isOperationalAutomationMessage
 } from "../../shared/handoff-utils";
 import { ProjectStore } from "./project-store";
 import { OracleRunner, normalizeOracleSessionId, resolveOracleLaunchOptions } from "./oracle-runner";
@@ -487,6 +488,7 @@ export class AppService {
       objective: session.objective
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation started`);
+    await this.store.updateSessionSummary(workspacePath);
     void this.runAutomationLoop(workspacePath, session.id);
     return await this.store.getSnapshot(workspacePath);
   }
@@ -502,6 +504,7 @@ export class AppService {
       updatedAt: new Date().toISOString()
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation pause requested`);
+    await this.store.updateSessionSummary(workspacePath);
     return await this.store.getSnapshot(workspacePath);
   }
 
@@ -516,6 +519,7 @@ export class AppService {
       currentStepSummary: "Automation resumed."
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation resumed`);
+    await this.store.updateSessionSummary(workspacePath);
     void this.runAutomationLoop(workspacePath, session.id);
     return await this.store.getSnapshot(workspacePath);
   }
@@ -525,6 +529,7 @@ export class AppService {
     const session = await this.requireAutomationSession(workspacePath, request.sessionId);
     const controller = this.getAutomationController(workspacePath, session.id);
     const instruction = request.instruction.trim();
+    const stoppedAt = new Date().toISOString();
 
     if (request.stopNow && controller.activeStrategistSlug) {
       await this.oracleRunner
@@ -536,6 +541,8 @@ export class AppService {
     if (request.stopNow) {
       controller.stopRequested = true;
       controller.pauseRequested = false;
+      const visibleStopInstruction =
+        instruction && !isOperationalAutomationMessage(instruction) ? instruction : "";
 
       if (controller.activeRunId) {
         await this.terminateBuilderRun({
@@ -544,14 +551,27 @@ export class AppService {
         });
       }
 
+      const stopCheckpoint = await this.createAutomationCheckpoint(workspacePath, session, {
+        title: "Automation interrupted",
+        summary: visibleStopInstruction || "Automation stopped by the user.",
+        whatChanged: [],
+        evidence: [],
+        risks: [],
+        nextActions: [],
+        status: "approved",
+        userResponse: visibleStopInstruction || undefined,
+        approvedAt: stoppedAt,
+        activityMessage: `${session.id} automation stop recorded`
+      });
+
       await this.store.writeAutomationSession(workspacePath, {
         ...session,
         status: "idle",
-        latestCheckpointId: undefined,
+        latestCheckpointId: stopCheckpoint.id,
         currentStepSummary: "Automation stopped by the user.",
-        stopReason: instruction || "Stopped by the user.",
-        updatedAt: new Date().toISOString(),
-        endedAt: new Date().toISOString()
+        stopReason: visibleStopInstruction || instruction || "Stopped by the user.",
+        updatedAt: stoppedAt,
+        endedAt: stoppedAt
       });
       await this.store.appendPromptLog(workspacePath, {
         kind: "automation.interrupt",
@@ -561,6 +581,7 @@ export class AppService {
         stopNow: true
       });
       await this.store.appendActivity(workspacePath, `${session.id} automation stopped`);
+      await this.store.updateSessionSummary(workspacePath);
       return await this.store.getSnapshot(workspacePath);
     }
 
@@ -574,8 +595,8 @@ export class AppService {
     const activeChatProgress = await this.inspectChatProgress({
       workspacePath
     });
-    const isProgressQuery = looksLikeAutomationProgressQuery(instruction);
-    const shouldQueueRedirect = Boolean(instruction) && !isProgressQuery;
+    const automationIntent = classifyAutomationChatIntent(instruction);
+    const shouldQueueRedirect = Boolean(instruction) && automationIntent === "redirect";
     const responseSummary = summarizeAutomationInterrupt({
       instruction,
       session,
@@ -627,6 +648,7 @@ export class AppService {
       workspacePath,
       shouldQueueRedirect ? `${session.id} automation redirect queued` : `${session.id} automation status update sent`
     );
+    await this.store.updateSessionSummary(workspacePath);
     return await this.store.getSnapshot(workspacePath);
   }
 
@@ -643,10 +665,23 @@ export class AppService {
       throw new Error("Automation checkpoint not found.");
     }
 
+    const response = request.response?.trim() || "";
+    if (response && classifyAutomationChatIntent(response) === "question") {
+      return await this.answerAutomationCheckpointQuestion(
+        {
+          workspacePath,
+          session,
+          checkpoint,
+          question: response
+        },
+        request.response ?? response
+      );
+    }
+
     await this.store.writeAutomationCheckpoint(workspacePath, {
       ...checkpoint,
       status: "approved",
-      userResponse: request.response?.trim() || checkpoint.userResponse,
+      userResponse: response || checkpoint.userResponse,
       approvedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
@@ -654,26 +689,134 @@ export class AppService {
     const controller = this.getAutomationController(workspacePath, session.id);
     controller.pauseRequested = false;
     controller.stopRequested = false;
-    if (request.response?.trim()) {
-      controller.redirectInstruction = request.response.trim();
+    if (response) {
+      controller.redirectInstruction = response;
     }
 
     await this.writeRunningAutomationSession(workspacePath, session, {
       latestCheckpointId: checkpoint.id,
       currentStepSummary: "Checkpoint approved. Continuing automation.",
-      lastUserInstruction: request.response?.trim() || session.lastUserInstruction,
-      queuedUserInstruction: request.response?.trim() || session.queuedUserInstruction
+      lastUserInstruction: response || session.lastUserInstruction,
+      queuedUserInstruction: response || session.queuedUserInstruction
     });
     await this.store.appendPromptLog(workspacePath, {
       kind: "automation.checkpoint.approved",
       threadId: session.threadId,
       sessionId: session.id,
       checkpointId: checkpoint.id,
-      response: request.response?.trim() || ""
+      response
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation checkpoint approved`);
+    await this.store.updateSessionSummary(workspacePath);
     void this.runAutomationLoop(workspacePath, session.id);
     return await this.store.getSnapshot(workspacePath);
+  }
+
+  private async handleAutomationChatMessage(
+    input: {
+      workspacePath: string;
+      threadId: string;
+      rawPrompt: string;
+      normalizedPrompt: string;
+    },
+    _options: {
+      strategistSessionReady?: boolean;
+    } = {}
+  ): Promise<ProjectSnapshot | null> {
+    const snapshot = await this.store.getSnapshot(input.workspacePath);
+    const session =
+      snapshot.latestAutomationSession?.threadId === input.threadId
+        ? snapshot.latestAutomationSession
+        : null;
+
+    if (!session) {
+      return null;
+    }
+
+    const pendingCheckpoint = resolveActivePendingAutomationCheckpoint(snapshot, session);
+    const interactive = session.status === "running" || Boolean(pendingCheckpoint);
+
+    if (!interactive) {
+      return null;
+    }
+
+    const intent = classifyAutomationChatIntent(input.normalizedPrompt);
+
+    if (intent === "stop") {
+      return await this.interruptAutomationSession({
+        workspacePath: input.workspacePath,
+        sessionId: session.id,
+        instruction: input.rawPrompt,
+        stopNow: true
+      });
+    }
+
+    if (session.status === "running") {
+      return await this.interruptAutomationSession({
+        workspacePath: input.workspacePath,
+        sessionId: session.id,
+        instruction: input.rawPrompt,
+        stopNow: false
+      });
+    }
+
+    if (pendingCheckpoint && intent !== "question") {
+      return await this.approveAutomationCheckpoint({
+        workspacePath: input.workspacePath,
+        sessionId: session.id,
+        checkpointId: pendingCheckpoint.id,
+        response: input.rawPrompt
+      });
+    }
+
+    if (pendingCheckpoint) {
+      return await this.answerAutomationCheckpointQuestion(
+        {
+          workspacePath: input.workspacePath,
+          session,
+          checkpoint: pendingCheckpoint,
+          question: input.normalizedPrompt
+        },
+        input.rawPrompt
+      );
+    }
+
+    return null;
+  }
+
+  private async answerAutomationCheckpointQuestion(
+    input: {
+      workspacePath: string;
+      session: AutomationSessionRecord;
+      checkpoint: AutomationCheckpointRecord;
+      question: string;
+    },
+    displayPrompt: string
+  ) {
+    await this.store.appendPromptLog(input.workspacePath, {
+      kind: "chat.user",
+      lane: "automation",
+      threadId: input.session.threadId,
+      prompt: displayPrompt,
+      normalizedPrompt: input.question,
+      source: "automation-checkpoint-question"
+    });
+
+    await this.store.appendActivity(
+      input.workspacePath,
+      `${input.session.id} answered an automation checkpoint question in chat`
+    );
+
+    return await this.startBuilderTask({
+      workspacePath: input.workspacePath,
+      threadId: input.session.threadId,
+      prompt: buildAutomationChatFollowupPrompt(
+        input.session,
+        input.question,
+        input.checkpoint
+      ),
+      displayPrompt
+    });
   }
 
   async importAttachments(request: AttachmentImportRequest): Promise<ProjectSnapshot> {
@@ -802,7 +945,6 @@ export class AppService {
       throw new Error("No active thread is available.");
     }
 
-    const routePaths = await this.store.allocateRouteTrace(workspacePath);
     const override = extractChatRouteOverride(request.prompt);
     const normalizedPrompt =
       override.prompt || (override.route === "builder" ? snapshot.latestTask?.prompt?.trim() || "" : "");
@@ -810,6 +952,24 @@ export class AppService {
     if (!normalizedPrompt) {
       throw new Error("No chat prompt is available after applying the route override.");
     }
+
+    if (!override.route) {
+      const automationSnapshot = await this.handleAutomationChatMessage(
+        {
+          workspacePath,
+          threadId: activeThread.id,
+          rawPrompt: request.prompt,
+          normalizedPrompt
+        },
+        options
+      );
+
+      if (automationSnapshot) {
+        return automationSnapshot;
+      }
+    }
+
+    const routePaths = await this.store.allocateRouteTrace(workspacePath);
 
     await this.store.appendPromptLog(workspacePath, {
       kind: "chat.user",
@@ -838,6 +998,9 @@ export class AppService {
           handoffMachineSummary(snapshot.latestRun?.handoff) ||
           extractRunSummary(snapshot.latestRun?.finalMessage ?? ""),
         latestRunStatus: snapshot.latestRun?.status,
+        automationStatus: snapshot.latestAutomationSession?.status,
+        automationStepSummary: snapshot.latestAutomationSession?.currentStepSummary,
+        automationCheckpointSummary: snapshot.latestAutomationCheckpoint?.summary,
         stdoutPath: routePaths.stdoutPath,
         stderrPath: routePaths.stderrPath,
         outputPath: routePaths.outputPath,
@@ -1126,6 +1289,7 @@ export class AppService {
         threadId: activeThread.id,
         prompt: request.prompt,
         displayPrompt: request.displayPrompt,
+        inputFiles: strategistFiles,
         model: strategistModel,
         rawOutput: strategistOutput,
         command: result.command,
@@ -1152,7 +1316,7 @@ export class AppService {
 
       await this.syncThreadFromArtifacts(workspacePath, activeThread, {
         prompt: request.displayPrompt ?? request.prompt,
-        summary: decision.summary,
+        summary: handoffUserMessage(decision.handoff) || decision.summary,
         strategistContextFingerprint: attachStrategistRuntimeContext
           ? strategistContextFingerprint
           : undefined,
@@ -1470,8 +1634,7 @@ export class AppService {
       endedAt: undefined
     });
     await this.syncThreadFromArtifacts(workspacePath, activeThread, {
-      prompt: displayPrompt,
-      summary: "Builder run started."
+      prompt: displayPrompt
     });
     await this.store.appendActivity(workspacePath, `${runPaths.id} started`);
 
@@ -1785,9 +1948,10 @@ export class AppService {
     }
 
     const thread = snapshot.threads.find((item) => item.id === finalizedRun.threadId) ?? null;
+    const threadSummary = extractRunSummary(finalMessage);
     if (thread) {
       await this.syncThreadFromArtifacts(workspacePath, thread, {
-        summary: extractRunSummary(finalMessage)
+        summary: shouldPersistThreadSummary(threadSummary) ? threadSummary : thread.summary
       });
     }
 
@@ -2585,6 +2749,7 @@ export class AppService {
     threadId: string;
     prompt: string;
     displayPrompt?: string;
+    inputFiles?: string[];
     model: string;
     rawOutput: string;
     command: DecisionRecord["command"];
@@ -2603,6 +2768,7 @@ export class AppService {
       threadId: input.threadId,
       prompt: input.prompt,
       displayPrompt: input.displayPrompt,
+      inputFiles: input.inputFiles,
       rawOutput: input.rawOutput,
       summary: structured.summary,
       nextTask: undefined,
@@ -3184,7 +3350,7 @@ export class AppService {
         const snapshot = await this.store.getSnapshot(workspacePath);
         const shouldConsultStrategist =
           session.budget.usedSteps === 0 ||
-          Boolean(redirectInstruction) ||
+          shouldReplanFromRedirectInstruction(redirectInstruction) ||
           !snapshot.latestDecision ||
           shouldReplanAfterFailedRun(snapshot.latestRun, snapshot.latestAutomationCheckpoint);
         let latestDecision = snapshot.latestDecision;
@@ -3202,7 +3368,11 @@ export class AppService {
             session.threadId
           );
           const strategistDisplayPrompt =
-            session.budget.usedSteps === 0 ? session.objective : `[Autopilot] ${session.objective}`;
+            session.budget.usedSteps === 0
+              ? session.displayObjective ?? session.objective
+              : redirectInstruction
+              ? `[Autopilot] ${redirectInstruction}`
+              : `[Autopilot] ${session.displayObjective ?? session.objective}`;
           const strategizeStep = await this.createAutomationStep(workspacePath, session, {
             kind: "strategize",
             lane: "strategist",
@@ -3621,15 +3791,88 @@ function shouldRetitleThread(title: string) {
   return /^main thread$/i.test(title) || /^new thread \d+$/i.test(title) || /^new thread$/i.test(title);
 }
 
-function looksLikeAutomationProgressQuery(instruction: string) {
+function looksLikeAutomationResumeInstruction(instruction: string) {
   const normalized = instruction.trim().toLowerCase();
 
   if (!normalized) {
     return false;
   }
 
-  return /(?:progress|status|update|report|summary|what have you done|so far|진행|현황|상태|보고|업데이트|요약)/i.test(
+  return /^(?:continue|resume|go ahead|keep going|carry on|retry|proceed|이어|이어서|계속|재개|다시 시작|승인|계속 진행)/i.test(
     normalized
+  );
+}
+
+function looksLikeAutomationStopInstruction(instruction: string) {
+  const normalized = instruction.trim().toLowerCase().replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /^(?:stop|pause|halt|hold|cancel|멈춰|중단|중지|정지|일단 멈춰|그만)(?:\b|$)/i.test(normalized) ||
+    /^(?:autopilot|automation|auto(?:\s|-)?research|연구|자동\s*연구|자동연구)(?:를|을|은|는|만)?\s*(?:stop|pause|halt|cancel|멈춰|멈춰줘|중단|중단해|중단해줘|중지|중지해|정지|정지해|그만|꺼|꺼줘)(?:\b|$)/i.test(
+      normalized
+    ) ||
+    /^(?:stop|pause|halt|cancel|멈춰|중단|중지|정지|그만|꺼|꺼줘)\s*(?:the\s+)?(?:autopilot|automation|auto(?:\s|-)?research|연구|자동\s*연구|자동연구)(?:\b|$)/i.test(
+      normalized
+    )
+  );
+}
+
+function looksLikeAutomationQuestion(instruction: string) {
+  const normalized = instruction.trim().toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (/[?？]$/.test(normalized) || normalized.includes("?")) {
+    return true;
+  }
+
+  return /(?:progress|status|update|report|summary|what|why|how|which|where|when|did|does|is it|are we|so far|진행사항|현황|상태|보고|업데이트|요약|왜|어떻게|뭐야|뭐임|뭔가|맞아|맞음|좋아졌|기준삼아|기준으로|된 거|된거|어느 쪽|무슨 근거|무슨 기준|설명해|정리해|비교해)/i.test(
+    normalized
+  );
+}
+
+function classifyAutomationChatIntent(instruction: string): "resume" | "redirect" | "question" | "stop" {
+  if (looksLikeAutomationStopInstruction(instruction)) {
+    return "stop";
+  }
+
+  if (looksLikeAutomationQuestion(instruction)) {
+    return "question";
+  }
+
+  if (looksLikeAutomationResumeInstruction(instruction)) {
+    return "resume";
+  }
+
+  return "redirect";
+}
+
+function resolveActivePendingAutomationCheckpoint(
+  snapshot: ProjectSnapshot,
+  session: AutomationSessionRecord
+) {
+  const checkpoints = snapshot.automationCheckpoints ?? [];
+  const byLatestId = checkpoints.find(
+    (checkpoint) =>
+      checkpoint.sessionId === session.id &&
+      checkpoint.status === "pending" &&
+      checkpoint.id === session.latestCheckpointId
+  );
+
+  if (byLatestId) {
+    return byLatestId;
+  }
+
+  return (
+    checkpoints.find(
+      (checkpoint) => checkpoint.sessionId === session.id && checkpoint.status === "pending"
+    ) ?? null
   );
 }
 
@@ -3704,6 +3947,43 @@ function extractRunSummary(finalMessage: string) {
     .slice(0, 180);
 }
 
+function buildAutomationChatFollowupPrompt(
+  session: AutomationSessionRecord,
+  question: string,
+  checkpoint: AutomationCheckpointRecord
+) {
+  const language = resolveAutomationUiLanguage([
+    question,
+    session.displayObjective ?? "",
+    session.objective,
+    checkpoint.summary
+  ]);
+
+  if (language === "ko") {
+    return [
+      `사용자 질문: ${question.trim()}`,
+      `자동 연구 목표: ${(session.displayObjective ?? session.objective).trim()}`,
+      `현재 자동 연구 상태: 일시 정지. 최신 체크포인트는 "${checkpoint.title}"이며 요약은 "${checkpoint.summary.trim()}" 입니다.`,
+      "이 질문은 새 strategist 재계획으로 보내지 말고, 현재 workspace의 최신 실험 산출물, 로그, 메모, runtime context를 바탕으로 바로 답하세요.",
+      "이미 확인된 수치와 파일이 있으면 그 근거를 우선해서 설명하고, 아직 확정되지 않은 내용은 무엇이 비어 있는지만 짧게 밝히세요.",
+      "답변 끝에 별도의 시스템 문구나 '잠시 멈춘 상태입니다' 같은 운영 문장을 덧붙이지 마세요."
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [
+    `User question: ${question.trim()}`,
+    `Automation objective: ${(session.displayObjective ?? session.objective).trim()}`,
+    `Automation state: paused. Latest checkpoint: "${checkpoint.title}" — ${checkpoint.summary.trim()}.`,
+    "Answer directly from the current workspace artifacts, logs, notes, and runtime context instead of starting a new strategist replanning step.",
+    "Prefer concrete measured results and file-backed evidence. If something is still unverified, say exactly what is missing.",
+    "Do not append a separate operational status footer after the answer."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function buildAutomationStrategistPrompt(
   session: AutomationSessionRecord,
   redirectInstruction: string,
@@ -3765,6 +4045,10 @@ function shouldReplanAfterFailedRun(
   return !isRestartInterruptedAutomationState(run, latestCheckpoint);
 }
 
+function shouldReplanFromRedirectInstruction(redirectInstruction: string) {
+  return redirectInstruction.trim().length > 0 && classifyAutomationChatIntent(redirectInstruction) === "redirect";
+}
+
 function isRestartInterruptedAutomationState(
   run?: RunRecord | null,
   latestCheckpoint?: AutomationCheckpointRecord | null
@@ -3819,6 +4103,16 @@ function summarizeAutomationFailureRecovery(input: {
   return [base, input.runSummary.trim(), "Lithium is already planning the next recovery step."]
     .filter(Boolean)
     .join(" ");
+}
+
+function shouldPersistThreadSummary(summary: string) {
+  const trimmed = summary.trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  return !isOperationalAutomationMessage(trimmed) && !/^builder run started\.?$/i.test(trimmed);
 }
 
 function resolveAutomationUiLanguage(samples: string[]) {
@@ -3972,7 +4266,10 @@ function stripLegacyNextTask(handoff: LithiumHandoff) {
 }
 
 function extractVisibleStrategistReply(rawOutput: string, maxChars = 2400) {
-  const stripped = rawOutput.replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "").trim();
+  const stripped = rawOutput
+    .replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "")
+    .replace(/\n\s*입니다\.\s*(?=\n|$)/g, "")
+    .trim();
 
   if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
     return "";

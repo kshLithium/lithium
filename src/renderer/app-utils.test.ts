@@ -866,6 +866,38 @@ describe("app utils", () => {
     ).toBe("공식 영웅 페이지 기준으로 현재 로스터는 50명이다. ([Overwatch](https://example.com))");
   });
 
+  it("surfaces strategist input files in chat and removes dangling standalone closing fragments", () => {
+    expect(
+      formatDecisionBody(
+        "짧은 요약",
+        "",
+        [
+          "지금 기준으로는 아직 baseline 우위가 확정된 상태는 아닙니다.",
+          "",
+          "입니다.",
+          "",
+          "LITHIUM_HANDOFF",
+          JSON.stringify({
+            summary: "baseline 우위는 아직 확정되지 않았다."
+          })
+        ].join("\n"),
+        false,
+        undefined,
+        [
+          "/tmp/workspace/.lithium/context/D016.strategist.runtime.md",
+          "/tmp/workspace/official/README.md"
+        ],
+        "/tmp/workspace"
+      )
+    ).toBe(
+      [
+        "참고한 파일: [.lithium/context/D016.strategist.runtime.md](/tmp/workspace/.lithium/context/D016.strategist.runtime.md), [official/README.md](/tmp/workspace/official/README.md)",
+        "",
+        "지금 기준으로는 아직 baseline 우위가 확정된 상태는 아닙니다."
+      ].join("\n")
+    );
+  });
+
   it("strips the strategist handoff footer before rendering the chat reply", () => {
     expect(
       stripStrategistFooterForDisplay(
@@ -1281,10 +1313,140 @@ describe("app utils", () => {
 
     const items = buildChatItems(snapshot, [], "/tmp/workspace");
 
-    expect(items.map((item) => item.role)).toEqual(["user", "user", "assistant"]);
+    expect(items.map((item) => item.role)).toEqual(["user", "user", "system"]);
     expect(items[0]?.body).toBe("델타 게이티드 어텐션을 개선해줘");
     expect(items[1]?.body).toBe("지금까지 진행사항 보고좀");
     expect(items[2]?.body).toBe("잠시 멈춘 상태입니다. 이어서 어떻게 진행할지 알려주세요.");
+  });
+
+  it("renders a stopped automation checkpoint as a visible stop message", () => {
+    const checkpoint: ProjectSnapshot["latestAutomationCheckpoint"] = {
+      id: "AC002",
+      sessionId: "AU001",
+      threadId: "TH001",
+      status: "approved",
+      title: "Automation interrupted",
+      summary: "연구 중단",
+      whatChanged: [],
+      evidence: [],
+      risks: [],
+      nextActions: [],
+      userResponse: "연구 중단",
+      approvedAt: "2026-03-19T00:06:00.000Z",
+      createdAt: "2026-03-19T00:06:00.000Z",
+      updatedAt: "2026-03-19T00:06:00.000Z"
+    };
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "workspace",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/.lithium/manuscript/sections/results.md",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Working on the workspace.",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Working on the workspace.",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      },
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [
+        {
+          id: "AU001",
+          threadId: "TH001",
+          objective: "델타 게이티드 어텐션을 개선해줘",
+          mode: "continuous",
+          status: "idle",
+          allowedActions: ["strategize", "code-edit", "checkpoint"],
+          paperWriteEnabled: false,
+          evidenceMode: "strict",
+          budget: {
+            maxSteps: 64,
+            maxRuntimeMinutes: 1440,
+            maxRetries: 8,
+            usedSteps: 4,
+            usedRetries: 0
+          },
+          latestCheckpointId: "AC002",
+          currentStepSummary: "Automation stopped by the user.",
+          stopReason: "연구 중단",
+          lastUserInstruction: "연구 중단",
+          createdAt: "2026-03-19T00:00:00.000Z",
+          updatedAt: "2026-03-19T00:06:00.000Z",
+          endedAt: "2026-03-19T00:06:00.000Z"
+        }
+      ],
+      automationSteps: [],
+      automationCheckpoints: [checkpoint],
+      latestAutomationSession: {
+        id: "AU001",
+        threadId: "TH001",
+        objective: "델타 게이티드 어텐션을 개선해줘",
+        mode: "continuous",
+        status: "idle",
+        allowedActions: ["strategize", "code-edit", "checkpoint"],
+        paperWriteEnabled: false,
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 64,
+          maxRuntimeMinutes: 1440,
+          maxRetries: 8,
+          usedSteps: 4,
+          usedRetries: 0
+        },
+        latestCheckpointId: "AC002",
+        currentStepSummary: "Automation stopped by the user.",
+        stopReason: "연구 중단",
+        lastUserInstruction: "연구 중단",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:06:00.000Z",
+        endedAt: "2026-03-19T00:06:00.000Z"
+      },
+      latestAutomationCheckpoint: checkpoint,
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, [], "/tmp/workspace");
+
+    expect(items.some((item) => item.role === "user" && item.body === "연구 중단")).toBe(true);
+    expect(
+      items.some(
+        (item) =>
+          item.role === "system" &&
+          item.body === "자동 연구를 멈췄습니다. 다시 시작하려면 새 메시지를 보내 주세요."
+      )
+    ).toBe(true);
   });
 
   it("hides the original automation objective after a later user steering message exists", () => {
@@ -1547,7 +1709,7 @@ describe("app utils", () => {
 
     const items = buildChatItems(snapshot, [], "/tmp/workspace");
 
-    expect(items.map((item) => item.role)).toEqual(["user", "user", "assistant"]);
+    expect(items.map((item) => item.role)).toEqual(["user", "user", "system"]);
     expect(items[0]?.body).toBe("델타 게이티드 어텐션을 개선해줘");
     expect(items[1]?.body).toBe("지금까지 진행사항 보고좀");
     expect(items[2]?.body).toBe("다음으로 검증할 실험이나 구현 단계를 고르고 있습니다.");

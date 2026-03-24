@@ -183,6 +183,86 @@ describe("ProjectStore", () => {
     expect(runtimeContext.content).not.toContain("Key Files:");
   });
 
+  it("prefers the latest meaningful research run over a newer operational failure in runtime context and session summary", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+
+    await store.initProject(workspace);
+    const snapshot = await store.getSnapshot(workspace);
+
+    await store.writeRun(workspace, {
+      id: "R041",
+      threadId: snapshot.activeThreadId!,
+      taskId: "T041",
+      prompt: "Run the full baseline eval.",
+      displayPrompt: "Run the full baseline eval.",
+      model: "gpt-5.4",
+      status: "completed",
+      exitCode: 0,
+      pid: null,
+      command: { command: "codex", args: ["exec"], cwd: workspace },
+      stdoutPath: path.join(workspace, ".lithium", "runs", "R041.stdout.log"),
+      stderrPath: path.join(workspace, ".lithium", "runs", "R041.stderr.log"),
+      finalMessagePath: path.join(workspace, ".lithium", "runs", "R041.output.txt"),
+      finalMessage: [
+        "Full eval finished.",
+        "",
+        "LITHIUM_STATUS",
+        "SUMMARY: full eval reached 2.45 bpb",
+        "FILES: official/logs/full_eval.txt",
+        "RESULT: success"
+      ].join("\n"),
+      changedFiles: ["official/logs/full_eval.txt"],
+      finalization: "auto",
+      createdAt: "2026-03-24T13:00:00.000Z",
+      startedAt: "2026-03-24T13:00:00.000Z",
+      endedAt: "2026-03-24T13:10:00.000Z"
+    });
+    await store.writeRun(workspace, {
+      id: "R042",
+      threadId: snapshot.activeThreadId!,
+      taskId: "T042",
+      prompt: "Continue the automation.",
+      displayPrompt: "[autopilot] continue",
+      model: "gpt-5.4",
+      status: "cancelled",
+      exitCode: null,
+      pid: null,
+      command: { command: "codex", args: ["exec"], cwd: workspace },
+      stdoutPath: path.join(workspace, ".lithium", "runs", "R042.stdout.log"),
+      stderrPath: path.join(workspace, ".lithium", "runs", "R042.stderr.log"),
+      finalMessagePath: path.join(workspace, ".lithium", "runs", "R042.output.txt"),
+      finalMessage: [
+        "Lithium terminated a detached builder process after an app restart left it running without an active session.",
+        "",
+        "LITHIUM_STATUS",
+        '{"summary":"Lithium terminated a detached builder process after an app restart left it running without an active session.","result":"partial"}'
+      ].join("\n"),
+      changedFiles: [],
+      finalization: "auto",
+      createdAt: "2026-03-24T13:20:00.000Z",
+      startedAt: "2026-03-24T13:20:00.000Z",
+      endedAt: "2026-03-24T13:21:00.000Z"
+    });
+
+    await store.updateSessionSummary(workspace);
+    const runtimeContext = await store.buildRuntimeContext(workspace, "Summarize the latest research state.", {
+      lane: "strategist"
+    });
+    const memory = await store.readProjectMemory(workspace);
+
+    expect(runtimeContext.content).toContain("Latest builder status: completed");
+    expect(runtimeContext.content).toContain("Latest builder summary: full eval reached 2.45 bpb");
+    expect(runtimeContext.content).toContain(
+      "Latest operational issue: Lithium terminated a detached builder process after an app restart left it running without an active session."
+    );
+    expect(memory?.sessionSummary).toContain("Latest research run: R041 (completed, exit 0)");
+    expect(memory?.sessionSummary).toContain("Latest builder summary: full eval reached 2.45 bpb");
+    expect(memory?.sessionSummary).toContain(
+      "Latest operational issue: Lithium terminated a detached builder process after an app restart left it running without an active session."
+    );
+  });
+
   it("allocates new artifact ids when partial logs already exist", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();

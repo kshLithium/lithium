@@ -1,12 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
-import type { AppSettings, AttachmentRecord } from "../shared/types";
+import type { AttachmentRecord } from "../shared/types";
 import { TERMINAL_FEATURE_ENABLED, WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
 
 type ComposerProps = {
   attachments: AttachmentRecord[];
-  appSettings: AppSettings;
-  automationInteractive: boolean;
-  startsAutomation: boolean;
   canCreateThread: boolean;
   canOpenCode: boolean;
   canOpenPaper: boolean;
@@ -298,14 +295,7 @@ export function Composer(props: ComposerProps) {
   const slashQuery =
     inputFocused && rawSlashQuery !== null && rawSlashQuery !== dismissedSlashQuery ? rawSlashQuery : null;
   const showSlashHeadings = slashQuery !== null && slashQuery.length === 0;
-  const isExplicitSlashPrompt = props.value.trimStart().startsWith("/");
-  const showStartAction = props.startsAutomation && !isExplicitSlashPrompt;
   const sendDisabled = props.busy || !props.value.trim() || rawSlashQuery !== null;
-  const sendLabel = showStartAction
-    ? "Start autoresearch"
-    : props.automationInteractive
-    ? "Send instruction"
-    : "Send message";
 
   const slashCommands: SlashCommand[] = [
     {
@@ -704,33 +694,6 @@ export function Composer(props: ComposerProps) {
             ))}
           </div>
         ) : null}
-
-        <div className="composer-footer">
-          <button
-            aria-label={sendLabel}
-            className="send-button icon"
-            disabled={sendDisabled}
-            onClick={props.onSend}
-            title={sendLabel}
-            type="button"
-          >
-            {showStartAction ? (
-              <svg aria-hidden="true" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M6.4 4.8a.8.8 0 0 1 1.2-.68l7.1 4.4a.8.8 0 0 1 0 1.36l-7.1 4.4A.8.8 0 0 1 6.4 13.6V4.8Z" />
-              </svg>
-            ) : (
-              <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-                <path
-                  d="M10 15.8V4.2M10 4.2 5.8 8.4M10 4.2l4.2 4.2"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="1.9"
-                />
-              </svg>
-            )}
-          </button>
-        </div>
       </div>
     </div>
   );

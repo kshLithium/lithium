@@ -12,6 +12,9 @@ type RouterRunOptions = {
   latestTaskPrompt?: string;
   latestRunSummary?: string;
   latestRunStatus?: string;
+  automationStatus?: string;
+  automationStepSummary?: string;
+  automationCheckpointSummary?: string;
   stdoutPath: string;
   stderrPath: string;
   outputPath: string;
@@ -120,6 +123,9 @@ export class RouterRunner {
       `Latest builder task: ${options.latestTaskPrompt?.trim() || "None"}`,
       `Latest run summary: ${options.latestRunSummary?.trim() || "None"}`,
       `Latest run status: ${options.latestRunStatus?.trim() || "None"}`,
+      `Automation status: ${options.automationStatus?.trim() || "None"}`,
+      `Automation step summary: ${options.automationStepSummary?.trim() || "None"}`,
+      `Automation checkpoint: ${options.automationCheckpointSummary?.trim() || "None"}`,
       "Attachments:",
       attachments || "- None",
       "",

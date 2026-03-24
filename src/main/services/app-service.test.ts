@@ -118,7 +118,7 @@ describe("AppService", () => {
 
     expect(paperSnapshot.manuscript?.content).toContain("Define the no-op builder check.");
     expect(paperSnapshot.manuscript?.content).toContain("smoke test only");
-    expect(paperSnapshot.memory?.sessionSummary).toContain("Latest run: R001");
+    expect(paperSnapshot.memory?.sessionSummary).toContain("Latest research run: R001");
   });
 
   it("routes every chat message through codex before forwarding research requests to the strategist", async () => {
@@ -472,6 +472,75 @@ describe("AppService", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
   });
 
+  it("stops running automation when the user sends a stop-style chat message", async () => {
+    const workspace = await createWorkspace();
+    let releaseConsult!: () => void;
+    const oracleRunner = {
+      consult: vi.fn(async (): Promise<any> => {
+        await new Promise<void>((resolve) => {
+          releaseConsult = resolve;
+        });
+
+        return {
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          startedAt: "2026-03-18T01:10:03.000Z",
+          endedAt: "2026-03-18T01:10:08.000Z",
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          outputText: "SUMMARY: delayed strategist response."
+        };
+      }),
+      terminateSession: vi.fn(async () => undefined)
+    };
+    const app = new AppService(workspace, {
+      oracleRunner,
+      getAppSettings: async () => ({
+        ...DEFAULT_APP_SETTINGS,
+        strategistSessionReady: true
+      })
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "실험 자동연구를 계속 진행해줘",
+      mode: "continuous",
+      maxSteps: 12,
+      maxRuntimeMinutes: 30,
+      maxRetries: 4,
+      paperWriteEnabled: false
+    });
+    const sessionId = createdSnapshot.latestAutomationSession?.id;
+    const threadId = createdSnapshot.activeThreadId ?? createdSnapshot.threads[0]?.id;
+
+    await app.startAutomationSession({
+      workspacePath: workspace,
+      sessionId: sessionId as string
+    });
+
+    await vi.waitFor(() => {
+      expect(oracleRunner.consult).toHaveBeenCalledTimes(1);
+    });
+
+    const stoppedSnapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      threadId: threadId as string,
+      prompt: "연구 중단"
+    });
+
+    expect(stoppedSnapshot.latestAutomationSession?.status).toBe("idle");
+    expect(stoppedSnapshot.latestAutomationSession?.stopReason).toBe("연구 중단");
+    expect(stoppedSnapshot.latestAutomationCheckpoint?.title).toBe("Automation interrupted");
+    expect(stoppedSnapshot.latestAutomationCheckpoint?.status).toBe("approved");
+    expect(stoppedSnapshot.latestAutomationCheckpoint?.userResponse).toBe("연구 중단");
+    expect(oracleRunner.terminateSession).toHaveBeenCalled();
+
+    releaseConsult();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+
   it("keeps continuous automation running and replans after a failed builder step", async () => {
     const workspace = await createWorkspace();
     let releaseSecondConsult!: () => void;
@@ -566,6 +635,161 @@ describe("AppService", () => {
       instruction: "Stop test automation.",
       stopNow: true
     });
+  });
+
+  it("routes pending automation checkpoint questions to a builder chat reply instead of strategist replanning", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const routerRunner = {
+      route: vi.fn(async () => {
+        throw new Error("router should not run for pending automation checkpoint questions");
+      })
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => {
+        throw new Error("strategist should not run for pending automation checkpoint questions");
+      })
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => {
+        throw new Error("runTask should not be used in this test.");
+      }),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
+        buildImmediateBuilderCommand(cwd, prompt, outputPath)
+      )
+    };
+    const app = new AppService(workspace, {
+      store,
+      routerRunner,
+      oracleRunner,
+      codexRunner
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf 자동 연구를 이어가줘",
+      mode: "continuous",
+      maxSteps: 12,
+      maxRuntimeMinutes: 30,
+      maxRetries: 4,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const now = new Date().toISOString();
+
+    await store.writeAutomationCheckpoint(workspace, {
+      id: "AC910",
+      sessionId: session.id,
+      threadId: session.threadId,
+      status: "pending",
+      title: "Automation interrupted after app restart",
+      summary: "Automation stopped when Lithium restarted during the builder step.",
+      whatChanged: [],
+      evidence: ["R041"],
+      risks: ["Automation stopped when Lithium restarted during the builder step."],
+      nextActions: ["Resume automation to continue from the latest saved state."],
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "idle",
+      latestCheckpointId: "AC910",
+      currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+      stopReason: "Automation stopped when Lithium restarted during the builder step.",
+      endedAt: now,
+      updatedAt: now
+    });
+
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "그래서 깃헙 상위권 기준으로 이미 좋아진거임?"
+    });
+
+    expect(routerRunner.route).not.toHaveBeenCalled();
+    expect(oracleRunner.consult).not.toHaveBeenCalled();
+    expect(codexRunner.buildTaskCommand).toHaveBeenCalledTimes(1);
+    expect(snapshot.latestRun?.status).toBe("running");
+    expect(snapshot.latestRun?.displayPrompt).toBe("그래서 깃헙 상위권 기준으로 이미 좋아진거임?");
+    expect(snapshot.latestRun?.prompt).toContain("사용자 질문: 그래서 깃헙 상위권 기준으로 이미 좋아진거임?");
+    expect(snapshot.latestRun?.prompt).toContain("새 strategist 재계획으로 보내지 말고");
+    expect(snapshot.latestAutomationCheckpoint?.status).toBe("pending");
+    expect(snapshot.latestAutomationSession?.status).toBe("idle");
+  });
+
+  it("does not turn checkpoint-question approvals into redirect instructions", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const oracleRunner = {
+      consult: vi.fn(async () => {
+        throw new Error("strategist should not run for checkpoint questions");
+      })
+    };
+    const codexRunner = {
+      runTask: vi.fn(async () => {
+        throw new Error("runTask should not be used in this test.");
+      }),
+      buildTaskCommand: vi.fn((cwd: string, prompt: string, outputPath: string) =>
+        buildImmediateBuilderCommand(cwd, prompt, outputPath)
+      )
+    };
+    const app = new AppService(workspace, {
+      store,
+      oracleRunner,
+      codexRunner
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "parameter-golf 자동 연구를 이어가줘",
+      mode: "continuous",
+      maxSteps: 12,
+      maxRuntimeMinutes: 30,
+      maxRetries: 4,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const now = new Date().toISOString();
+
+    await store.writeAutomationCheckpoint(workspace, {
+      id: "AC911",
+      sessionId: session.id,
+      threadId: session.threadId,
+      status: "pending",
+      title: "Automation interrupted after app restart",
+      summary: "Automation stopped when Lithium restarted during the builder step.",
+      whatChanged: [],
+      evidence: ["R042"],
+      risks: ["Automation stopped when Lithium restarted during the builder step."],
+      nextActions: ["Resume automation to continue from the latest saved state."],
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.writeAutomationSession(workspace, {
+      ...session,
+      status: "idle",
+      latestCheckpointId: "AC911",
+      currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+      stopReason: "Automation stopped when Lithium restarted during the builder step.",
+      endedAt: now,
+      updatedAt: now
+    });
+
+    const snapshot = await app.approveAutomationCheckpoint({
+      workspacePath: workspace,
+      sessionId: session.id,
+      checkpointId: "AC911",
+      response: "왜 여기서 멈춘거야?"
+    });
+
+    expect(oracleRunner.consult).not.toHaveBeenCalled();
+    expect(codexRunner.buildTaskCommand).toHaveBeenCalledTimes(1);
+    expect(snapshot.latestRun?.prompt).toContain("사용자 질문: 왜 여기서 멈춘거야?");
+    expect(snapshot.latestAutomationCheckpoint?.status).toBe("pending");
+    expect(snapshot.latestAutomationSession?.status).toBe("idle");
+    expect(snapshot.latestAutomationSession?.queuedUserInstruction).toBeUndefined();
   });
 
   it("stops continuous automation for review after exhausting the retry budget", async () => {
