@@ -911,6 +911,65 @@ describe("AppService", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
   });
 
+  it("stops every active builder run and strategist session when parallel automation is interrupted", async () => {
+    const workspace = await createWorkspace();
+    const oracleRunner = {
+      consult: vi.fn(async (): Promise<any> => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-25T12:00:00.000Z",
+        endedAt: "2026-03-25T12:00:02.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: "SUMMARY: no-op"
+      })),
+      terminateSession: vi.fn(async () => undefined)
+    };
+    const app = new AppService(workspace, {
+      oracleRunner
+    });
+
+    await app.initProject(workspace);
+    const createdSnapshot = await app.createAutomationSession({
+      workspacePath: workspace,
+      objective: "병렬 자동연구 중단 테스트",
+      mode: "continuous",
+      maxSteps: 4,
+      maxRuntimeMinutes: 15,
+      maxRetries: 1,
+      paperWriteEnabled: false
+    });
+    const session = createdSnapshot.latestAutomationSession!;
+    const controller = (app as any).getAutomationController(workspace, session.id) as {
+      activeBuilderRuns: Map<string, string>;
+      activeStrategistSessions: Map<string, string>;
+    };
+    controller.activeBuilderRuns.set("AS001", "R101");
+    controller.activeBuilderRuns.set("AS002", "R102");
+    controller.activeStrategistSessions.set("AS003", "slug-a");
+    controller.activeStrategistSessions.set("AS004", "slug-b");
+    const terminateBuilderRun = vi.spyOn(app as any, "terminateBuilderRun").mockResolvedValue(undefined);
+
+    await app.interruptAutomationSession({
+      workspacePath: workspace,
+      sessionId: session.id,
+      instruction: "여기서 끊어줘",
+      stopNow: true
+    });
+
+    expect(
+      (terminateBuilderRun.mock.calls as Array<[{ runId: string }]>).map(([input]) => input.runId).sort()
+    ).toEqual(["R101", "R102"]);
+    expect(
+      ((oracleRunner.terminateSession.mock.calls as unknown) as Array<[string]>)
+        .map(([slug]) => slug)
+        .sort()
+    ).toEqual(["slug-a", "slug-b"]);
+    expect(controller.activeBuilderRuns.size).toBe(0);
+    expect(controller.activeStrategistSessions.size).toBe(0);
+  });
+
   it("keeps automation running and records a status update when the user asks for progress", async () => {
     const workspace = await createWorkspace();
     const oracleRunner = {
@@ -2080,8 +2139,8 @@ describe("AppService", () => {
         pauseRequested: false,
         stopRequested: false,
         redirectInstruction: "",
-        activeRunId: runId,
-        activeStrategistSlug: null
+        activeBuilderRuns: new Map([["AS001", runId]]),
+        activeStrategistSessions: new Map()
       });
 
       expect(completedSnapshot.latestRun?.status).toBe("completed");
@@ -2127,8 +2186,8 @@ describe("AppService", () => {
         pauseRequested: false,
         stopRequested: false,
         redirectInstruction: "",
-        activeRunId: runId,
-        activeStrategistSlug: null
+        activeBuilderRuns: new Map([["AS001", runId]]),
+        activeStrategistSessions: new Map()
       });
 
       expect(failedSnapshot.latestRun?.status).toBe("failed");
@@ -2178,8 +2237,8 @@ describe("AppService", () => {
         pauseRequested: false,
         stopRequested: false,
         redirectInstruction: "",
-        activeRunId: runId,
-        activeStrategistSlug: null
+        activeBuilderRuns: new Map([["AS001", runId]]),
+        activeStrategistSessions: new Map()
       });
 
       expect(completedSnapshot.latestRun?.status).toBe("completed");

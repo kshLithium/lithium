@@ -173,8 +173,8 @@ type AutomationControllerState = {
   pauseRequested: boolean;
   stopRequested: boolean;
   redirectInstruction: string;
-  activeRunId: string | null;
-  activeStrategistSlug: string | null;
+  activeBuilderRuns: Map<string, string>;
+  activeStrategistSessions: Map<string, string>;
 };
 
 type AutomationWorkerDelegation = Extract<
@@ -586,25 +586,14 @@ export class AppService {
     const instruction = request.instruction.trim();
     const stoppedAt = new Date().toISOString();
 
-    if (request.stopNow && controller.activeStrategistSlug) {
-      await this.oracleRunner
-        .terminateSession?.(controller.activeStrategistSlug)
-        .catch(() => undefined);
-      controller.activeStrategistSlug = null;
-    }
-
     if (request.stopNow) {
       controller.stopRequested = true;
       controller.pauseRequested = false;
       const visibleStopInstruction =
         instruction && !isOperationalAutomationMessage(instruction) ? instruction : "";
 
-      if (controller.activeRunId) {
-        await this.terminateBuilderRun({
-          workspacePath,
-          runId: controller.activeRunId
-        });
-      }
+      await this.terminateActiveAutomationStrategistSessions(controller);
+      await this.terminateActiveAutomationBuilderRuns(workspacePath, controller);
 
       const stopCheckpoint = await this.createAutomationCheckpoint(workspacePath, session, {
         title: "Automation interrupted",
@@ -648,10 +637,10 @@ export class AppService {
     }
 
     const snapshot = await this.store.getSnapshot(workspacePath);
-    const activeRunInspection = controller.activeRunId
+    const activeRunInspection = this.latestActiveAutomationBuilderRunId(controller)
       ? await this.inspectBuilderRun({
           workspacePath,
-          runId: controller.activeRunId
+          runId: this.latestActiveAutomationBuilderRunId(controller) ?? ""
         })
       : null;
     const activeChatProgress = await this.inspectChatProgress({
@@ -3754,11 +3743,82 @@ export class AppService {
       pauseRequested: false,
       stopRequested: false,
       redirectInstruction: "",
-      activeRunId: null,
-      activeStrategistSlug: null
+      activeBuilderRuns: new Map(),
+      activeStrategistSessions: new Map()
     };
     this.automationControllers.set(key, created);
     return created;
+  }
+
+  private registerActiveAutomationBuilderRun(
+    controller: AutomationControllerState,
+    stepId: string,
+    runId: string | null | undefined
+  ) {
+    if (!runId) {
+      return;
+    }
+
+    controller.activeBuilderRuns.set(stepId, runId);
+  }
+
+  private clearActiveAutomationBuilderRun(controller: AutomationControllerState, stepId: string) {
+    controller.activeBuilderRuns.delete(stepId);
+  }
+
+  private listActiveAutomationBuilderRunIds(controller: AutomationControllerState) {
+    return Array.from(new Set(controller.activeBuilderRuns.values()));
+  }
+
+  private latestActiveAutomationBuilderRunId(controller: AutomationControllerState) {
+    const runIds = this.listActiveAutomationBuilderRunIds(controller);
+    return runIds.at(-1) ?? null;
+  }
+
+  private registerActiveAutomationStrategistSession(
+    controller: AutomationControllerState,
+    stepId: string,
+    strategistSlug: string | null | undefined
+  ) {
+    if (!strategistSlug) {
+      return;
+    }
+
+    controller.activeStrategistSessions.set(stepId, strategistSlug);
+  }
+
+  private clearActiveAutomationStrategistSession(controller: AutomationControllerState, stepId: string) {
+    controller.activeStrategistSessions.delete(stepId);
+  }
+
+  private listActiveAutomationStrategistSlugs(controller: AutomationControllerState) {
+    return Array.from(new Set(controller.activeStrategistSessions.values()));
+  }
+
+  private async terminateActiveAutomationBuilderRuns(
+    workspacePath: string,
+    controller: AutomationControllerState
+  ) {
+    const runIds = this.listActiveAutomationBuilderRunIds(controller);
+
+    for (const runId of runIds) {
+      await this.terminateBuilderRun({
+        workspacePath,
+        runId
+      });
+    }
+
+    controller.activeBuilderRuns.clear();
+  }
+
+  private async terminateActiveAutomationStrategistSessions(controller: AutomationControllerState) {
+    const strategistSlugs = this.listActiveAutomationStrategistSlugs(controller);
+
+    for (const strategistSlug of strategistSlugs) {
+      await this.oracleRunner.terminateSession?.(strategistSlug).catch(() => undefined);
+    }
+
+    controller.activeStrategistSessions.clear();
   }
 
   private async createAutomationCycle(
@@ -4073,12 +4133,12 @@ export class AppService {
         workspacePath,
         runId: run.id
       });
-      controller.activeRunId = run.id;
+      this.registerActiveAutomationBuilderRun(controller, builderStep.id, run.id);
       const completedSnapshot =
         inspection?.run && inspection.run.finalization !== null && inspection.run.status !== "running"
           ? await this.store.getSnapshot(workspacePath)
           : await this.waitForAutomationRun(workspacePath, run.id, controller);
-      controller.activeRunId = null;
+      this.clearActiveAutomationBuilderRun(controller, builderStep.id);
       latestRun =
         completedSnapshot.runs.find((record) => record.id === run.id) ??
         (completedSnapshot.latestRun?.id === run.id ? completedSnapshot.latestRun : null);
@@ -4089,7 +4149,7 @@ export class AppService {
       runRisks = latestRun?.handoff?.risks ?? [];
       runActions = latestRun?.handoff?.runActions ?? [];
     } catch (error) {
-      controller.activeRunId = null;
+      this.clearActiveAutomationBuilderRun(controller, builderStep.id);
       runStatus = "failed";
       runSummary = error instanceof Error ? error.message : String(error);
       runEvidence = runSummary ? [runSummary] : [];
@@ -4146,7 +4206,7 @@ export class AppService {
     const activeOracleProcess = await inspectActiveOracleProcessBySlug(strategistSlug);
 
     if (activeOracleProcess) {
-      controller.activeStrategistSlug = strategistSlug;
+      this.registerActiveAutomationStrategistSession(controller, strategistStep.id, strategistSlug);
 
       try {
         const recoveredDecision = await this.waitForRecoveredStrategistDecision(
@@ -4173,7 +4233,7 @@ export class AppService {
           };
         }
       } finally {
-        controller.activeStrategistSlug = null;
+        this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
       }
     }
 
@@ -4801,7 +4861,7 @@ export class AppService {
         updatedAt: strategistStep.updatedAt
       });
 
-      controller.activeStrategistSlug = strategistSlug;
+      this.registerActiveAutomationStrategistSession(controller, strategistStep.id, strategistSlug);
 
       try {
         strategistSnapshot = await this.consultStrategist(
@@ -4821,7 +4881,7 @@ export class AppService {
           }
         );
       } finally {
-        controller.activeStrategistSlug = null;
+        this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
       }
 
       const decision = strategistSnapshot.latestDecision ?? null;
@@ -4902,11 +4962,11 @@ export class AppService {
         delegation.executionMode === "sync"
           ? builderSnapshot
           : runId
-          ? ((controller.activeRunId = runId),
+          ? (this.registerActiveAutomationBuilderRun(controller, builderStep.id, runId),
             await this.waitForAutomationRun(workspacePath, runId, controller))
           : await this.store.getSnapshot(workspacePath);
 
-      controller.activeRunId = null;
+      this.clearActiveAutomationBuilderRun(controller, builderStep.id);
       latestRun =
         (runId
           ? completedSnapshot.runs.find((record) => record.id === runId)
@@ -4919,7 +4979,7 @@ export class AppService {
       runRisks = latestRun?.handoff?.risks ?? [];
       runActions = latestRun?.handoff?.runActions ?? [];
     } catch (error) {
-      controller.activeRunId = null;
+      this.clearActiveAutomationBuilderRun(controller, builderStep.id);
       runStatus = "failed";
       runSummary = error instanceof Error ? error.message : String(error);
       runEvidence = runSummary ? [runSummary] : [];
@@ -5297,7 +5357,11 @@ export class AppService {
       updatedAt: new Date().toISOString()
     });
 
-    this.getAutomationController(workspacePath, input.session.id).activeStrategistSlug = strategistSessionSlug;
+    this.registerActiveAutomationStrategistSession(
+      this.getAutomationController(workspacePath, input.session.id),
+      strategizeStep.id,
+      strategistSessionSlug
+    );
 
     try {
       strategistSnapshot = await this.consultStrategist(
@@ -5316,7 +5380,10 @@ export class AppService {
         }
       );
     } finally {
-      this.getAutomationController(workspacePath, input.session.id).activeStrategistSlug = null;
+      this.clearActiveAutomationStrategistSession(
+        this.getAutomationController(workspacePath, input.session.id),
+        strategizeStep.id
+      );
     }
 
     const decision = strategistSnapshot.latestDecision ?? null;
@@ -5594,12 +5661,8 @@ export class AppService {
         }
 
         if (controller.stopRequested) {
-          if (controller.activeStrategistSlug) {
-            await this.oracleRunner
-              .terminateSession?.(controller.activeStrategistSlug)
-              .catch(() => undefined);
-            controller.activeStrategistSlug = null;
-          }
+          await this.terminateActiveAutomationStrategistSessions(controller);
+          await this.terminateActiveAutomationBuilderRuns(workspacePath, controller);
           await this.finalizeAutomationCycle(workspacePath, session, session.activeCycleId, {
             status: "failed",
             phase: "reporting",
@@ -5862,7 +5925,7 @@ export class AppService {
             updatedAt: new Date().toISOString()
           };
           await this.store.writeAutomationStep(workspacePath, strategizeStep);
-          controller.activeStrategistSlug = strategistSessionSlug;
+          this.registerActiveAutomationStrategistSession(controller, strategizeStep.id, strategistSessionSlug);
           let strategistSnapshot: ProjectSnapshot;
 
           try {
@@ -5880,7 +5943,7 @@ export class AppService {
               }
             );
           } finally {
-            controller.activeStrategistSlug = null;
+            this.clearActiveAutomationStrategistSession(controller, strategizeStep.id);
           }
           latestDecision = strategistSnapshot.latestDecision;
 
@@ -5967,11 +6030,11 @@ export class AppService {
             };
             await this.store.writeAutomationStep(workspacePath, builderStep);
           }
-          controller.activeRunId = runId;
+          this.registerActiveAutomationBuilderRun(controller, builderStep.id, runId);
           const completedSnapshot = runId
             ? await this.waitForAutomationRun(workspacePath, runId, controller)
             : await this.store.getSnapshot(workspacePath);
-          controller.activeRunId = null;
+          this.clearActiveAutomationBuilderRun(controller, builderStep.id);
           latestRun = completedSnapshot.latestRun;
           runStatus = latestRun?.status ?? "failed";
           runSummary = handoffMachineSummary(latestRun?.handoff) || extractRunSummary(latestRun?.finalMessage ?? "");
@@ -5980,7 +6043,7 @@ export class AppService {
           runRisks = latestRun?.handoff?.risks ?? [];
           runActions = latestRun?.handoff?.runActions ?? [];
         } catch (error) {
-          controller.activeRunId = null;
+          this.clearActiveAutomationBuilderRun(controller, builderStep.id);
           runStatus = "failed";
           runSummary = error instanceof Error ? error.message : String(error);
           runChangedFiles = [];
@@ -6054,8 +6117,8 @@ export class AppService {
       }
     } finally {
       controller.running = false;
-      controller.activeRunId = null;
-      controller.activeStrategistSlug = null;
+      controller.activeBuilderRuns.clear();
+      controller.activeStrategistSessions.clear();
       if (shouldRestartAfterFailure) {
         void this.runAutomationLoop(workspacePath, sessionId);
       }
@@ -6068,10 +6131,10 @@ export class AppService {
     controller: AutomationControllerState
   ) {
     while (true) {
-      if (controller.stopRequested && controller.activeRunId) {
+      if (controller.stopRequested) {
         await this.terminateBuilderRun({
           workspacePath,
-          runId: controller.activeRunId
+          runId
         });
       }
 
