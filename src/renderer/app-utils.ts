@@ -1,7 +1,9 @@
 import type {
+  AttachmentRecord,
   AutomationCheckpointRecord,
   AutomationSessionRecord,
   AutomationStepRecord,
+  ArtifactKind,
   BuilderRunInspection,
   ChatProgressInspection,
   ConversationEntryRecord,
@@ -34,7 +36,7 @@ export type OnboardingChecklistItem = {
 
 export function buildChatItems(
   snapshot: ProjectSnapshot,
-  _workspaceFiles: WorkspaceFileRecord[],
+  workspaceFiles: WorkspaceFileRecord[],
   workspacePath = "",
   builderInspection: BuilderRunInspection | null = null
 ): ChatItem[] {
@@ -44,6 +46,9 @@ export function buildChatItems(
 
   const items: ChatItem[] = [];
   const activeThreadId = snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? null;
+  const attachmentsByConversationEntryId = groupAttachmentsBy(snapshot.attachments, "conversationEntryId");
+  const attachmentsByDecisionId = groupAttachmentsBy(snapshot.attachments, "decisionId");
+  const attachmentsByRunId = groupAttachmentsBy(snapshot.attachments, "runId");
   const conversationEntries = [...(snapshot.conversationEntries ?? [])]
     .filter((entry) => !activeThreadId || entry.threadId === activeThreadId)
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
@@ -86,7 +91,19 @@ export function buildChatItems(
 
   if (hasConversationEntries) {
     for (const entry of conversationEntries) {
-      items.push(formatConversationEntry(entry, items.length));
+      items.push(
+        formatConversationEntry(
+          entry,
+          items.length,
+          toOptionalArtifacts(
+            buildAttachmentArtifactRefs(
+              attachmentsByConversationEntryId.get(entry.id) ?? [],
+              workspaceFiles,
+              workspacePath
+            )
+          )
+        )
+      );
     }
   }
 
@@ -101,7 +118,10 @@ export function buildChatItems(
         title: "You",
         body: visiblePrompt,
         timestamp: decision.createdAt,
-        order: items.length
+        order: items.length,
+        artifacts: toOptionalArtifacts(
+          buildAttachmentArtifactRefs(attachmentsByDecisionId.get(decision.id) ?? [], workspaceFiles, workspacePath)
+        )
       });
     }
 
@@ -139,7 +159,10 @@ export function buildChatItems(
         title: "You",
         body: visibleRunPrompt,
         timestamp: run.startedAt,
-        order: items.length
+        order: items.length,
+        artifacts: toOptionalArtifacts(
+          buildAttachmentArtifactRefs(attachmentsByRunId.get(run.id) ?? [], workspaceFiles, workspacePath)
+        )
       });
     }
 
@@ -879,6 +902,45 @@ function buildChatArtifactRefs(paths: string[], workspaceFiles: WorkspaceFileRec
   return refs.slice(0, 8);
 }
 
+export function buildAttachmentArtifactRefs(
+  attachments: AttachmentRecord[],
+  workspaceFiles: WorkspaceFileRecord[],
+  workspacePath: string
+) {
+  if (!attachments.length) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const refs = [];
+
+  for (const attachment of attachments) {
+    const absolutePath = joinWorkspacePath(workspacePath, attachment.relativePath);
+    const file =
+      workspaceFiles.find((candidate) => normalizePath(candidate.path) === absolutePath) ??
+      workspaceFiles.find(
+        (candidate) => normalizePath(candidate.relativePath) === normalizePath(attachment.relativePath)
+      );
+    const resolvedPath = file?.path ?? absolutePath;
+
+    if (seen.has(resolvedPath)) {
+      continue;
+    }
+
+    seen.add(resolvedPath);
+    refs.push({
+      id: attachment.id,
+      path: resolvedPath,
+      relativePath: attachment.relativePath,
+      label: attachment.name,
+      kind: file?.kind ?? "artifact",
+      artifactKind: file?.artifactKind ?? attachmentKindToArtifactKind(attachment.kind)
+    });
+  }
+
+  return refs.slice(0, 8);
+}
+
 function formatChatArtifactLabel(relativePath: string) {
   const normalized = normalizePath(relativePath);
   const parts = normalized.split("/").filter(Boolean);
@@ -900,7 +962,11 @@ export function resolveThreadTitle(snapshot: ProjectSnapshot) {
   );
 }
 
-function formatConversationEntry(entry: ConversationEntryRecord, order: number): ChatItem {
+function formatConversationEntry(
+  entry: ConversationEntryRecord,
+  order: number,
+  artifacts?: ChatItem["artifacts"]
+): ChatItem {
   const variant =
     entry.source === "automation" || entry.source === "checkpoint"
       ? "neutral"
@@ -920,8 +986,58 @@ function formatConversationEntry(entry: ConversationEntryRecord, order: number):
         : "Lithium",
     body: entry.body.trim(),
     timestamp: entry.createdAt,
-    order
+    order,
+    artifacts
   };
+}
+
+function attachmentKindToArtifactKind(kind: AttachmentRecord["kind"]): ArtifactKind {
+  switch (kind) {
+    case "text":
+    case "json":
+    case "csv":
+    case "pdf":
+    case "image":
+      return kind;
+    default:
+      return "other";
+  }
+}
+
+function groupAttachmentsBy<K extends "conversationEntryId" | "decisionId" | "runId">(
+  attachments: AttachmentRecord[],
+  key: K
+) {
+  const groups = new Map<string, AttachmentRecord[]>();
+
+  for (const attachment of attachments) {
+    const id = attachment[key];
+
+    if (!id) {
+      continue;
+    }
+
+    const current = groups.get(id) ?? [];
+    current.push(attachment);
+    groups.set(id, current);
+  }
+
+  return groups;
+}
+
+function joinWorkspacePath(workspacePath: string, relativePath: string) {
+  const normalizedWorkspace = normalizePath(workspacePath).replace(/\/+$/, "");
+  const normalizedRelative = normalizePath(relativePath).replace(/^\/+/, "");
+
+  if (!normalizedWorkspace) {
+    return normalizedRelative ? `/${normalizedRelative}` : "";
+  }
+
+  return normalizedRelative ? `${normalizedWorkspace}/${normalizedRelative}` : normalizedWorkspace;
+}
+
+function toOptionalArtifacts(artifacts: ChatItem["artifacts"] | []) {
+  return artifacts && artifacts.length ? artifacts : undefined;
 }
 
 export function resolveWorkspaceSurfaceTitle(

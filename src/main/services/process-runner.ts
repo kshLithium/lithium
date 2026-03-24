@@ -1,6 +1,7 @@
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import type { CommandSpec } from "../../shared/types";
+import { appendHeadTailBuffer, prepareTextFiles } from "./fs-utils";
 import { terminateProcessTree } from "./process-tree";
 
 export type CommandResult = {
@@ -27,10 +28,12 @@ type RunCommandOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
+const MAX_CAPTURED_OUTPUT_BYTES = 256 * 1024;
+
 export async function startCommand(options: RunCommandOptions): Promise<CommandSession> {
   const { spec, timeoutMs, stdoutPath, stderrPath, env } = options;
   const startedAt = new Date().toISOString();
-  await Promise.all([writeFile(stdoutPath, "", "utf8"), writeFile(stderrPath, "", "utf8")]);
+  await prepareTextFiles([stdoutPath, stderrPath]);
 
   const child = spawn(spec.command, spec.args, {
     cwd: spec.cwd,
@@ -98,18 +101,18 @@ export async function startCommand(options: RunCommandOptions): Promise<CommandS
 
   child.stdout.on("data", (chunk) => {
     const text = chunk.toString();
-    stdout += text;
+    stdout = appendHeadTailBuffer(stdout, text, MAX_CAPTURED_OUTPUT_BYTES);
     enqueueAppend(stdoutPath, text);
   });
 
   child.stderr.on("data", (chunk) => {
     const text = chunk.toString();
-    stderr += text;
+    stderr = appendHeadTailBuffer(stderr, text, MAX_CAPTURED_OUTPUT_BYTES);
     enqueueAppend(stderrPath, text);
   });
 
   child.on("error", async (error) => {
-    stderr += `${error.message}\n`;
+    stderr = appendHeadTailBuffer(stderr, `${error.message}\n`, MAX_CAPTURED_OUTPUT_BYTES);
     await finalize({
       endedAt: new Date().toISOString(),
       exitCode: null,

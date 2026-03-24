@@ -16,6 +16,7 @@ import {
   computeRenderWindow,
   computeFitWidthScale,
   readViewerState,
+  type StoredViewerState,
   type PdfPageMetric,
   type PdfZoomAnchor,
   type ZoomMode,
@@ -54,6 +55,10 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
   const textLayerScaleRef = useRef<Map<number, number>>(new Map());
   const zoomAnimationFrameRef = useRef<number | null>(null);
   const scrollAnimationFrameRef = useRef<number | null>(null);
+  const viewerStateTimerRef = useRef<number | null>(null);
+  const pendingViewerStateRef = useRef<{ storageKey: string; state: StoredViewerState } | null>(null);
+  const lastPersistedViewerStateRef = useRef<{ storageKey: string; serialized: string } | null>(null);
+  const appliedJumpNonceRef = useRef<number | null>(null);
   const currentVisualScaleRef = useRef(1);
   const currentPageRef = useRef(1);
   const renderedScaleRef = useRef<Map<number, number>>(new Map());
@@ -108,11 +113,60 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
     [containerHeight, currentPage, renderedPageMetrics, scrollTop]
   );
 
+  function flushPendingViewerState() {
+    if (viewerStateTimerRef.current != null) {
+      window.clearTimeout(viewerStateTimerRef.current);
+      viewerStateTimerRef.current = null;
+    }
+
+    const pending = pendingViewerStateRef.current;
+
+    if (!pending) {
+      return;
+    }
+
+    pendingViewerStateRef.current = null;
+    const serialized = JSON.stringify(pending.state);
+    const previous = lastPersistedViewerStateRef.current;
+
+    if (previous?.storageKey === pending.storageKey && previous.serialized === serialized) {
+      return;
+    }
+
+    writeViewerState(pending.storageKey, pending.state);
+    lastPersistedViewerStateRef.current = {
+      storageKey: pending.storageKey,
+      serialized
+    };
+  }
+
+  function queueViewerStateWrite(storageKey: string, state: StoredViewerState) {
+    pendingViewerStateRef.current = {
+      storageKey,
+      state
+    };
+
+    if (viewerStateTimerRef.current != null) {
+      return;
+    }
+
+    viewerStateTimerRef.current = window.setTimeout(() => {
+      flushPendingViewerState();
+    }, 120);
+  }
+
   useEffect(() => {
     currentVisualScaleRef.current = renderScale;
   }, [renderScale]);
 
   useEffect(() => {
+    return () => {
+      flushPendingViewerState();
+    };
+  }, []);
+
+  useEffect(() => {
+    flushPendingViewerState();
     const savedState = readViewerState(props.storageKey);
 
     if (savedState) {
@@ -123,6 +177,7 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
       setZoomScale(1);
     }
 
+    appliedJumpNonceRef.current = null;
     restoredScrollRef.current = false;
   }, [props.storageKey]);
 
@@ -481,7 +536,7 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
         });
       }
 
-      writeViewerState(props.storageKey, {
+      queueViewerStateWrite(props.storageKey, {
         currentPage: currentPageRef.current,
         scrollTop: node.scrollTop,
         scrollLeft: node.scrollLeft,
@@ -507,7 +562,7 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
       return;
     }
 
-    writeViewerState(props.storageKey, {
+    queueViewerStateWrite(props.storageKey, {
       currentPage,
       scrollTop: node.scrollTop,
       scrollLeft: node.scrollLeft,
@@ -622,7 +677,14 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
   }, [renderingPages, renderedPageMetrics]);
 
   useEffect(() => {
-    if (!props.jumpNonce || !props.jumpTarget || !pageCount || documentLoading || renderingPages) {
+    if (
+      !props.jumpNonce ||
+      appliedJumpNonceRef.current === props.jumpNonce ||
+      !props.jumpTarget ||
+      !pageCount ||
+      documentLoading ||
+      renderingPages
+    ) {
       return;
     }
 
@@ -631,6 +693,7 @@ export function PdfPreviewSurface(props: PdfPreviewSurfaceProps) {
       return;
     }
 
+    appliedJumpNonceRef.current = props.jumpNonce;
     scrollToPage(props.jumpTarget.pageNumber, "smooth", props.jumpTarget.yRatio);
   }, [documentLoading, pageCount, props.jumpNonce, props.jumpTarget, renderingPages, renderScale]);
 

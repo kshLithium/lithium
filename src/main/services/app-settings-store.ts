@@ -7,6 +7,11 @@ import {
   isOracleModel
 } from "../../shared/model-config";
 import {
+  sanitizeCodeCanvasWidth,
+  sanitizePaperPreviewWidth,
+  sanitizeSidebarWidth
+} from "../../shared/app-settings";
+import {
   DEFAULT_APP_SETTINGS,
   type AutomationPromptLanguage,
   type AppSettings,
@@ -121,30 +126,6 @@ export function sanitizeAutomationPromptLanguage(value: unknown): AutomationProm
   return value === "auto" || value === "ko" || value === "en"
     ? value
     : DEFAULT_APP_SETTINGS.autopilotPromptLanguage;
-}
-
-export function sanitizeSidebarWidth(value: unknown) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_APP_SETTINGS.sidebarWidth;
-  }
-
-  return Math.min(320, Math.max(180, Math.round(value)));
-}
-
-export function sanitizeCodeCanvasWidth(value: unknown) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_APP_SETTINGS.codeCanvasWidth;
-  }
-
-  return Math.min(960, Math.max(320, Math.round(value)));
-}
-
-export function sanitizePaperPreviewWidth(value: unknown) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_APP_SETTINGS.paperPreviewWidth;
-  }
-
-  return Math.min(1280, Math.max(420, Math.round(value)));
 }
 
 export function sanitizeOracleModel(value: unknown): OracleModel {

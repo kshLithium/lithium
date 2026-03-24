@@ -164,6 +164,12 @@ export function useTerminalWindow(args: UseTerminalWindowArgs) {
         });
 
         if (cancelled) {
+          void getTerminalBridge()
+            .closeTerminalSession({
+              workspacePath: args.workspacePath,
+              sessionId: created.id
+            })
+            .catch(() => undefined);
           return;
         }
 
@@ -204,11 +210,21 @@ export function useTerminalWindow(args: UseTerminalWindowArgs) {
     void launchSession();
 
     return () => {
+      const activeSession = sessionRef.current;
+
       cancelled = true;
       launchSessionRef.current = async () => undefined;
       window.cancelAnimationFrame(resizeFrame);
       unsubscribe();
       observer.disconnect();
+      if (activeSession) {
+        void getTerminalBridge()
+          .closeTerminalSession({
+            workspacePath: args.workspacePath,
+            sessionId: activeSession.id
+          })
+          .catch(() => undefined);
+      }
       terminal.dispose();
       renderedOutputRef.current = "";
       sessionRef.current = null;

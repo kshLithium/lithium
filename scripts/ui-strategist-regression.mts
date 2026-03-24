@@ -82,11 +82,11 @@ async function main() {
     const firstPrompt =
       process.env.LITHIUM_UI_PROBE_FIRST_PROMPT?.trim() ||
       process.env.LITHIUM_UI_PROBE_PROMPT?.trim() ||
-      "현재 저장소를 기준으로 README를 보고, 다음 연구 질문 1개만 짧게 제안해줘.";
+      "/research 현재 저장소를 기준으로 README를 보고, 다음 연구 질문 1개만 짧게 제안해줘.";
     const secondPrompt =
       process.env.LITHIUM_UI_PROBE_SECOND_PROMPT?.trim() ||
       process.env.LITHIUM_UI_PROBE_FOLLOWUP?.trim() ||
-      "방금 이어서, 같은 저장소 맥락으로 연구 질문 1개만 더 제안해줘.";
+      "/research 방금 이어서, 같은 저장소 맥락으로 연구 질문 1개만 더 제안해줘.";
 
     await sendPrompt(page, firstPrompt);
     console.log("[probe] sent first prompt via UI");
@@ -202,7 +202,6 @@ async function createWorkspace() {
 
 async function sendPrompt(page: Page, prompt: string) {
   const textarea = page.locator("textarea.composer-input");
-  const sendButton = page.locator("button.send-button");
 
   await textarea.click();
   await textarea.fill(prompt);
@@ -211,13 +210,6 @@ async function sendPrompt(page: Page, prompt: string) {
 
   if (currentValue.trim() !== prompt.trim()) {
     throw new Error(`composer value mismatch before send: ${JSON.stringify(currentValue)}`);
-  }
-
-  await sendButton.waitFor({ state: "visible", timeout: 10_000 });
-  const disabledBeforeClick = await sendButton.isDisabled();
-
-  if (disabledBeforeClick) {
-    throw new Error("send button stayed disabled before click");
   }
 
   await textarea.press("Enter");

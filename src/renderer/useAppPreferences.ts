@@ -129,19 +129,13 @@ export function useAppPreferences(args: UseAppPreferencesArgs) {
     );
 
     try {
-      const nextSettings = await window.lithium.updateAppSettings(update);
+      const nextAppState = await window.lithium.updateAppSettings(update);
+
       if (typeof update.themePreference === "string" && typeof window.lithium.getInitialThemeState === "function") {
         setSystemTheme(window.lithium.getInitialThemeState().systemTheme);
       }
-      const nextAppState = await window.lithium.getAppState();
-      args.setAppState((current) =>
-        current
-          ? {
-              ...nextAppState,
-              settings: nextSettings
-            }
-          : nextAppState
-      );
+
+      args.setAppState(nextAppState);
     } catch (error) {
       args.setAppState((current) => (current ? { ...current, settings: previousSettings } : current));
       throw error;

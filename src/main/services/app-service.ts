@@ -898,12 +898,19 @@ export class AppService {
   ) {
     const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
     const requestPaths = this.buildConversationOrchestratorRequestPaths(input.workspacePath, input.activeThread.id);
+    const attachmentIds = input.snapshot.activeThreadAttachments.map((attachment) => attachment.id);
 
-    await this.appendConversationEntry(input.workspacePath, {
+    const userEntry = await this.appendConversationEntry(input.workspacePath, {
       threadId: input.activeThread.id,
       role: "user",
       source: "user",
-      body: input.prompt
+      body: input.prompt,
+      attachmentIds
+    });
+    await this.store.consumeAttachments(input.workspacePath, attachmentIds, {
+      conversationEntryId: userEntry.id,
+      decisionId: undefined,
+      runId: undefined
     });
     await this.store.appendPromptLog(input.workspacePath, {
       kind: "chat.user",
@@ -1595,7 +1602,7 @@ export class AppService {
       }
     }
 
-    if (this.orchestratorRunner) {
+    if (this.orchestratorRunner && !override.route) {
       return await this.handleConversationOrchestratorMessage(
         {
           workspacePath,
@@ -1609,6 +1616,7 @@ export class AppService {
     }
 
     const routePaths = await this.store.allocateRouteTrace(workspacePath);
+    const activeAttachmentIds = snapshot.activeThreadAttachments.map((attachment) => attachment.id);
 
     await this.store.appendPromptLog(workspacePath, {
       kind: "chat.user",
@@ -1687,6 +1695,8 @@ export class AppService {
             threadId: activeThread.id,
             prompt: downstreamPrompt,
             displayPrompt: builderDisplayPrompt
+          }, {
+            consumeAttachmentIds: activeAttachmentIds
           });
         } else if (finalRoute === "mixed") {
           const strategistSnapshot = await this.consultStrategist(
@@ -1696,7 +1706,10 @@ export class AppService {
               prompt: downstreamPrompt,
               displayPrompt: request.prompt
             },
-            options
+            {
+              ...options,
+              consumeAttachmentIds: activeAttachmentIds
+            }
           );
 
           this.setChatProgress(workspacePath, {
@@ -1726,7 +1739,10 @@ export class AppService {
               prompt: downstreamPrompt,
               displayPrompt: request.prompt
             },
-            options
+            {
+              ...options,
+              consumeAttachmentIds: activeAttachmentIds
+            }
           );
         }
       } catch (error) {
@@ -1779,6 +1795,7 @@ export class AppService {
       strategistSessionReady?: boolean;
       manageProgress?: boolean;
       progressOperationId?: string;
+      consumeAttachmentIds?: string[];
     } = {}
   ): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
@@ -1819,6 +1836,8 @@ export class AppService {
       }
       const currentSnapshot = await this.store.getSnapshot(workspacePath);
       const activeThread = currentSnapshot.activeThread;
+      const consumeAttachmentIds =
+        options.consumeAttachmentIds ?? currentSnapshot.activeThreadAttachments.map((attachment) => attachment.id);
       if (!activeThread) {
         throw new Error("No active thread is available.");
       }
@@ -1961,6 +1980,11 @@ export class AppService {
       });
 
       await this.store.writeDecision(workspacePath, decision);
+      await this.store.consumeAttachments(workspacePath, consumeAttachmentIds, {
+        conversationEntryId: undefined,
+        decisionId: decision.id,
+        runId: undefined
+      });
       await this.store.appendPromptLog(workspacePath, {
         kind: "strategist.response",
         threadId: activeThread.id,
@@ -2169,6 +2193,7 @@ export class AppService {
     options: {
       manageProgress?: boolean;
       progressOperationId?: string;
+      consumeAttachmentIds?: string[];
     } = {}
   ): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
@@ -2339,6 +2364,11 @@ export class AppService {
       createdAt: liveHandle.startedAt,
       startedAt: liveHandle.startedAt,
       endedAt: undefined
+    });
+    await this.store.consumeAttachments(workspacePath, options.consumeAttachmentIds ?? [], {
+      conversationEntryId: undefined,
+      decisionId: undefined,
+      runId: runPaths.id
     });
     await this.syncThreadFromArtifacts(workspacePath, activeThread, {
       prompt: displayPrompt

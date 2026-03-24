@@ -174,6 +174,67 @@ describe("AppService", () => {
     expect(snapshot.latestDecision?.summary).toBe("Literature comparison complete.");
   });
 
+  it("consumes attached files into strategist decisions and clears the active attachment list", async () => {
+    const workspace = await createWorkspace();
+    const sourceDir = await createTempDir("lithium-chat-attachment-strategist-");
+    const attachmentPath = path.join(sourceDir, "reviewer-note.md");
+    const routerRunner = {
+      route: vi.fn(async () => ({
+        decision: {
+          route: "strategist" as const,
+          rewrittenPrompt: "Read the attachment before deciding the next research move.",
+          reasonShort: "The request is a research question."
+        },
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-18T01:10:00.000Z",
+        endedAt: "2026-03-18T01:10:02.000Z",
+        exitCode: 0,
+        timedOut: false,
+        rawOutput: ""
+      }))
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-18T01:10:03.000Z",
+        endedAt: "2026-03-18T01:10:06.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: [
+          "SUMMARY: Attachment reviewed.",
+          "NEXT_TASK: Keep the builder idle.",
+          "RATIONALE: The answer depended on the attached note."
+        ].join("\n")
+      }))
+    };
+    const app = new AppService(workspace, {
+      routerRunner,
+      oracleRunner
+    });
+
+    await app.initProject(workspace);
+    await writeFile(attachmentPath, "Use the attached reviewer note to pick the next experiment.\n", "utf8");
+    const importedSnapshot = await app.importAttachments({
+      workspacePath: workspace,
+      filePaths: [attachmentPath]
+    });
+    const imported = importedSnapshot.activeThreadAttachments[0];
+
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "What should we test next?"
+    });
+
+    expect(snapshot.activeThreadAttachments).toHaveLength(0);
+    expect(snapshot.latestDecision?.summary).toBe("Attachment reviewed.");
+    expect(snapshot.attachments.find((record) => record.id === imported?.id)).toMatchObject({
+      consumedAt: expect.any(String),
+      decisionId: snapshot.latestDecision?.id
+    });
+  });
+
   it("lets the orchestrator own direct user-visible chat replies", async () => {
     const workspace = await createWorkspace();
     const orchestratorRunner = {
@@ -212,6 +273,55 @@ describe("AppService", () => {
       ["assistant", "지금은 공식 baseline보다 좋아졌다고 확정할 단계는 아닙니다."]
     ]);
     expect(snapshot.activeThread?.conversationOrchestratorSessionId).toBe("orch-thread-1");
+  });
+
+  it("consumes attached files into visible orchestrator chat entries and clears the active attachment list", async () => {
+    const workspace = await createWorkspace();
+    const sourceDir = await createTempDir("lithium-chat-attachment-orchestrator-");
+    const attachmentPath = path.join(sourceDir, "reviewer-note.md");
+    const orchestratorRunner = {
+      runTurn: vi.fn(async () => ({
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-24T13:00:00.000Z",
+        endedAt: "2026-03-24T13:00:03.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        finalMessage: "첨부 메모를 포함해서 지금 가장 중요한 질문을 하나로 정리했습니다.",
+        sessionId: "orch-thread-attachment-1",
+        requestedLane: null,
+        delegatedPrompt: ""
+      }))
+    };
+    const routerRunner = {
+      route: vi.fn()
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      routerRunner
+    });
+
+    await app.initProject(workspace);
+    await writeFile(attachmentPath, "리뷰어 메모를 함께 보고 연구 질문을 정리하자.\n", "utf8");
+    const importedSnapshot = await app.importAttachments({
+      workspacePath: workspace,
+      filePaths: [attachmentPath]
+    });
+    const imported = importedSnapshot.activeThreadAttachments[0];
+
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "README와 첨부 메모를 같이 보고 중요한 질문을 정리해줘."
+    });
+    const userEntry = snapshot.conversationEntries?.find((entry) => entry.role === "user");
+
+    expect(snapshot.activeThreadAttachments).toHaveLength(0);
+    expect(userEntry?.attachmentIds).toEqual(imported ? [imported.id] : []);
+    expect(snapshot.attachments.find((record) => record.id === imported?.id)).toMatchObject({
+      consumedAt: expect.any(String),
+      conversationEntryId: userEntry?.id
+    });
   });
 
   it("lets the orchestrator delegate to the strategist and then synthesize the final chat reply", async () => {
@@ -3824,6 +3934,68 @@ describe("AppService", () => {
     });
   });
 
+  it("still honors hidden /research overrides when the conversation orchestrator is enabled", async () => {
+    const workspace = await createWorkspace();
+    const routerRunner = {
+      route: vi.fn(async () => ({
+        decision: {
+          route: "builder" as const,
+          rewrittenPrompt: "Apply the draft directly to the paper.",
+          reasonShort: "The router saw a direct edit request."
+        },
+        command: { command: "codex", args: ["exec"], cwd: workspace },
+        startedAt: "2026-03-18T01:45:00.000Z",
+        endedAt: "2026-03-18T01:45:01.000Z",
+        exitCode: 0,
+        timedOut: false,
+        rawOutput: "LITHIUM_ROUTE\n{\"route\":\"builder\"}"
+      }))
+    };
+    const orchestratorRunner = {
+      runTurn: vi.fn(async () => {
+        throw new Error("orchestrator should be bypassed for explicit /research overrides");
+      })
+    };
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-18T01:45:02.000Z",
+        endedAt: "2026-03-18T01:45:05.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: [
+          "SUMMARY: Research override honored with orchestrator enabled.",
+          "NEXT_TASK: Keep the builder idle.",
+          "RATIONALE: The slash override must stay explicit even when the orchestrator is available."
+        ].join("\n")
+      }))
+    };
+    const app = new AppService(workspace, {
+      orchestratorRunner,
+      routerRunner,
+      oracleRunner
+    });
+
+    await app.initProject(workspace);
+    const snapshot = await app.sendChatMessage({
+      workspacePath: workspace,
+      prompt: "/research Should we actually revise the paper like that?"
+    });
+
+    expect(orchestratorRunner.runTurn).not.toHaveBeenCalled();
+    expect(snapshot.latestDecision?.summary).toBe("Research override honored with orchestrator enabled.");
+    const trace = JSON.parse(
+      await readFile(path.join(workspace, ".lithium", "routes", "Q001.json"), "utf8")
+    );
+    expect(trace).toMatchObject({
+      requestedRoute: "strategist",
+      route: "builder",
+      finalRoute: "strategist"
+    });
+  });
+
   it("lets hidden /plan override force strategist routing while still recording the router decision", async () => {
     const workspace = await createWorkspace();
     const routerRunner = {
@@ -4202,6 +4374,12 @@ describe("AppService", () => {
       consultInput.files.some((file) => file.endsWith(path.join("attachments", "TH001", "notes.md")))
     ).toBe(true);
     expect(consultInput.prompt).toBe("Plan the next baseline experiment.");
+    expect(snapshot.activeThreadAttachments).toHaveLength(0);
+    expect(snapshot.attachments[0]).toMatchObject({
+      name: "notes.md",
+      decisionId: "D001"
+    });
+    expect(snapshot.attachments[0]?.consumedAt).toBeTruthy();
     expect(snapshot.latestDecision?.handoff?.files).toContain("attachments/TH001/notes.md");
   });
 

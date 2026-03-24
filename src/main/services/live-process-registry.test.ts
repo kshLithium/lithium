@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -73,5 +73,27 @@ describe("live-process-registry", () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(getLiveProcess(tempDir, handle.id)).toBeNull();
+  });
+
+  it("keeps the full stdout log on disk after completion", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "lithium-live-process-"));
+    const stdoutPath = path.join(tempDir, "stdout.log");
+    const handle = startLiveProcess({
+      id: "R-test-log-preservation",
+      workspacePath: tempDir,
+      spec: {
+        command: process.execPath,
+        args: ["-e", 'process.stdout.write("x".repeat(300_000))'],
+        cwd: tempDir
+      },
+      stdoutPath,
+      stderrPath: path.join(tempDir, "stderr.log")
+    });
+
+    const result = await handle.done;
+
+    expect(result.exitCode).toBe(0);
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThan(300_000);
+    await expect(readFile(stdoutPath, "utf8")).resolves.toHaveLength(300_000);
   });
 });

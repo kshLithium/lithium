@@ -196,7 +196,10 @@ export function createInProcessLithiumApi(
         notifyThemeListeners();
       }
 
-      return cloneSettings(settings);
+      return await appService.getAppState({
+        ...runtime,
+        settings: cloneSettings(settings)
+      });
     },
     toggleFullscreen: async () => false
   };

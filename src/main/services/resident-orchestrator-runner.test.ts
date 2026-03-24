@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,7 @@ describe("ResidentOrchestratorRunner", () => {
     const stdoutPath = path.join(requestDir, "orchestrator.stdout.log");
     const stderrPath = path.join(requestDir, "orchestrator.stderr.log");
     const outputPath = path.join(requestDir, "orchestrator.reply.md");
+    let shellCommand = "";
 
     vi.mocked(getLiveTerminal).mockReturnValueOnce(null).mockReturnValue({
       id: "__resident__",
@@ -61,25 +62,31 @@ describe("ResidentOrchestratorRunner", () => {
       startedAt: "2026-03-24T14:00:00.000Z"
     });
     vi.mocked(writeToLiveTerminal).mockImplementationOnce((_workspacePath, _id, command) => {
-      const exitMatch = command.match(/>\s*'([^']+\/exit\.code)'/);
+      shellCommand = command;
+      const scriptMatch = command.match(/^sh '([^']+\/run-turn\.sh)'\r?$/);
 
-      void writeFile(stdoutPath, "{\"type\":\"thread.started\",\"thread_id\":\"resident-thread-1\"}\n", "utf8");
-      void writeFile(outputPath, "상주 오케스트레이터가 답변했습니다.", "utf8");
-      void writeFile(
-        requestPaths.builder,
-        [
-          "Execution: live",
-          "Model: gpt-5.4",
-          "Reasoning: xhigh",
-          "",
-          "Run the local compare-only recovery step."
-        ].join("\n"),
-        "utf8"
-      );
+      void (async () => {
+        const script = scriptMatch?.[1] ? await readFile(scriptMatch[1], "utf8") : "";
+        const exitMatch = script.match(/>\s*'([^']+\/exit\.code)'/);
 
-      if (exitMatch?.[1]) {
-        void writeFile(exitMatch[1], "0", "utf8");
-      }
+        await writeFile(stdoutPath, "{\"type\":\"thread.started\",\"thread_id\":\"resident-thread-1\"}\n", "utf8");
+        await writeFile(outputPath, "상주 오케스트레이터가 답변했습니다.", "utf8");
+        await writeFile(
+          requestPaths.builder,
+          [
+            "Execution: live",
+            "Model: gpt-5.4",
+            "Reasoning: xhigh",
+            "",
+            "Run the local compare-only recovery step."
+          ].join("\n"),
+          "utf8"
+        );
+
+        if (exitMatch?.[1]) {
+          await writeFile(exitMatch[1], "0", "utf8");
+        }
+      })();
 
       return true;
     });
@@ -98,6 +105,7 @@ describe("ResidentOrchestratorRunner", () => {
 
     expect(startLiveTerminal).toHaveBeenCalledTimes(1);
     expect(writeToLiveTerminal).toHaveBeenCalledTimes(1);
+    expect(shellCommand).toMatch(/^sh '[^']+\/run-turn\.sh'\r?$/);
     expect(result.sessionId).toBe("resident-thread-1");
     expect(result.requestedLane).toBe("builder");
     expect(result.delegatedPrompt).toContain("compare-only");

@@ -1,10 +1,15 @@
-import { createWriteStream, mkdirSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { createWriteStream } from "node:fs";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { CommandSpec } from "../../shared/types";
 import type { CommandResult } from "./process-runner";
+import {
+  appendTailBuffer,
+  endWriteStream,
+  prepareTextFilesSync,
+  readTextFileIfExists,
+  statIfExists
+} from "./fs-utils";
 import { buildLiveResourceKey } from "./live-resource-key";
 import { terminateProcessTree } from "./process-tree";
 import { readTailText } from "./run-artifacts";
@@ -50,8 +55,7 @@ const MAX_CAPTURED_OUTPUT_BYTES = 256 * 1024;
 export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessHandle {
   const startedAt = new Date().toISOString();
   const registryKey = buildLiveResourceKey(options.workspacePath, options.id);
-  mkdirSync(path.dirname(options.stdoutPath), { recursive: true });
-  mkdirSync(path.dirname(options.stderrPath), { recursive: true });
+  prepareTextFilesSync([options.stdoutPath, options.stderrPath]);
   const child = spawn(options.spec.command, options.spec.args, {
     cwd: options.spec.cwd,
     env: {
@@ -65,13 +69,6 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
   let stderr = "";
   let timedOut = false;
   let settled = false;
-
-  const stdoutReady = mkdir(path.dirname(options.stdoutPath), { recursive: true }).then(() =>
-    writeFile(options.stdoutPath, "", "utf8")
-  );
-  const stderrReady = mkdir(path.dirname(options.stderrPath), { recursive: true }).then(() =>
-    writeFile(options.stderrPath, "", "utf8")
-  );
 
   const stdoutStream = createWriteStream(options.stdoutPath, { flags: "a" });
   const stderrStream = createWriteStream(options.stderrPath, { flags: "a" });
@@ -91,16 +88,13 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
       activeProcesses.delete(registryKey);
 
       try {
-        await stdoutReady;
-        await stderrReady;
-        await writeCaptureFile(options.stdoutPath, stdout);
-        await writeCaptureFile(options.stderrPath, stderr);
+        await Promise.all([
+          endWriteStream(stdoutStream),
+          endWriteStream(stderrStream)
+        ]);
       } catch (error) {
         reject(error);
         return;
-      } finally {
-        stdoutStream.end();
-        stderrStream.end();
       }
 
       resolve({
@@ -134,7 +128,7 @@ export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessH
     });
 
     child.on("error", (error) => {
-      stderr += `${error.message}\n`;
+      stderr = appendTailBuffer(stderr, `${error.message}\n`, MAX_CAPTURED_OUTPUT_BYTES);
       void finish({
         endedAt: new Date().toISOString(),
         exitCode: null,
@@ -269,44 +263,9 @@ export async function inspectLiveProcessFiles(input: {
 }
 
 async function readMaybe(filePath: string) {
-  try {
-    return await readFile(filePath, "utf8");
-  } catch {
-    return "";
-  }
+  return await readTextFileIfExists(filePath);
 }
 
 async function statMaybe(filePath: string) {
-  try {
-    return await stat(filePath);
-  } catch {
-    return null;
-  }
-}
-
-async function writeCaptureFile(filePath: string, content: string) {
-  try {
-    await writeFile(filePath, content, "utf8");
-  } catch (error) {
-    if (isMissingPathError(error)) {
-      return;
-    }
-
-    throw error;
-  }
-}
-
-function appendTailBuffer(current: string, nextChunk: string, maxBytes: number) {
-  const combined = current + nextChunk;
-  const buffer = Buffer.from(combined, "utf8");
-
-  if (buffer.byteLength <= maxBytes) {
-    return combined;
-  }
-
-  return buffer.subarray(buffer.byteLength - maxBytes).toString("utf8");
-}
-
-function isMissingPathError(error: unknown) {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+  return await statIfExists(filePath);
 }

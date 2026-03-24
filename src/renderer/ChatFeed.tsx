@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { ChatItem } from "./app-types";
+import type { ChatArtifactRef, ChatItem } from "./app-types";
 import { formatTime } from "./app-utils";
 
 const remarkPlugins = [remarkGfm, remarkMath];
@@ -128,6 +128,7 @@ function createMarkdownComponents(onOpenArtifact?: (path: string) => void, works
 type ChatMessageProps = ChatItem & {
   compact: boolean;
   markdownComponents: ReturnType<typeof createMarkdownComponents>;
+  onOpenArtifact?: (path: string) => void;
 };
 
 const ChatMessage = memo(
@@ -135,14 +136,17 @@ const ChatMessage = memo(
     body,
     compact,
     markdownComponents,
+    onOpenArtifact,
     pending,
     role,
     timestamp,
     title,
-    variant
+    variant,
+    artifacts
   }: ChatMessageProps) {
     const normalizedBody = useMemo(() => normalizeChatMarkdown(body), [body]);
     const visualRole = role === "system" ? "assistant" : role;
+    const visibleArtifacts = visualRole === "assistant" ? undefined : artifacts;
 
     return (
       <article
@@ -165,6 +169,32 @@ const ChatMessage = memo(
         ) : (
           <div className="message-body plain">{body}</div>
         )}
+        {visibleArtifacts?.length ? (
+          <div className="message-artifact-list">
+            {visibleArtifacts.map((artifact) =>
+              onOpenArtifact ? (
+                <button
+                  key={artifact.id}
+                  className="message-artifact-pill"
+                  onClick={() => onOpenArtifact(artifact.path)}
+                  type="button"
+                >
+                  <span className="message-artifact-kind">
+                    {artifact.artifactKind ?? artifact.kind}
+                  </span>
+                  <span className="message-artifact-label">{artifact.label}</span>
+                </button>
+              ) : (
+                <span key={artifact.id} className="message-artifact-pill">
+                  <span className="message-artifact-kind">
+                    {artifact.artifactKind ?? artifact.kind}
+                  </span>
+                  <span className="message-artifact-label">{artifact.label}</span>
+                </span>
+              )
+            )}
+          </div>
+        ) : null}
       </article>
     );
   },
@@ -177,7 +207,9 @@ const ChatMessage = memo(
     previous.timestamp === next.timestamp &&
     previous.pending === next.pending &&
     previous.compact === next.compact &&
-    previous.markdownComponents === next.markdownComponents
+    previous.markdownComponents === next.markdownComponents &&
+    previous.onOpenArtifact === next.onOpenArtifact &&
+    areArtifactsEqual(previous.artifacts, next.artifacts)
 );
 
 type ChatFeedProps = {
@@ -202,8 +234,34 @@ export function ChatFeed({ items, compact = false, onOpenArtifact, workspacePath
           {...item}
           compact={compact}
           markdownComponents={markdownComponents}
+          onOpenArtifact={onOpenArtifact}
         />
       ))}
     </div>
   );
+}
+
+function areArtifactsEqual(left?: ChatArtifactRef[], right?: ChatArtifactRef[]) {
+  if (left === right) {
+    return true;
+  }
+
+  if (!left?.length && !right?.length) {
+    return true;
+  }
+
+  if (!left || !right || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((artifact, index) => {
+    const other = right[index];
+    return (
+      artifact.id === other?.id &&
+      artifact.path === other.path &&
+      artifact.label === other.label &&
+      artifact.kind === other.kind &&
+      artifact.artifactKind === other.artifactKind
+    );
+  });
 }

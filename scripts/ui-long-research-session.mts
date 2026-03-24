@@ -490,7 +490,6 @@ async function sendPromptAndWaitForDecision(
 
 async function sendPrompt(page: Page, prompt: string) {
   const textarea = page.locator("textarea.composer-input");
-  const sendButton = page.locator("button.send-button");
 
   await textarea.click();
   await textarea.fill(prompt);
@@ -498,12 +497,6 @@ async function sendPrompt(page: Page, prompt: string) {
 
   if ((await textarea.inputValue()).trim() !== prompt.trim()) {
     throw new Error("Composer value did not match the intended prompt.");
-  }
-
-  await sendButton.waitFor({ state: "visible", timeout: 10_000 });
-
-  if (await sendButton.isDisabled()) {
-    throw new Error("Composer send button stayed disabled.");
   }
 
   await textarea.press("Enter");

@@ -110,6 +110,37 @@ describe("ChatFeed", () => {
     expect(html).not.toContain("katex");
   });
 
+  it("renders attachment pills under user chat bubbles", () => {
+    const items: ChatItem[] = [
+      {
+        id: "user-attachment-1",
+        role: "user",
+        variant: "neutral",
+        title: "You",
+        body: "README와 첨부 메모를 같이 확인해줘.",
+        timestamp: "2026-03-21T10:02:45.000Z",
+        order: 3,
+        artifacts: [
+          {
+            id: "A001",
+            path: "/tmp/workspace/attachments/TH001/reviewer-note.md",
+            relativePath: "attachments/TH001/reviewer-note.md",
+            label: "reviewer-note.md",
+            kind: "artifact",
+            artifactKind: "text"
+          }
+        ]
+      }
+    ];
+
+    const html = renderToStaticMarkup(<ChatFeed items={items} />);
+
+    expect(html).toContain("README와 첨부 메모를 같이 확인해줘.");
+    expect(html).toContain("message-artifact-pill");
+    expect(html).toContain("reviewer-note.md");
+    expect(html).toContain("message-artifact-kind");
+  });
+
   it("ignores changed-file artifacts and keeps the reply as plain chat content", () => {
     const items: ChatItem[] = [
       {

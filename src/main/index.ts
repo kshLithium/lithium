@@ -88,18 +88,14 @@ const discordBotService = new DiscordBotService({
     },
     getSnapshot: async (workspacePath) => appService.getSnapshot(workspacePath),
     createThread: async (request) => appService.createThread(request),
-    sendChatMessage: async (request) => {
-      const settings = await appSettingsStore.read();
-      const snapshot = await appService.sendChatMessage(request, {
-        strategistSessionReady: settings.strategistSessionReady
-      });
-
-      if (!settings.strategistSessionReady && snapshot.latestDecision) {
-        await appSettingsStore.update({ strategistSessionReady: true });
-      }
-
-      return snapshot;
-    },
+    sendChatMessage: async (request) =>
+      await withStrategistSessionState(
+        async (settings) =>
+          await appService.sendChatMessage(request, {
+            strategistSessionReady: settings.strategistSessionReady
+          }),
+        (snapshot) => Boolean(snapshot.latestDecision)
+      ),
     inspectBuilderRun: async (request) => appService.inspectBuilderRun(request)
   },
   log: (message) => {
@@ -113,18 +109,14 @@ const mobileBridgeServer = new MobileBridgeServer({
   getProjectSnapshot: async (workspacePath) => appService.getSnapshot(workspacePath),
   createThread: async (request) => appService.createThread(request),
   selectThread: async (request) => appService.selectThread(request),
-  sendChatMessage: async (request) => {
-    const settings = await appSettingsStore.read();
-    const snapshot = await appService.sendChatMessage(request, {
-      strategistSessionReady: settings.strategistSessionReady
-    });
-
-    if (!settings.strategistSessionReady && snapshot.latestDecision) {
-      await appSettingsStore.update({ strategistSessionReady: true });
-    }
-
-    return snapshot;
-  },
+  sendChatMessage: async (request) =>
+    await withStrategistSessionState(
+      async (settings) =>
+        await appService.sendChatMessage(request, {
+          strategistSessionReady: settings.strategistSessionReady
+        }),
+      (snapshot) => Boolean(snapshot.latestDecision)
+    ),
   createAutomationSession: async (request) => appService.createAutomationSession(request),
   startAutomationSession: async (request) => appService.startAutomationSession(request),
   pauseAutomationSession: async (request) => appService.pauseAutomationSession(request),
@@ -239,6 +231,20 @@ async function getRuntimeAppState() {
     discordBotStatus: discordBotService.getStatus(),
     settings
   });
+}
+
+async function withStrategistSessionState<T>(
+  work: (settings: AppSettings) => Promise<T>,
+  shouldMarkReady: (result: T) => boolean
+) {
+  const settings = await appSettingsStore.read();
+  const result = await work(settings);
+
+  if (!settings.strategistSessionReady && shouldMarkReady(result)) {
+    await appSettingsStore.update({ strategistSessionReady: true });
+  }
+
+  return result;
 }
 
 async function reconfigureDiscordBot(settings: AppSettings) {
@@ -541,7 +547,7 @@ app.whenReady().then(async () => {
 
     broadcastThemeState(settings.themePreference);
 
-    return settings;
+    return await getRuntimeAppState();
   });
 
   registerIpcHandle("lithium:pick-workspace", async () => {
@@ -655,48 +661,45 @@ app.whenReady().then(async () => {
     return await appSettingsStore.update({ strategistSessionReady: true });
   });
 
-  registerIpcHandle("lithium:send-chat-message", async (_event, request) => {
-    const settings = await appSettingsStore.read();
-    const snapshot = await appService.sendChatMessage(request, {
-      strategistSessionReady: settings.strategistSessionReady
-    });
+  registerIpcHandle(
+    "lithium:send-chat-message",
+    async (_event, request) =>
+      await withStrategistSessionState(
+        async (settings) =>
+          await appService.sendChatMessage(request, {
+            strategistSessionReady: settings.strategistSessionReady
+          }),
+        (snapshot) => Boolean(snapshot.latestDecision)
+      )
+  );
 
-    if (!settings.strategistSessionReady && snapshot.latestDecision) {
-      await appSettingsStore.update({ strategistSessionReady: true });
-    }
-
-    return snapshot;
-  });
-
-  registerIpcHandle("lithium:consult-strategist", async (_event, request) => {
-    const settings = await appSettingsStore.read();
-    const snapshot = await appService.consultStrategist(request, {
-      strategistSessionReady: settings.strategistSessionReady
-    });
-
-    if (!settings.strategistSessionReady) {
-      await appSettingsStore.update({ strategistSessionReady: true });
-    }
-
-    return snapshot;
-  });
+  registerIpcHandle(
+    "lithium:consult-strategist",
+    async (_event, request) =>
+      await withStrategistSessionState(
+        async (settings) =>
+          await appService.consultStrategist(request, {
+            strategistSessionReady: settings.strategistSessionReady
+          }),
+        () => true
+      )
+  );
 
   registerIpcHandle("lithium:inspect-chat-progress", async (_event, request) => {
     return appService.inspectChatProgress(request);
   });
 
-  registerIpcHandle("lithium:run-strategist-browser-probe", async (_event, request) => {
-    const settings = await appSettingsStore.read();
-    const response = await appService.runStrategistBrowserProbe(request, {
-      strategistSessionReady: settings.strategistSessionReady
-    });
-
-    if (!settings.strategistSessionReady && response.ok && response.snapshot.latestDecision) {
-      await appSettingsStore.update({ strategistSessionReady: true });
-    }
-
-    return response;
-  });
+  registerIpcHandle(
+    "lithium:run-strategist-browser-probe",
+    async (_event, request) =>
+      await withStrategistSessionState(
+        async (settings) =>
+          await appService.runStrategistBrowserProbe(request, {
+            strategistSessionReady: settings.strategistSessionReady
+          }),
+        (response) => Boolean(response.ok && response.snapshot.latestDecision)
+      )
+  );
 
   registerIpcHandle("lithium:start-builder-task", async (_event, request) => {
     return appService.startBuilderTask(request);

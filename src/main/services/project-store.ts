@@ -37,6 +37,7 @@ import {
 import { extractFinalSummary, readTailText } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
 import { parseTerminalCapture } from "./terminal-session";
+import { pathExists } from "./fs-utils";
 import { resolveWorkspaceMemberPath } from "./workspace-paths";
 
 const LITHIUM_DIR = ".lithium";
@@ -57,6 +58,7 @@ const WORKSPACE_INDEX_IGNORED_DIRS = new Set([
   ".ruff_cache",
   ".tox"
 ]);
+const RECORD_READ_BATCH_SIZE = 32;
 
 type ProjectPaths = {
   root: string;
@@ -325,6 +327,7 @@ export class ProjectStore {
 
       const duplicate = existing.find(
         (record) =>
+          isAttachmentRecordActive(record) &&
           record.threadId === threadId &&
           record.sourcePath === absoluteSourcePath &&
           record.sizeBytes === sourceStat.size
@@ -378,6 +381,33 @@ export class ProjectStore {
     await this.removeFileIfExists(jsonPath);
     await this.removeFileIfExists(path.join(workspacePath, record.relativePath));
     return record;
+  }
+
+  async consumeAttachments(
+    workspacePath: string,
+    attachmentIds: string[],
+    usage: Pick<AttachmentRecord, "conversationEntryId" | "decisionId" | "runId">
+  ) {
+    const now = new Date().toISOString();
+
+    await Promise.all(
+      attachmentIds.map(async (attachmentId) => {
+        const current = await this.readAttachment(workspacePath, attachmentId);
+
+        if (!current || !isAttachmentRecordActive(current)) {
+          return;
+        }
+
+        await this.writeAttachment(workspacePath, {
+          ...current,
+          consumedAt: now,
+          conversationEntryId: usage.conversationEntryId,
+          decisionId: usage.decisionId,
+          runId: usage.runId,
+          updatedAt: now
+        });
+      })
+    );
   }
 
   async deleteThread(workspacePath: string, threadId: string) {
@@ -742,6 +772,11 @@ export class ProjectStore {
   async writeAttachment(workspacePath: string, attachment: AttachmentRecord) {
     const jsonPath = path.join(this.buildPaths(workspacePath).attachmentRecordsDir, `${attachment.id}.json`);
     await this.writeJson(jsonPath, attachment);
+  }
+
+  async readAttachment(workspacePath: string, attachmentId: string) {
+    const jsonPath = path.join(this.buildPaths(workspacePath).attachmentRecordsDir, `${attachmentId}.json`);
+    return this.readJson<AttachmentRecord>(jsonPath);
   }
 
   async writeConversationEntry(workspacePath: string, entry: ConversationEntryRecord) {
@@ -1284,7 +1319,9 @@ export class ProjectStore {
     const activeThreadId = resolveActiveThreadId(project, threads);
     const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
     const attachments = await this.listAttachments(workspacePath);
-    const activeThreadAttachments = attachments.filter((record) => record.threadId === activeThreadId);
+    const activeThreadAttachments = attachments.filter(
+      (record) => record.threadId === activeThreadId && isAttachmentRecordActive(record)
+    );
     const conversationEntries = (await this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir))
       .filter((record) => record.threadId === activeThreadId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
@@ -1622,12 +1659,23 @@ export class ProjectStore {
       .reverse();
     const records: T[] = [];
 
-    for (const entry of entries) {
-      try {
-        const content = await readFile(path.join(directory, entry), "utf8");
-        records.push(JSON.parse(content) as T);
-      } catch {
-        continue;
+    for (let index = 0; index < entries.length; index += RECORD_READ_BATCH_SIZE) {
+      const batch = entries.slice(index, index + RECORD_READ_BATCH_SIZE);
+      const batchRecords = await Promise.all(
+        batch.map(async (entry) => {
+          try {
+            const content = await readFile(path.join(directory, entry), "utf8");
+            return JSON.parse(content) as T;
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      for (const record of batchRecords) {
+        if (record !== null) {
+          records.push(record);
+        }
       }
     }
 
@@ -1693,12 +1741,7 @@ export class ProjectStore {
   }
 
   private async exists(targetPath: string) {
-    try {
-      await stat(targetPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await pathExists(targetPath);
   }
 
   private async ensureProjectMemory(workspacePath: string, projectName: string) {
@@ -2341,6 +2384,10 @@ function sanitizeAttachmentFileName(value: string) {
     .replace(/^-|-$/g, "");
 
   return cleaned || `attachment-${randomUUID().slice(0, 8)}`;
+}
+
+function isAttachmentRecordActive(record: AttachmentRecord) {
+  return !record.consumedAt && !record.conversationEntryId && !record.decisionId && !record.runId;
 }
 
 function stripLegacyNextTask(handoff: LithiumHandoff) {

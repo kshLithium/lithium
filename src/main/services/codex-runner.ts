@@ -1,12 +1,12 @@
 import os from "node:os";
 import path from "node:path";
-import { readFile, stat } from "node:fs/promises";
 import type {
   AppSettings,
   BuilderModel,
   BuilderReasoningEffort,
   CommandSpec
 } from "../../shared/types";
+import { readTextFileIfExists } from "./fs-utils";
 import { runCommand } from "./process-runner";
 
 type CodexRunOptions = {
@@ -167,20 +167,7 @@ export class CodexRunner {
   }
 
   private async readMaybe(filePath: string) {
-    if (!(await this.exists(filePath))) {
-      return "";
-    }
-
-    return readFile(filePath, "utf8");
-  }
-
-  private async exists(targetPath: string) {
-    try {
-      await stat(targetPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await readTextFileIfExists(filePath);
   }
 }
 

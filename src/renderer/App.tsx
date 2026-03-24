@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   startTransition,
   useEffect,
   useEffectEvent,
@@ -8,7 +10,13 @@ import {
   type CSSProperties
 } from "react";
 import { DEFAULT_APP_SETTINGS } from "../shared/types";
+import {
+  clampCodeCanvasWidth,
+  clampPaperPreviewWidth,
+  clampSidebarWidth
+} from "../shared/app-settings";
 import type {
+  AttachmentRecord,
   BuilderRunInspection,
   ChatProgressInspection,
   ProjectSnapshot,
@@ -29,6 +37,7 @@ import {
   emptySnapshot
 } from "./app-types";
 import {
+  buildAttachmentArtifactRefs,
   buildChatItems,
   buildExplorerRows,
   formatLiveProgressBody,
@@ -50,14 +59,8 @@ import {
   toLines,
   toMemoryDraft
 } from "./app-utils";
-import { ArtifactInspector } from "./ArtifactInspector";
 import { ChatFeed } from "./ChatFeed";
-import { CodeWorkbench } from "./CodeWorkbench";
 import { Composer } from "./Composer";
-import { ContextWorkbench } from "./ContextWorkbench";
-import { OnboardingPanel } from "./OnboardingPanel";
-import { PaperWorkbench } from "./PaperWorkbench";
-import { SettingsPanel } from "./SettingsPanel";
 import {
   canSubmitComposerPrompt,
   describeBusyChatState,
@@ -71,12 +74,45 @@ import {
 } from "./chat-surface";
 import { useAppPreferences } from "./useAppPreferences";
 import { useCodeWorkbenchState } from "./useCodeWorkbenchState";
+import { isThreadUnread, useThreadSeenState } from "./useThreadSeenState";
 import { TERMINAL_FEATURE_ENABLED, WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
 
 const INITIAL_SURFACE = resolveInitialSurface();
 const THREAD_MENU_WIDTH = 168;
 const INITIAL_DRAWER_TAB: DrawerTab =
   INITIAL_SURFACE === "chat" ? "none" : !WORKBENCH_SURFACES_ENABLED && INITIAL_SURFACE === "paper" ? "none" : INITIAL_SURFACE;
+const PANEL_FALLBACK = <div className="empty-state">Loading panel…</div>;
+const SURFACE_FALLBACK = <div className="empty-state">Loading surface…</div>;
+
+const ArtifactInspector = lazy(async () => {
+  const module = await import("./ArtifactInspector");
+  return { default: module.ArtifactInspector };
+});
+
+const CodeWorkbench = lazy(async () => {
+  const module = await import("./CodeWorkbench");
+  return { default: module.CodeWorkbench };
+});
+
+const ContextWorkbench = lazy(async () => {
+  const module = await import("./ContextWorkbench");
+  return { default: module.ContextWorkbench };
+});
+
+const OnboardingPanel = lazy(async () => {
+  const module = await import("./OnboardingPanel");
+  return { default: module.OnboardingPanel };
+});
+
+const PaperWorkbench = lazy(async () => {
+  const module = await import("./PaperWorkbench");
+  return { default: module.PaperWorkbench };
+});
+
+const SettingsPanel = lazy(async () => {
+  const module = await import("./SettingsPanel");
+  return { default: module.SettingsPanel };
+});
 
 export default function App() {
   const [appState, setAppState] = useState<RuntimeAppState | null>(null);
@@ -89,7 +125,7 @@ export default function App() {
   const [pendingChatItems, setPendingChatItems] = useState<ChatItem[]>([]);
   const [pendingChatThreadId, setPendingChatThreadId] = useState<string | null>(null);
   const [queuedChatPrompts, setQueuedChatPrompts] = useState<
-    Array<{ id: string; prompt: string; threadId: string | null }>
+    Array<{ id: string; prompt: string; threadId: string | null; attachments: AttachmentRecord[] }>
   >([]);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +150,6 @@ export default function App() {
   const [paperPreviewWidth, setPaperPreviewWidth] = useState(DEFAULT_APP_SETTINGS.paperPreviewWidth);
   const [resizeTarget, setResizeTarget] = useState<ResizeTarget>(null);
   const [inspectorPath, setInspectorPath] = useState("");
-  const [threadSeenState, setThreadSeenState] = useState<Record<string, string>>({});
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const lastChatScrollKeyRef = useRef("");
   const busyActionStackRef = useRef<Array<{ id: number; label: string }>>([]);
@@ -149,6 +184,12 @@ export default function App() {
     appState,
     hasBridge,
     setAppState
+  });
+  const threadSeenState = useThreadSeenState({
+    workspacePath,
+    projectId: snapshot.project?.id,
+    threads: snapshot.threads,
+    activeThread: snapshot.activeThread
   });
 
   const codeFiles = useMemo(
@@ -382,100 +423,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!workspacePath || typeof window === "undefined") {
-      setThreadSeenState({});
-      return;
-    }
-
-    const storageKey = buildThreadSeenStorageKey(workspacePath);
-
-    try {
-      const raw = window.localStorage.getItem(storageKey);
-
-      if (!raw) {
-        const seeded = Object.fromEntries(
-          snapshot.threads.map((thread) => [thread.id, thread.updatedAt] as const)
-        );
-        setThreadSeenState(seeded);
-        return;
-      }
-
-      const parsed = JSON.parse(raw) as Record<string, string>;
-      const merged = { ...parsed };
-
-      for (const thread of snapshot.threads) {
-        if (!merged[thread.id]) {
-          merged[thread.id] = thread.updatedAt;
-        }
-      }
-
-      setThreadSeenState(merged);
-    } catch {
-      const fallback = Object.fromEntries(
-        snapshot.threads.map((thread) => [thread.id, thread.updatedAt] as const)
-      );
-      setThreadSeenState(fallback);
-    }
-  }, [workspacePath, snapshot.project?.id]);
-
-  useEffect(() => {
-    if (!workspacePath || typeof window === "undefined") {
-      return;
-    }
-
-    try {
-      window.localStorage.setItem(buildThreadSeenStorageKey(workspacePath), JSON.stringify(threadSeenState));
-    } catch {
-      // ignore local persistence failures
-    }
-  }, [threadSeenState, workspacePath]);
-
-  useEffect(() => {
-    if (!workspacePath || !snapshot.threads.length) {
-      return;
-    }
-
-    setThreadSeenState((current) => {
-      let changed = false;
-      const next = { ...current };
-
-      for (const thread of snapshot.threads) {
-        if (!next[thread.id]) {
-          next[thread.id] = thread.updatedAt;
-          changed = true;
-        }
-      }
-
-      return changed ? next : current;
-    });
-  }, [snapshot.threads, workspacePath]);
-
-  useEffect(() => {
     if (typeof document === "undefined") {
       return;
     }
 
     document.title = surfaceTitle === "Lithium" ? "Lithium" : `${surfaceTitle} · Lithium`;
   }, [surfaceTitle]);
-
-  useEffect(() => {
-    const activeThread = snapshot.activeThread;
-
-    if (!workspacePath || !activeThread) {
-      return;
-    }
-
-    setThreadSeenState((current) => {
-      if ((current[activeThread.id] ?? "") === activeThread.updatedAt) {
-        return current;
-      }
-
-      return {
-        ...current,
-        [activeThread.id]: activeThread.updatedAt
-      };
-    });
-  }, [snapshot.activeThread?.id, snapshot.activeThread?.updatedAt, workspacePath]);
 
   useEffect(() => {
     if (surfaceMode !== "chat" || !latestChatItemKey) {
@@ -512,7 +465,7 @@ export default function App() {
       return;
     }
 
-    setSidebarWidth(clamp(appSettings.sidebarWidth, 180, 320));
+    setSidebarWidth(clampSidebarWidth(appSettings.sidebarWidth));
   }, [appSettings.sidebarWidth, appState]);
 
   useEffect(() => {
@@ -524,7 +477,7 @@ export default function App() {
       return;
     }
 
-    setCodeCanvasWidth(clamp(appSettings.codeCanvasWidth, 320, 960));
+    setCodeCanvasWidth(clampCodeCanvasWidth(appSettings.codeCanvasWidth));
   }, [appSettings.codeCanvasWidth, appState]);
 
   useEffect(() => {
@@ -532,7 +485,7 @@ export default function App() {
       return;
     }
 
-    setPaperPreviewWidth(clamp(appSettings.paperPreviewWidth, 420, 1280));
+    setPaperPreviewWidth(clampPaperPreviewWidth(appSettings.paperPreviewWidth));
   }, [appSettings.paperPreviewWidth, appState]);
 
   useEffect(() => {
@@ -980,7 +933,7 @@ export default function App() {
       return;
     }
 
-    const savedWidth = clamp(appSettings.sidebarWidth, 180, 320);
+    const savedWidth = clampSidebarWidth(appSettings.sidebarWidth);
 
     if (savedWidth === sidebarWidth) {
       return;
@@ -1000,7 +953,7 @@ export default function App() {
       return;
     }
 
-    const savedWidth = clamp(appSettings.codeCanvasWidth, 320, 960);
+    const savedWidth = clampCodeCanvasWidth(appSettings.codeCanvasWidth);
 
     if (savedWidth === codeCanvasWidth) {
       return;
@@ -1020,7 +973,7 @@ export default function App() {
       return;
     }
 
-    const savedWidth = clamp(appSettings.paperPreviewWidth, 420, 1280);
+    const savedWidth = clampPaperPreviewWidth(appSettings.paperPreviewWidth);
 
     if (savedWidth === paperPreviewWidth) {
       return;
@@ -1403,8 +1356,7 @@ export default function App() {
           })
         : projectSnapshot;
 
-      setSnapshot(nextSnapshot);
-      await loadWorkspaceFiles(workspacePath);
+      await applySnapshotUpdate(nextSnapshot);
     });
   }
 
@@ -1436,11 +1388,21 @@ export default function App() {
       bypassQueue?: boolean;
       pendingItemId?: string;
       targetThreadId?: string | null;
+      attachmentSnapshot?: AttachmentRecord[];
     } = {}
   ) {
     const rawPrompt = (promptOverride ?? composerValue).trim();
     const latestBuilderTaskPrompt = resolveLatestTaskPrompt(snapshot.latestTask?.prompt, "");
     const targetThreadId = options.targetThreadId ?? activeThreadId;
+    const attachmentsForSend = options.attachmentSnapshot ?? snapshot.activeThreadAttachments;
+    const attachmentArtifacts = buildAttachmentArtifactRefs(
+      attachmentsForSend,
+      workspaceFiles,
+      workspacePath
+    );
+    const optimisticAttachments = attachmentsForSend;
+    const shouldOptimisticallyClearAttachments =
+      optimisticAttachments.length > 0 && Boolean(targetThreadId) && targetThreadId === activeThreadId;
 
     if (!canSubmitComposerPrompt(rawPrompt, latestBuilderTaskPrompt)) {
       if (/^\/build\s*$/i.test(rawPrompt)) {
@@ -1466,7 +1428,8 @@ export default function App() {
         title: "You",
         body: rawPrompt,
         timestamp: new Date().toISOString(),
-        order: chatItems.length + pendingChatItems.length
+        order: chatItems.length + pendingChatItems.length,
+        artifacts: attachmentArtifacts.length ? attachmentArtifacts : undefined
       };
 
       setPendingChatItems((current) => {
@@ -1477,8 +1440,26 @@ export default function App() {
         return [...current, pendingItem];
       });
       setPendingChatThreadId(pendingThreadId);
-      setQueuedChatPrompts((current) => [...current, { id: pendingItemId, prompt: rawPrompt, threadId: targetThreadId }]);
+      setQueuedChatPrompts((current) => [
+        ...current,
+        {
+          id: pendingItemId,
+          prompt: rawPrompt,
+          threadId: targetThreadId,
+          attachments: optimisticAttachments
+        }
+      ]);
       setComposerValue("");
+      if (shouldOptimisticallyClearAttachments) {
+        setSnapshot((current) =>
+          current.activeThreadId === targetThreadId
+            ? {
+                ...current,
+                activeThreadAttachments: []
+              }
+            : current
+        );
+      }
       return;
     }
 
@@ -1489,7 +1470,8 @@ export default function App() {
       title: "You",
       body: rawPrompt,
       timestamp: new Date().toISOString(),
-      order: chatItems.length + pendingChatItems.length
+      order: chatItems.length + pendingChatItems.length,
+      artifacts: attachmentArtifacts.length ? attachmentArtifacts : undefined
     };
 
     setPendingChatItems((current) => {
@@ -1501,6 +1483,16 @@ export default function App() {
     });
     setPendingChatThreadId(pendingThreadId);
     setComposerValue("");
+    if (shouldOptimisticallyClearAttachments) {
+      setSnapshot((current) =>
+        current.activeThreadId === targetThreadId
+          ? {
+              ...current,
+              activeThreadAttachments: []
+            }
+          : current
+      );
+    }
 
     await withBusy("Running chat", async () => {
       try {
@@ -1578,6 +1570,16 @@ export default function App() {
       } catch (nextError) {
         setPendingChatItems((current) => current.filter((item) => item.id !== pendingItemId));
         setComposerValue((current) => (current.trim() ? current : rawPrompt));
+        if (shouldOptimisticallyClearAttachments) {
+          setSnapshot((current) =>
+            current.activeThreadId === targetThreadId && current.activeThreadAttachments.length === 0
+              ? {
+                  ...current,
+                  activeThreadAttachments: optimisticAttachments
+                }
+              : current
+          );
+        }
         throw nextError;
       }
     });
@@ -1598,7 +1600,8 @@ export default function App() {
     void handleSendWithOptions(nextPrompt.prompt, {
       bypassQueue: true,
       pendingItemId: nextPrompt.id,
-      targetThreadId: nextPrompt.threadId
+      targetThreadId: nextPrompt.threadId,
+      attachmentSnapshot: nextPrompt.attachments
     });
   }, [busyAction, queuedChatPrompts, activeThreadId, chatItems.length, pendingChatItems.length]);
 
@@ -1637,18 +1640,8 @@ export default function App() {
         model: input.model,
         reasoningIntensity: input.reasoningIntensity
       });
-      const nextAppState = await window.lithium.getAppState();
-      const nextWorkspacePath = response.probe.workspacePath || nextAppState.selectedWorkspacePath;
-      const files = nextWorkspacePath
-        ? await window.lithium.listWorkspaceFiles(nextWorkspacePath)
-        : [];
-
-      startTransition(() => {
-        setStrategistProbeResult(response);
-        setAppState(nextAppState);
-        setSnapshot(response.snapshot);
-        setWorkspaceFiles(files);
-      });
+      await applySnapshotUpdate(response.snapshot);
+      setStrategistProbeResult(response);
 
       if (response.error) {
         setError(response.error);
@@ -1666,7 +1659,7 @@ export default function App() {
         workspacePath,
         runId: snapshot.latestRun?.id
       });
-      setSnapshot(nextSnapshot);
+      await applySnapshotUpdate(nextSnapshot);
     });
   }
 
@@ -1680,7 +1673,7 @@ export default function App() {
         workspacePath,
         runId: snapshot.latestRun?.id
       });
-      setSnapshot(nextSnapshot);
+      await applySnapshotUpdate(nextSnapshot);
     });
   }
 
@@ -1711,9 +1704,8 @@ export default function App() {
       setPaperDirty(false);
 
       const nextSnapshot = await window.lithium.compilePaper(workspacePath);
-      setSnapshot(nextSnapshot);
+      await applySnapshotUpdate(nextSnapshot);
       setPdfPreviewVersion((current) => current + 1);
-      await loadWorkspaceFiles(workspacePath);
       setDrawerTab("paper");
     });
   }
@@ -1771,17 +1763,7 @@ export default function App() {
       threadId: snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? undefined,
       filePaths
     });
-    const nextAppState = await window.lithium.getAppState();
-    const nextWorkspacePath = nextAppState.selectedWorkspacePath || nextSnapshot.project?.workspacePath || "";
-    const files = nextWorkspacePath
-      ? await window.lithium.listWorkspaceFiles(nextWorkspacePath)
-      : [];
-
-    startTransition(() => {
-      setAppState(nextAppState);
-      setSnapshot(nextSnapshot);
-      setWorkspaceFiles(files);
-    });
+    await applySnapshotUpdate(nextSnapshot);
   }
 
   async function handleDropAttachments(filePaths: string[]) {
@@ -1804,8 +1786,7 @@ export default function App() {
         workspacePath,
         attachmentId
       });
-      setSnapshot(nextSnapshot);
-      await loadWorkspaceFiles(workspacePath);
+      await applySnapshotUpdate(nextSnapshot);
     });
   }
 
@@ -2213,17 +2194,19 @@ export default function App() {
                           role="separator"
                         />
                         <section className="code-canvas-shell">
-                          <ArtifactInspector
-                            changedFiles={changedFiles}
-                            file={selectedInspectorFile}
-                            onClose={handleCloseArtifact}
-                            onOpenWorkbench={handleOpenInspectorWorkbench}
-                            onRefresh={async () => {
-                              await refreshWorkspace(workspacePath);
-                            }}
-                            themeMode={resolvedTheme}
-                            workspacePath={workspacePath}
-                          />
+                          <Suspense fallback={SURFACE_FALLBACK}>
+                            <ArtifactInspector
+                              changedFiles={changedFiles}
+                              file={selectedInspectorFile}
+                              onClose={handleCloseArtifact}
+                              onOpenWorkbench={handleOpenInspectorWorkbench}
+                              onRefresh={async () => {
+                                await refreshWorkspace(workspacePath);
+                              }}
+                              themeMode={resolvedTheme}
+                              workspacePath={workspacePath}
+                            />
+                          </Suspense>
                         </section>
                       </>
                     ) : null}
@@ -2238,23 +2221,25 @@ export default function App() {
                           role="separator"
                         />
                         <section className="code-canvas-shell">
-                          <CodeWorkbench
-                            busy={Boolean(busyAction)}
-                            codeDraft={codeDraft}
-                            codeFilesCount={codeExplorerFiles.length}
-                            codeTitle={activeCodeTab?.label ?? ""}
-                            codeTabs={codeTabs}
-                            onChangeCode={updateCodeDraft}
-                            onCloseCanvas={() => setCodeCanvasOpen(false)}
-                            onCloseCodeTab={handleCloseCodeTab}
-                            onCreateCodeFile={() => void handleNewCodeFile()}
-                            onOpenWorkspace={() => void handlePickWorkspace()}
-                            onSelectCodePath={setSelectedCodePath}
-                            projectReady={projectReady}
-                            selectedCodePath={selectedCodePath}
-                            themeMode={resolvedTheme}
-                            workspacePath={workspacePath}
-                          />
+                          <Suspense fallback={SURFACE_FALLBACK}>
+                            <CodeWorkbench
+                              busy={Boolean(busyAction)}
+                              codeDraft={codeDraft}
+                              codeFilesCount={codeExplorerFiles.length}
+                              codeTitle={activeCodeTab?.label ?? ""}
+                              codeTabs={codeTabs}
+                              onChangeCode={updateCodeDraft}
+                              onCloseCanvas={() => setCodeCanvasOpen(false)}
+                              onCloseCodeTab={handleCloseCodeTab}
+                              onCreateCodeFile={() => void handleNewCodeFile()}
+                              onOpenWorkspace={() => void handlePickWorkspace()}
+                              onSelectCodePath={setSelectedCodePath}
+                              projectReady={projectReady}
+                              selectedCodePath={selectedCodePath}
+                              themeMode={resolvedTheme}
+                              workspacePath={workspacePath}
+                            />
+                          </Suspense>
                         </section>
                       </>
                     ) : null}
@@ -2264,79 +2249,87 @@ export default function App() {
             ) : null}
 
             {surfaceMode === "memory" ? (
-              <ContextWorkbench
-                activeThread={snapshot.activeThread}
-                busy={Boolean(busyAction)}
-                contextBundlePreview={contextBundlePreview}
-                latestDecision={snapshot.latestDecision}
-                latestRun={snapshot.latestRun}
-                memoryDraft={memoryDraft}
-                onChangeMemoryField={(field, value) =>
-                  setMemoryDraft((current) => ({
-                    ...current,
-                    [field]: value
-                  }))
-                }
-                onChangeThreadMemory={(value) => setThreadMemoryDraft({ memory: value })}
-                onSave={() => void handleSaveMemory()}
-                projectReady={projectReady}
-                sessionSummary={snapshot.memory?.sessionSummary || ""}
-                threadMemory={threadMemoryDraft.memory}
-              />
+              <Suspense fallback={SURFACE_FALLBACK}>
+                <ContextWorkbench
+                  activeThread={snapshot.activeThread}
+                  busy={Boolean(busyAction)}
+                  contextBundlePreview={contextBundlePreview}
+                  latestDecision={snapshot.latestDecision}
+                  latestRun={snapshot.latestRun}
+                  memoryDraft={memoryDraft}
+                  onChangeMemoryField={(field, value) =>
+                    setMemoryDraft((current) => ({
+                      ...current,
+                      [field]: value
+                    }))
+                  }
+                  onChangeThreadMemory={(value) => setThreadMemoryDraft({ memory: value })}
+                  onSave={() => void handleSaveMemory()}
+                  projectReady={projectReady}
+                  sessionSummary={snapshot.memory?.sessionSummary || ""}
+                  threadMemory={threadMemoryDraft.memory}
+                />
+              </Suspense>
             ) : null}
 
             {WORKBENCH_SURFACES_ENABLED && surfaceMode === "paper" ? (
-              <PaperWorkbench
-                busy={Boolean(busyAction)}
-                jump={paperPreviewJump}
-                onChangePaper={(value) => {
-                  paperDraftRef.current = value;
-                  setPaperDraft(value);
-                  setPaperDirty(true);
-                }}
-                onNavigateSource={(target) => {
-                  void handlePaperPreviewNavigateSource(target);
-                }}
-                onResizePreview={() => setResizeTarget("paper-preview")}
-                paperDraft={paperDraft}
-                paperFocusLine={paperFocusLine}
-                paperPreviewBytes={pdfPreviewBytes}
-                paperTitle={paperTitle}
-                projectReady={projectReady}
-                selectedPaperPath={selectedPaperPath}
-                storageKey={pdfPreviewPath ?? selectedPaperPath}
-                style={paperSurfaceStyle}
-                themeMode={resolvedTheme}
-              />
+              <Suspense fallback={SURFACE_FALLBACK}>
+                <PaperWorkbench
+                  busy={Boolean(busyAction)}
+                  jump={paperPreviewJump}
+                  onChangePaper={(value) => {
+                    paperDraftRef.current = value;
+                    setPaperDraft(value);
+                    setPaperDirty(true);
+                  }}
+                  onNavigateSource={(target) => {
+                    void handlePaperPreviewNavigateSource(target);
+                  }}
+                  onResizePreview={() => setResizeTarget("paper-preview")}
+                  paperDraft={paperDraft}
+                  paperFocusLine={paperFocusLine}
+                  paperPreviewBytes={pdfPreviewBytes}
+                  paperTitle={paperTitle}
+                  projectReady={projectReady}
+                  selectedPaperPath={selectedPaperPath}
+                  storageKey={pdfPreviewPath ?? selectedPaperPath}
+                  style={paperSurfaceStyle}
+                  themeMode={resolvedTheme}
+                />
+              </Suspense>
             ) : null}
           </section>
         </section>
       </main>
 
       {appState && onboardingVisible ? (
-        <OnboardingPanel
-          appState={appState}
-          onDismiss={() => void dismissOnboarding()}
-          onOpenWorkspace={() => void handlePickWorkspace()}
-          projectReady={projectReady}
-        />
+        <Suspense fallback={PANEL_FALLBACK}>
+          <OnboardingPanel
+            appState={appState}
+            onDismiss={() => void dismissOnboarding()}
+            onOpenWorkspace={() => void handlePickWorkspace()}
+            projectReady={projectReady}
+          />
+        </Suspense>
       ) : null}
 
       {appState && settingsOpen ? (
-        <SettingsPanel
-          appState={appState}
-          onConnectRemoteWorkspace={(profileId) => void handleConnectRemoteWorkspace(profileId)}
-          onClose={closeSettings}
-          onReopenOnboarding={() => void reopenOnboarding()}
-          onRunStrategistProbe={(input) => void handleRunStrategistProbe(input)}
-          onSyncRemoteWorkspace={() => void handleSyncRemoteWorkspace()}
-          onStartStrategistSignIn={() => void handleStrategistSignIn()}
-          onSetTheme={(themePreference) => void updateAppSettings({ themePreference })}
-          onUpdateSettings={updateAppSettings}
-          settings={appSettings}
-          strategistProbeBusy={busyAction === "Running strategist browser probe"}
-          strategistProbeResult={strategistProbeResult}
-        />
+        <Suspense fallback={PANEL_FALLBACK}>
+          <SettingsPanel
+            appState={appState}
+            onConnectRemoteWorkspace={(profileId) => void handleConnectRemoteWorkspace(profileId)}
+            onClose={closeSettings}
+            onReopenOnboarding={() => void reopenOnboarding()}
+            onRunStrategistProbe={(input) => void handleRunStrategistProbe(input)}
+            onSyncRemoteWorkspace={() => void handleSyncRemoteWorkspace()}
+            onStartStrategistSignIn={() => void handleStrategistSignIn()}
+            onSetTheme={(themePreference) => void updateAppSettings({ themePreference })}
+            onUpdateSettings={updateAppSettings}
+            settings={appSettings}
+            strategistProbeBusy={busyAction === "Running strategist browser probe"}
+            strategistProbeResult={strategistProbeResult}
+          />
+        </Suspense>
       ) : null}
 
       {threadMenuOpenId && threadMenuPosition ? (
@@ -2503,16 +2496,4 @@ function isGenericChatProgress(progress: ChatProgressInspection) {
     details.length === 0 ||
     details.every((detail) => detail === "Reviewing the latest thread state and choosing the next move.")
   );
-}
-
-function buildThreadSeenStorageKey(workspacePath: string) {
-  return `lithium:thread-seen:${encodeURIComponent(workspacePath)}`;
-}
-
-function isThreadUnread(lastSeenAt: string | undefined, updatedAt: string) {
-  if (!lastSeenAt) {
-    return false;
-  }
-
-  return updatedAt > lastSeenAt;
 }

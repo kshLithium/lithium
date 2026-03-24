@@ -82,14 +82,8 @@ export class ResidentOrchestratorRunner {
     const turnDir = path.join(requestDir, "resident-turns", randomUUID());
     const promptPath = path.join(turnDir, "prompt.md");
     const exitPath = path.join(turnDir, "exit.code");
+    const scriptPath = path.join(turnDir, "run-turn.sh");
     const startedAt = new Date().toISOString();
-
-    await mkdir(turnDir, { recursive: true });
-    await Promise.all([
-      writeFile(promptPath, composedPrompt, "utf8"),
-      this.resetTurnFiles(options.requestPaths, options.stdoutPath, options.stderrPath, options.outputPath, exitPath)
-    ]);
-
     const command = this.fallbackRunner.buildCommand(
       options.workspacePath,
       options.sessionId,
@@ -99,13 +93,27 @@ export class ResidentOrchestratorRunner {
       normalizeReasoning(options.reasoningEffort),
       "stdin"
     );
-    const shellCommand = buildResidentShellCommand({
-      command,
-      promptPath,
-      stdoutPath: options.stdoutPath,
-      stderrPath: options.stderrPath,
-      exitPath
-    });
+
+    await mkdir(turnDir, { recursive: true });
+    await Promise.all([
+      writeFile(promptPath, composedPrompt, "utf8"),
+      writeFile(
+        scriptPath,
+        buildResidentShellScript({
+          command,
+          promptPath,
+          stdoutPath: options.stdoutPath,
+          stderrPath: options.stderrPath,
+          exitPath
+        }),
+        {
+          encoding: "utf8",
+          mode: 0o700
+        }
+      ),
+      this.resetTurnFiles(options.requestPaths, options.stdoutPath, options.stderrPath, options.outputPath, exitPath)
+    ]);
+    const shellCommand = buildResidentShellCommand(scriptPath);
 
     if (!writeToLiveTerminal(options.workspacePath, host.id, `${shellCommand}\r`)) {
       throw new Error("Resident orchestrator shell is unavailable.");
@@ -232,7 +240,7 @@ export class ResidentOrchestratorRunner {
   }
 }
 
-function buildResidentShellCommand(input: {
+function buildResidentShellScript(input: {
   command: { command: string; args: string[]; cwd: string };
   promptPath: string;
   stdoutPath: string;
@@ -242,11 +250,16 @@ function buildResidentShellCommand(input: {
   const quotedCommand = [input.command.command, ...input.command.args].map(toShellLiteral).join(" ");
 
   return [
+    "#!/bin/sh",
     `cd ${toShellLiteral(input.command.cwd)}`,
     `${quotedCommand} < ${toShellLiteral(input.promptPath)} > ${toShellLiteral(input.stdoutPath)} 2> ${toShellLiteral(input.stderrPath)}`,
     `status=$?`,
     `printf '%s' "$status" > ${toShellLiteral(input.exitPath)}`
-  ].join("; ");
+  ].join("\n");
+}
+
+function buildResidentShellCommand(scriptPath: string) {
+  return `sh ${toShellLiteral(scriptPath)}`;
 }
 
 function hostSessionId(workspacePath: string, hostKey?: string) {

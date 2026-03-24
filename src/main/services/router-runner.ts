@@ -1,5 +1,5 @@
-import { readFile, stat } from "node:fs/promises";
 import type { ChatRouteDecision, CommandSpec } from "../../shared/types";
+import { readTextFileIfExists } from "./fs-utils";
 import { runCommand } from "./process-runner";
 import { parseRouterOutput } from "./protocol";
 
@@ -134,19 +134,6 @@ export class RouterRunner {
   }
 
   private async readMaybe(filePath: string) {
-    if (!(await this.exists(filePath))) {
-      return "";
-    }
-
-    return await readFile(filePath, "utf8");
-  }
-
-  private async exists(targetPath: string) {
-    try {
-      await stat(targetPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await readTextFileIfExists(filePath);
   }
 }

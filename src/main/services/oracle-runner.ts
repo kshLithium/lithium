@@ -1,8 +1,9 @@
-import { readFile, readdir, rm, stat } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import type { CommandSpec, OracleModel, OracleThinkingTime } from "../../shared/types";
+import { pathExists, readTextFileIfExists, statIfExists } from "./fs-utils";
 import {
   ORACLE_BROWSER_COOKIE_DB_PATH,
   ORACLE_BROWSER_INLINE_COOKIES_PATH,
@@ -116,7 +117,7 @@ export class OracleRunner {
 
     const oracleCommand = await resolveLocalOracleCommand();
     const inlineCookiesPath =
-      launch.engine === "browser" && (await this.exists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
+      launch.engine === "browser" && (await pathExists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
         ? ORACLE_BROWSER_INLINE_COOKIES_PATH
         : undefined;
     const commandEnv =
@@ -201,7 +202,7 @@ export class OracleRunner {
 
     const oracleCommand = await resolveLocalOracleCommand();
     const inlineCookiesPath =
-      launch.engine === "browser" && (await this.exists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
+      launch.engine === "browser" && (await pathExists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
         ? ORACLE_BROWSER_INLINE_COOKIES_PATH
         : undefined;
     const commandEnv =
@@ -408,20 +409,7 @@ export class OracleRunner {
   }
 
   private async readMaybe(filePath: string) {
-    if (!(await this.exists(filePath))) {
-      return "";
-    }
-
-    return readFile(filePath, "utf8");
-  }
-
-  private async exists(targetPath: string) {
-    try {
-      await stat(targetPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await readTextFileIfExists(filePath);
   }
 
   private async runWithRetries(
@@ -681,11 +669,8 @@ export class OracleRunner {
 
 async function resolveLocalOracleCommand() {
   for (const candidate of LOCAL_ORACLE_BIN_CANDIDATES) {
-    try {
-      await stat(candidate);
+    if (await pathExists(candidate)) {
       return candidate;
-    } catch {
-      // Keep scanning.
     }
   }
 
@@ -779,7 +764,7 @@ async function listOracleSessionArtifactCandidates(sessionId: string, fileName: 
       .filter((entry) => entry.name === sessionId || entry.name.startsWith(`${sessionId}-`))
       .map(async (entry) => {
         const artifactPath = path.join(sessionsDir, entry.name, fileName);
-        const metadata = await stat(artifactPath).catch(() => null);
+        const metadata = await statIfExists(artifactPath);
 
         if (!metadata) {
           return null;

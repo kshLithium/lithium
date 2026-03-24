@@ -294,7 +294,22 @@ describe("app utils", () => {
         body: "아직 baseline 개선은 확정되지 않았습니다.",
         createdAt: "2026-03-24T00:00:02.000Z"
       },
-      attachments: [],
+      attachments: [
+        {
+          id: "ATT001",
+          threadId: "TH001",
+          name: "reviewer-note.md",
+          relativePath: "attachments/TH001/reviewer-note.md",
+          sourcePath: "/tmp/imports/reviewer-note.md",
+          kind: "text",
+          sizeBytes: 128,
+          excerpt: "검토 메모",
+          importedAt: "2026-03-24T00:00:00.500Z",
+          updatedAt: "2026-03-24T00:00:02.500Z",
+          consumedAt: "2026-03-24T00:00:02.500Z",
+          conversationEntryId: "M001"
+        }
+      ],
       activeThreadAttachments: [],
       decisions: [
         {
@@ -332,9 +347,124 @@ describe("app utils", () => {
       logs: []
     };
 
-    expect(buildChatItems(snapshot, []).map((item) => item.body)).toEqual([
+    const items = buildChatItems(snapshot, [], "/tmp/workspace");
+
+    expect(items.map((item) => item.body)).toEqual([
       "이어서 정리해줘",
       "아직 baseline 개선은 확정되지 않았습니다."
+    ]);
+    expect(items[0]?.artifacts).toEqual([
+      {
+        id: "ATT001",
+        path: "/tmp/workspace/attachments/TH001/reviewer-note.md",
+        relativePath: "attachments/TH001/reviewer-note.md",
+        label: "reviewer-note.md",
+        kind: "artifact",
+        artifactKind: "text"
+      }
+    ]);
+  });
+
+  it("replays consumed attachments on strategist prompt bubbles when reconstructing legacy chat", () => {
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "project-1",
+        name: "Lithium",
+        workspacePath: "/tmp/workspace",
+        lithiumPath: "/tmp/workspace/.lithium",
+        manuscriptPath: "/tmp/workspace/paper/main.tex",
+        oracleModel: "gpt-5.4",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Summary",
+          createdAt: "2026-03-24T00:00:00.000Z",
+          updatedAt: "2026-03-24T00:00:00.000Z"
+        }
+      ],
+      activeThreadId: "TH001",
+      activeThread: {
+        id: "TH001",
+        title: "Main thread",
+        summary: "Summary",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z"
+      },
+      conversationEntries: [],
+      latestConversationEntry: null,
+      attachments: [
+        {
+          id: "ATT100",
+          threadId: "TH001",
+          name: "notes.md",
+          relativePath: "attachments/TH001/notes.md",
+          sourcePath: "/tmp/imports/notes.md",
+          kind: "text",
+          sizeBytes: 256,
+          excerpt: "baseline notes",
+          importedAt: "2026-03-24T00:00:01.000Z",
+          updatedAt: "2026-03-24T00:00:03.000Z",
+          consumedAt: "2026-03-24T00:00:03.000Z",
+          decisionId: "D001"
+        }
+      ],
+      activeThreadAttachments: [],
+      decisions: [
+        {
+          id: "D001",
+          threadId: "TH001",
+          prompt: "첨부 메모를 읽고 다음 실험을 계획해줘",
+          rawOutput: "SUMMARY: Baseline refresh",
+          summary: "Baseline refresh",
+          rationale: "Need the attachment for context.",
+          model: "gpt-5.4",
+          engine: "browser",
+          status: "completed",
+          command: { command: "npx", args: ["oracle"], cwd: "/tmp/workspace" },
+          stdoutPath: "",
+          stderrPath: "",
+          outputPath: "",
+          createdAt: "2026-03-24T00:00:03.000Z"
+        }
+      ],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      terminalSessions: [],
+      latestTerminalSession: null,
+      manuscript: null,
+      automationSessions: [],
+      automationSteps: [],
+      automationCheckpoints: [],
+      latestAutomationSession: null,
+      latestAutomationCheckpoint: null,
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, [], "/tmp/workspace");
+
+    expect(items[0]?.body).toBe("첨부 메모를 읽고 다음 실험을 계획해줘");
+    expect(items[0]?.artifacts).toEqual([
+      {
+        id: "ATT100",
+        path: "/tmp/workspace/attachments/TH001/notes.md",
+        relativePath: "attachments/TH001/notes.md",
+        label: "notes.md",
+        kind: "artifact",
+        artifactKind: "text"
+      }
     ]);
   });
 

@@ -102,9 +102,9 @@ async function main() {
   );
   const appName = `Lithium Research Probe ${Date.now()}`;
   const firstPrompt =
-    "README, experiments/ablation-summary.md, paper/sections/results.md, 첨부한 reviewer note를 함께 보고 지금 가장 중요한 연구 질문 1개를 정리해줘.";
+    "/research README, experiments/ablation-summary.md, paper/sections/results.md, 첨부한 reviewer note를 함께 보고 지금 가장 중요한 연구 질문 1개를 정리해줘.";
   const secondPrompt =
-    "좋아. 그 연구 질문을 기준으로 autopilot이 바로 실행해야 할 bounded next step 1개와 성공 기준 2개를 제안해줘.";
+    "/research 좋아. 그 연구 질문을 기준으로 autopilot이 바로 실행해야 할 bounded next step 1개와 성공 기준 2개를 제안해줘.";
   const resumePrompt =
     "좋아. 방금 나온 결과를 이어서, 논문 초안과 실험 계획이 더 일관되도록 한 단계만 더 진행해줘.";
 
@@ -460,15 +460,13 @@ async function createWorkspace() {
 
 async function sendPrompt(page: Page, prompt: string) {
   const textarea = page.locator("textarea.composer-input");
-  const sendButton = page.locator("button.send-button");
 
   await textarea.click();
   await textarea.fill(prompt);
   await page.waitForTimeout(250);
-  await sendButton.waitFor({ state: "visible", timeout: 10_000 });
 
-  if (await sendButton.isDisabled()) {
-    throw new Error("Composer send button stayed disabled.");
+  if ((await textarea.inputValue()).trim() !== prompt.trim()) {
+    throw new Error("Composer value did not match the intended prompt.");
   }
 
   await textarea.press("Enter");

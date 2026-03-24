@@ -1,7 +1,8 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import type { BuilderModel, BuilderReasoningEffort, CommandSpec } from "../../shared/types";
+import { readTextFileIfExists } from "./fs-utils";
 import { runCommand } from "./process-runner";
 import {
   parseOrchestratorDelegationRequest,
@@ -201,20 +202,7 @@ export class OrchestratorRunner {
   }
 
   private async readMaybe(filePath: string) {
-    if (!(await this.exists(filePath))) {
-      return "";
-    }
-
-    return readFile(filePath, "utf8");
-  }
-
-  private async exists(targetPath: string) {
-    try {
-      await stat(targetPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await readTextFileIfExists(filePath);
   }
 }
 

@@ -11,6 +11,7 @@ import {
   resolveReadOnlyExtension,
   type EditorCompartments
 } from "./editor/codemirror-runtime";
+import { rememberEditorState } from "./editor/state-cache";
 
 type EditorSurfaceProps = {
   path: string;
@@ -77,11 +78,11 @@ export function EditorSurface(props: EditorSurfaceProps) {
 
     editorRef.current = view;
     pathRef.current = props.path;
-    stateCacheRef.current.set(props.path, view.state);
+    rememberEditorState(stateCacheRef.current, props.path, view.state);
 
     return () => {
       if (editorRef.current) {
-        stateCacheRef.current.set(pathRef.current, editorRef.current.state);
+        rememberEditorState(stateCacheRef.current, pathRef.current, editorRef.current.state);
         editorRef.current.destroy();
         editorRef.current = null;
       }
@@ -95,7 +96,7 @@ export function EditorSurface(props: EditorSurfaceProps) {
       return;
     }
 
-    stateCacheRef.current.set(pathRef.current, view.state);
+    rememberEditorState(stateCacheRef.current, pathRef.current, view.state);
     const cachedState = stateCacheRef.current.get(props.path);
 
     if (cachedState) {
@@ -119,7 +120,7 @@ export function EditorSurface(props: EditorSurfaceProps) {
     }
 
     pathRef.current = props.path;
-    stateCacheRef.current.set(props.path, view.state);
+    rememberEditorState(stateCacheRef.current, props.path, view.state);
   }, [languageId, props.disabled, props.path, props.themeMode, props.value, props.wrap]);
 
   useEffect(() => {
@@ -137,7 +138,7 @@ export function EditorSurface(props: EditorSurfaceProps) {
         compartmentsRef.current.wrap.reconfigure(props.wrap ? EditorView.lineWrapping : [])
       ]
     });
-    stateCacheRef.current.set(props.path, view.state);
+    rememberEditorState(stateCacheRef.current, props.path, view.state);
   }, [languageId, props.disabled, props.path, props.themeMode, props.wrap]);
 
   useEffect(() => {
@@ -162,7 +163,7 @@ export function EditorSurface(props: EditorSurfaceProps) {
       }
     });
     externalUpdateRef.current = false;
-    stateCacheRef.current.set(props.path, view.state);
+    rememberEditorState(stateCacheRef.current, props.path, view.state);
   }, [props.path, props.value]);
 
   return (

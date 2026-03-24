@@ -3905,9 +3905,33 @@ input:disabled {
   background: var(--surface-frost);
 }
 
-:root[data-theme="dark"] .message.user,
 :root[data-theme="dark"] .thread-row.active {
   background: var(--bubble-user);
+}
+
+:root[data-theme="dark"] .message.user .message-body {
+  border-color: rgba(148, 163, 184, 0.14);
+  background: color-mix(in srgb, var(--panel-raised) 90%, #25303a 10%);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-theme="dark"] .composer-card {
+  border-color: rgba(148, 163, 184, 0.16);
+  background: color-mix(in srgb, var(--panel-raised) 94%, #0d1319 6%);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(16px) saturate(118%);
+  -webkit-backdrop-filter: blur(16px) saturate(118%);
+}
+
+:root[data-theme="dark"] .composer-card::before {
+  background: none;
+}
+
+:root[data-theme="dark"] .composer-card:focus-within {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: color-mix(in srgb, var(--panel) 92%, #141b23 8%);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+  transform: none;
 }
 
 :root[data-theme="dark"] .rail-button,
@@ -4000,9 +4024,33 @@ input:disabled {
     background: var(--surface-frost);
   }
 
-  :root[data-theme="system"] .message.user,
   :root[data-theme="system"] .thread-row.active {
     background: var(--bubble-user);
+  }
+
+  :root[data-theme="system"] .message.user .message-body {
+    border-color: rgba(148, 163, 184, 0.14);
+    background: color-mix(in srgb, var(--panel-raised) 90%, #25303a 10%);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  }
+
+  :root[data-theme="system"] .composer-card {
+    border-color: rgba(148, 163, 184, 0.16);
+    background: color-mix(in srgb, var(--panel-raised) 94%, #0d1319 6%);
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
+    backdrop-filter: blur(16px) saturate(118%);
+    -webkit-backdrop-filter: blur(16px) saturate(118%);
+  }
+
+  :root[data-theme="system"] .composer-card::before {
+    background: none;
+  }
+
+  :root[data-theme="system"] .composer-card:focus-within {
+    border-color: rgba(148, 163, 184, 0.22);
+    background: color-mix(in srgb, var(--panel) 92%, #141b23 8%);
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+    transform: none;
   }
 
   :root[data-theme="system"] .rail-button,

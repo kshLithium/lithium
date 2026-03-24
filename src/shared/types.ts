@@ -526,6 +526,10 @@ export type AttachmentRecord = {
   excerpt: string;
   importedAt: string;
   updatedAt: string;
+  consumedAt?: string;
+  conversationEntryId?: string;
+  decisionId?: string;
+  runId?: string;
 };
 
 export type ConversationEntryRole = "user" | "assistant" | "system";
@@ -543,6 +547,7 @@ export type ConversationEntryRecord = {
   source: ConversationEntrySource;
   body: string;
   createdAt: string;
+  attachmentIds?: string[];
   decisionId?: string;
   runId?: string;
   automationSessionId?: string;
@@ -992,6 +997,6 @@ export type LithiumApi = {
   closeTerminalSession: (request: TerminalSessionRequest) => Promise<TerminalSessionState | null>;
   onTerminalEvent: (listener: (event: TerminalEvent) => void) => () => void;
   onAppCommand: (listener: (command: AppCommand) => void) => () => void;
-  updateAppSettings: (request: AppSettingsUpdate) => Promise<AppSettings>;
+  updateAppSettings: (request: AppSettingsUpdate) => Promise<RuntimeAppState>;
   toggleFullscreen: () => Promise<boolean>;
 };
