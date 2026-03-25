@@ -10,14 +10,15 @@ import {
 } from "./terminal-pty-registry";
 import {
   OrchestratorRunner,
-  type OrchestratorRequestPaths,
   type OrchestratorRunOptions,
   type OrchestratorRunResult
 } from "./orchestrator-runner";
 import {
-  parseOrchestratorDelegationRequest,
-  type OrchestratorDelegationDirective
-} from "./orchestrator-directives";
+  parseCodexThreadId,
+  readOrchestratorDelegationRequests,
+  resetOrchestratorTurnFiles,
+  type OrchestratorRequestPaths
+} from "./orchestrator-io";
 
 type ResidentTurnOptions = Omit<OrchestratorRunOptions, "stdoutPath" | "stderrPath" | "outputPath"> & {
   stdoutPath: string;
@@ -111,7 +112,12 @@ export class ResidentOrchestratorRunner {
           mode: 0o700
         }
       ),
-      this.resetTurnFiles(options.requestPaths, options.stdoutPath, options.stderrPath, options.outputPath, exitPath)
+      resetOrchestratorTurnFiles(options.requestPaths, [
+        options.stdoutPath,
+        options.stderrPath,
+        options.outputPath,
+        exitPath
+      ])
     ]);
     const shellCommand = buildResidentShellCommand(scriptPath);
 
@@ -125,7 +131,7 @@ export class ResidentOrchestratorRunner {
     const finalMessage =
       (await readMaybe(options.outputPath)).trim() ||
       [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").trim();
-    const delegations = await this.readDelegationRequests(options.requestPaths);
+    const delegations = await readOrchestratorDelegationRequests(options.requestPaths);
     const primaryDelegation = delegations[0] ?? null;
 
     return {
@@ -137,7 +143,7 @@ export class ResidentOrchestratorRunner {
       stdout,
       stderr,
       finalMessage,
-      sessionId: parseThreadId(stdout) || options.sessionId || null,
+      sessionId: parseCodexThreadId(stdout) || options.sessionId || null,
       requestedLane: primaryDelegation?.lane ?? null,
       delegatedPrompt: primaryDelegation?.prompt ?? "",
       delegation: primaryDelegation,
@@ -176,25 +182,6 @@ export class ResidentOrchestratorRunner {
     await rm(hostTranscriptPath(workspacePath, hostKey), { force: true }).catch(() => undefined);
   }
 
-  private async resetTurnFiles(
-    requestPaths: OrchestratorRequestPaths,
-    stdoutPath: string,
-    stderrPath: string,
-    outputPath: string,
-    exitPath: string
-  ) {
-    await Promise.all([
-      mkdir(path.dirname(requestPaths.builder), { recursive: true }),
-      rm(requestPaths.builder, { force: true }),
-      rm(requestPaths.strategist, { force: true }),
-      rm(requestPaths.automation, { force: true }),
-      rm(stdoutPath, { force: true }),
-      rm(stderrPath, { force: true }),
-      rm(outputPath, { force: true }),
-      rm(exitPath, { force: true })
-    ]);
-  }
-
   private async waitForExitCode(
     workspacePath: string,
     hostKey: string | undefined,
@@ -217,27 +204,6 @@ export class ResidentOrchestratorRunner {
     }
   }
 
-  private async readDelegationRequests(requestPaths: OrchestratorRequestPaths) {
-    const files: Array<[OrchestratorRunResult["requestedLane"], string]> = [
-      ["builder", requestPaths.builder],
-      ["strategist", requestPaths.strategist],
-      ["automation", requestPaths.automation]
-    ];
-    const delegations: OrchestratorDelegationDirective[] = [];
-
-    for (const [lane, filePath] of files) {
-      const raw = (await readMaybe(filePath)).trim();
-
-      if (raw && lane) {
-        const directive = parseOrchestratorDelegationRequest(lane, raw);
-        if (directive) {
-          delegations.push(directive);
-        }
-      }
-    }
-
-    return delegations;
-  }
 }
 
 function buildResidentShellScript(input: {
@@ -283,27 +249,6 @@ async function readMaybe(filePath: string) {
   } catch {
     return "";
   }
-}
-
-function parseThreadId(stdout: string) {
-  const lines = stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  for (const line of lines) {
-    try {
-      const event = JSON.parse(line) as { type?: string; thread_id?: string };
-
-      if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id.trim()) {
-        return event.thread_id.trim();
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return "";
 }
 
 function normalizeOrchestratorModel(model?: BuilderModel): BuilderModel {

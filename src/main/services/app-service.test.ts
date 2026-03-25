@@ -4275,6 +4275,25 @@ describe("AppService", () => {
     expect(restoredAlpha.memory?.projectBrief).toBe("Shared research brief.");
   });
 
+  it("refreshes the canonical context pack after saving a workspace file", async () => {
+    const workspace = await createWorkspace();
+    const app = new AppService(workspace);
+
+    await app.initProject(workspace);
+    await app.saveWorkspaceFile({
+      workspacePath: workspace,
+      path: "aaa-notes.md",
+      content: "Fresh note from the editor.\n"
+    });
+
+    const context = await app.readWorkspaceFile({
+      workspacePath: workspace,
+      path: ".lithium/context/current-context.md"
+    });
+
+    expect(context.content).toContain("aaa-notes.md");
+  });
+
   it("imports and removes thread attachments while rebuilding the active context pack", async () => {
     const workspace = await createWorkspace();
     const sourceDir = await createTempDir("lithium-app-attachment-source-");
@@ -4572,6 +4591,42 @@ describe("AppService", () => {
       ([slug]) => slug
     );
     expect(terminatedSlugs.every((slug) => /^ors-strat-/.test(slug))).toBe(true);
+  });
+
+  it("refreshes strategist context freshness after a manual workspace edit", async () => {
+    const workspace = await createWorkspace();
+    const oracleRunner = {
+      consult: vi.fn(async () => ({
+        command: { command: "npx", args: ["oracle"], cwd: workspace },
+        startedAt: "2026-03-18T03:04:00.000Z",
+        endedAt: "2026-03-18T03:04:03.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        outputText: "SUMMARY: Strategist response."
+      }))
+    };
+    const app = new AppService(workspace, { oracleRunner });
+
+    await app.initProject(workspace);
+    const firstSnapshot = await app.consultStrategist({
+      workspacePath: workspace,
+      prompt: "첫 번째 질문."
+    });
+    const firstFingerprint = firstSnapshot.activeThread?.strategistContextFingerprint;
+
+    expect(firstFingerprint).toBeTruthy();
+
+    await writeFile(path.join(workspace, "manual-note.md"), "A manual edit outside Lithium.\n", "utf8");
+
+    const secondSnapshot = await app.consultStrategist({
+      workspacePath: workspace,
+      prompt: "두 번째 질문."
+    });
+
+    expect(secondSnapshot.activeThread?.strategistContextFingerprint).toBeTruthy();
+    expect(secondSnapshot.activeThread?.strategistContextFingerprint).not.toBe(firstFingerprint);
   });
 
   it("does not attach code files when the prompt explicitly says research first and code later", async () => {

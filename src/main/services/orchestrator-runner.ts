@@ -1,21 +1,17 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdir, rm } from "node:fs/promises";
 import type { BuilderModel, BuilderReasoningEffort, CommandSpec } from "../../shared/types";
 import { readTextFileIfExists } from "./fs-utils";
 import { runCommand } from "./process-runner";
+import { type OrchestratorDelegationDirective } from "./orchestrator-directives";
 import {
-  parseOrchestratorDelegationRequest,
-  type OrchestratorDelegationDirective
-} from "./orchestrator-directives";
+  parseCodexThreadId,
+  readOrchestratorDelegationRequests,
+  resetOrchestratorTurnFiles,
+  type OrchestratorRequestPaths
+} from "./orchestrator-io";
 
 export type OrchestratorDelegationLane = "builder" | "strategist" | "automation";
-
-export type OrchestratorRequestPaths = {
-  builder: string;
-  strategist: string;
-  automation: string;
-};
 
 export type OrchestratorRunOptions = {
   workspacePath: string;
@@ -49,7 +45,7 @@ export type OrchestratorRunResult = {
 
 export class OrchestratorRunner {
   async runTurn(options: OrchestratorRunOptions): Promise<OrchestratorRunResult> {
-    await this.resetRequestFiles(options.requestPaths);
+    await resetOrchestratorTurnFiles(options.requestPaths);
 
     const command = this.buildCommand(
       options.workspacePath,
@@ -68,14 +64,14 @@ export class OrchestratorRunner {
     const finalMessage =
       (await this.readMaybe(options.outputPath)).trim() ||
       [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim();
-    const delegations = await this.readDelegationRequests(options.requestPaths);
+    const delegations = await readOrchestratorDelegationRequests(options.requestPaths);
     const primaryDelegation = delegations[0] ?? null;
 
     return {
       ...result,
       command,
       finalMessage,
-      sessionId: parseThreadId(result.stdout) || options.sessionId || null,
+      sessionId: parseCodexThreadId(result.stdout) || options.sessionId || null,
       requestedLane: primaryDelegation?.lane ?? null,
       delegatedPrompt: primaryDelegation?.prompt ?? "",
       delegation: primaryDelegation,
@@ -169,62 +165,9 @@ export class OrchestratorRunner {
       `USER_MESSAGE: ${prompt.trim()}`
     ].join("\n");
   }
-
-  private async resetRequestFiles(requestPaths: OrchestratorRequestPaths) {
-    await Promise.all([
-      mkdir(path.dirname(requestPaths.builder), { recursive: true }),
-      rm(requestPaths.builder, { force: true }),
-      rm(requestPaths.strategist, { force: true }),
-      rm(requestPaths.automation, { force: true })
-    ]);
-  }
-
-  private async readDelegationRequests(requestPaths: OrchestratorRequestPaths) {
-    const entries: Array<[OrchestratorDelegationLane, string]> = [
-      ["builder", requestPaths.builder],
-      ["strategist", requestPaths.strategist],
-      ["automation", requestPaths.automation]
-    ];
-    const delegations: OrchestratorDelegationDirective[] = [];
-
-    for (const [lane, filePath] of entries) {
-      const raw = (await this.readMaybe(filePath)).trim();
-
-      if (raw) {
-        const directive = parseOrchestratorDelegationRequest(lane, raw);
-        if (directive) {
-          delegations.push(directive);
-        }
-      }
-    }
-
-    return delegations;
-  }
-
   private async readMaybe(filePath: string) {
     return await readTextFileIfExists(filePath);
   }
-}
-
-function parseThreadId(stdout: string) {
-  const lines = stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  for (const line of lines) {
-    try {
-      const event = JSON.parse(line) as { type?: string; thread_id?: string };
-
-      if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id.trim()) {
-        return event.thread_id.trim();
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return "";
 }
 
 function resolveOracleHomeDir() {

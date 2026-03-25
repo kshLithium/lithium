@@ -182,4 +182,45 @@ describe("OrchestratorRunner", () => {
       }
     ]);
   });
+
+  it("prepares each lane request directory before the orchestrator writes into split paths", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "lithium-orch-split-"));
+    tempDirs.push(workspace);
+    const requestPaths = {
+      builder: path.join(workspace, ".lithium", "orchestrator", "builder", "request.md"),
+      strategist: path.join(workspace, ".lithium", "orchestrator", "strategist", "request.md"),
+      automation: path.join(workspace, ".lithium", "orchestrator", "automation", "request.md")
+    };
+    const outputPath = path.join(workspace, ".lithium", "orchestrator", "reply.md");
+
+    vi.mocked(runCommand).mockImplementationOnce(async () => {
+      await writeFile(requestPaths.strategist, "Investigate the public context.", "utf8");
+      await writeFile(outputPath, "Strategist lane를 준비했습니다.", "utf8");
+
+      return {
+        startedAt: "2026-03-25T02:00:00.000Z",
+        endedAt: "2026-03-25T02:00:01.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "{\"type\":\"thread.resumed\",\"thread_id\":\"orch-thread-split\"}",
+        stderr: ""
+      };
+    });
+
+    const runner = new OrchestratorRunner();
+    const result = await runner.runTurn({
+      workspacePath: workspace,
+      sessionId: "orch-thread-split",
+      prompt: "분리된 lane 경로로도 이어서 진행해줘",
+      runtimeContext: "# Lithium Runtime Context",
+      stdoutPath: path.join(workspace, ".lithium", "orchestrator", "stdout.log"),
+      stderrPath: path.join(workspace, ".lithium", "orchestrator", "stderr.log"),
+      outputPath,
+      requestPaths
+    });
+
+    expect(result.sessionId).toBe("orch-thread-split");
+    expect(result.requestedLane).toBe("strategist");
+    expect(result.delegatedPrompt).toBe("Investigate the public context.");
+  });
 });

@@ -1,14 +1,9 @@
 import { appendFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
 import type { CommandSpec } from "../../shared/types";
 import { appendHeadTailBuffer, prepareTextFiles } from "./fs-utils";
-import { terminateProcessTree } from "./process-tree";
+import { startProcessSession, type ProcessSessionResult } from "./command-session";
 
-export type CommandResult = {
-  startedAt: string;
-  endedAt: string;
-  exitCode: number | null;
-  timedOut: boolean;
+export type CommandResult = ProcessSessionResult & {
   stdout: string;
   stderr: string;
 };
@@ -32,25 +27,11 @@ const MAX_CAPTURED_OUTPUT_BYTES = 256 * 1024;
 
 export async function startCommand(options: RunCommandOptions): Promise<CommandSession> {
   const { spec, timeoutMs, stdoutPath, stderrPath, env } = options;
-  const startedAt = new Date().toISOString();
   await prepareTextFiles([stdoutPath, stderrPath]);
-
-  const child = spawn(spec.command, spec.args, {
-    cwd: spec.cwd,
-    env: {
-      ...process.env,
-      ...env
-    },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
 
   let stdout = "";
   let stderr = "";
-  let timedOut = false;
-  let settled = false;
   let appendQueue = Promise.resolve();
-  let forceKillTimer: NodeJS.Timeout | null = null;
-  let timeoutTimer: NodeJS.Timeout | null = null;
 
   const enqueueAppend = (targetPath: string, text: string) => {
     appendQueue = appendQueue
@@ -62,93 +43,31 @@ export async function startCommand(options: RunCommandOptions): Promise<CommandS
     await appendQueue.catch(() => undefined);
   };
 
-  let resolveResult: (value: CommandResult) => void = () => undefined;
-  let rejectResult: (reason: unknown) => void = () => undefined;
-  const result = new Promise<CommandResult>((resolve, reject) => {
-    resolveResult = resolve;
-    rejectResult = reject;
-  });
-
-  const finalize = async (payload: Omit<CommandResult, "startedAt">) => {
-    if (settled) {
-      return;
+  const session = startProcessSession({
+    spec,
+    timeoutMs,
+    env,
+    onBeforeResolve: flushAppends,
+    onStdout: (text) => {
+      stdout = appendHeadTailBuffer(stdout, text, MAX_CAPTURED_OUTPUT_BYTES);
+      enqueueAppend(stdoutPath, text);
+    },
+    onStderr: (text) => {
+      stderr = appendHeadTailBuffer(stderr, text, MAX_CAPTURED_OUTPUT_BYTES);
+      enqueueAppend(stderrPath, text);
     }
-
-    settled = true;
-    if (timeoutTimer) {
-      clearTimeout(timeoutTimer);
-    }
-    if (forceKillTimer) {
-      clearTimeout(forceKillTimer);
-    }
-
-    await flushAppends();
-    resolveResult({
-      startedAt,
-      ...payload
-    });
-  };
-
-  const normalizedTimeoutMs =
-    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : null;
-
-  if (normalizedTimeoutMs !== null) {
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      void terminateProcessTree(child.pid ?? -1).catch(() => undefined);
-    }, normalizedTimeoutMs);
-  }
-
-  child.stdout.on("data", (chunk) => {
-    const text = chunk.toString();
-    stdout = appendHeadTailBuffer(stdout, text, MAX_CAPTURED_OUTPUT_BYTES);
-    enqueueAppend(stdoutPath, text);
   });
-
-  child.stderr.on("data", (chunk) => {
-    const text = chunk.toString();
-    stderr = appendHeadTailBuffer(stderr, text, MAX_CAPTURED_OUTPUT_BYTES);
-    enqueueAppend(stderrPath, text);
-  });
-
-  child.on("error", async (error) => {
-    stderr = appendHeadTailBuffer(stderr, `${error.message}\n`, MAX_CAPTURED_OUTPUT_BYTES);
-    await finalize({
-      endedAt: new Date().toISOString(),
-      exitCode: null,
-      timedOut,
-      stdout,
-      stderr
-    }).catch(rejectResult);
-  });
-
-  child.on("close", (code) => {
-    void finalize({
-      endedAt: new Date().toISOString(),
-      exitCode: code,
-      timedOut,
-      stdout,
-      stderr
-    }).catch(rejectResult);
-  });
+  const result = session.result.then((payload) => ({
+    ...payload,
+    stdout,
+    stderr
+  }));
 
   return {
-    pid: child.pid ?? null,
-    startedAt,
+    pid: session.pid,
+    startedAt: session.startedAt,
     result,
-    terminate: (signal: NodeJS.Signals = "SIGTERM") => {
-      if (settled) {
-        return;
-      }
-
-      void terminateProcessTree(child.pid ?? -1).catch(() => {
-        try {
-          child.kill(signal);
-        } catch {
-          // Ignore races with already-exited children.
-        }
-      });
-    }
+    terminate: session.terminate
   };
 }
 

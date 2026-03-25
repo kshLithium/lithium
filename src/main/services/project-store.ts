@@ -1,10 +1,9 @@
 import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AttachmentKind,
   AttachmentRecord,
-  ArtifactKind,
   AutomationCycleRecord,
   AutomationCheckpointRecord,
   AutomationSessionRecord,
@@ -25,7 +24,6 @@ import type {
   TerminalSessionRecord,
   TaskRecord,
   WorkspaceFileContent,
-  WorkspaceFileKind,
   WorkspaceFileRecord
 } from "../../shared/types";
 import { DEFAULT_PROJECT_RESEARCH_GOAL } from "../../shared/types";
@@ -38,26 +36,13 @@ import { extractFinalSummary, readTailText } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
 import { parseTerminalCapture } from "./terminal-session";
 import { pathExists } from "./fs-utils";
+import { classifyWorkspaceFile, walkWorkspaceIndex } from "./workspace-index";
 import { resolveWorkspaceMemberPath } from "./workspace-paths";
 
 const LITHIUM_DIR = ".lithium";
 const PROJECT_FILE = "project.json";
 const ACTIVITY_LOG = "activity.log";
 const PROMPT_LOG = "prompt-log.jsonl";
-const WORKSPACE_INDEX_IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "dist-electron",
-  LITHIUM_DIR,
-  ".venv",
-  "venv",
-  "__pycache__",
-  ".pytest_cache",
-  ".mypy_cache",
-  ".ruff_cache",
-  ".tox"
-]);
 const RECORD_READ_BATCH_SIZE = 32;
 
 type ProjectPaths = {
@@ -107,6 +92,7 @@ type ArtifactPaths = {
 type ContextPackOptions = {
   lane?: ContextPackLane;
   artifactId?: string;
+  writeCanonical?: boolean;
 };
 
 type RuntimeContextOptions = {
@@ -583,7 +569,7 @@ export class ProjectStore {
       .filter((line): line is string => Boolean(line))
       .join("\n");
 
-    return this.writeProjectMemory(workspacePath, {
+    const updatedMemory = await this.writeProjectMemory(workspacePath, {
       sessionSummary,
       layers: {
         narrative: {
@@ -664,6 +650,13 @@ export class ProjectStore {
         }
       }
     });
+
+    await this.buildContextBundle(
+      workspacePath,
+      "Refresh the Lithium context bundle after updating the session summary."
+    );
+
+    return updatedMemory;
   }
 
   async allocateDecision(workspacePath: string) {
@@ -1265,8 +1258,11 @@ export class ProjectStore {
     ].filter((section): section is { title: string; body: string } => Boolean(section));
 
     const bundle = sections.map((section) => `${section.title}\n${section.body}`).join("\n\n");
+    const shouldWriteCanonical = !options.artifactId || options.writeCanonical === true;
 
-    await writeFile(paths.contextBundle, bundle, "utf8");
+    if (shouldWriteCanonical) {
+      await writeFile(paths.contextBundle, bundle, "utf8");
+    }
 
     if (packPath !== paths.contextBundle) {
       await writeFile(packPath, bundle, "utf8");
@@ -1415,9 +1411,38 @@ export class ProjectStore {
 
   async listWorkspaceFiles(workspacePath: string): Promise<WorkspaceFileRecord[]> {
     const output: WorkspaceFileRecord[] = [];
-    await this.collectWorkspaceFiles(workspacePath, workspacePath, output);
+    await walkWorkspaceIndex(workspacePath, (entry) => {
+      output.push({
+        path: entry.path,
+        relativePath: entry.relativePath,
+        name: entry.name,
+        kind: entry.kind,
+        artifactKind: entry.artifactKind
+      });
+    });
 
     return output.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  }
+
+  async computeWorkspaceContextFingerprint(workspacePath: string): Promise<string> {
+    const hash = createHash("sha1");
+    await walkWorkspaceIndex(
+      workspacePath,
+      (entry) => {
+        hash.update(entry.relativePath);
+        hash.update("\0");
+        hash.update(entry.kind);
+        hash.update("\0");
+        hash.update(entry.artifactKind);
+        hash.update("\0");
+        hash.update(String(entry.stats?.size ?? -1));
+        hash.update("\0");
+        hash.update(entry.stats?.mtime.toISOString() ?? "");
+        hash.update("\n");
+      },
+      { includeStats: true }
+    );
+    return hash.digest("hex");
   }
 
   async readWorkspaceFile(workspacePath: string, filePath: string): Promise<WorkspaceFileContent> {
@@ -1774,39 +1799,6 @@ export class ProjectStore {
     await this.writeJson(paths.memoryPreferencesFile, memory.preferences);
   }
 
-  private async collectWorkspaceFiles(
-    workspaceRoot: string,
-    currentPath: string,
-    output: WorkspaceFileRecord[]
-  ) {
-    const entries = await readdir(currentPath, { withFileTypes: true }).catch(() => []);
-
-    for (const entry of entries) {
-      if (WORKSPACE_INDEX_IGNORED_DIRS.has(entry.name)) {
-        continue;
-      }
-
-      const fullPath = path.join(currentPath, entry.name);
-
-      if (entry.isDirectory()) {
-        await this.collectWorkspaceFiles(workspaceRoot, fullPath, output);
-        continue;
-      }
-
-      const fileMeta = classifyWorkspaceFile(fullPath);
-      if (!fileMeta) {
-        continue;
-      }
-
-      output.push({
-        path: fullPath,
-        relativePath: path.relative(workspaceRoot, fullPath),
-        name: path.basename(fullPath),
-        kind: fileMeta.kind,
-        artifactKind: fileMeta.artifactKind
-      });
-    }
-  }
 }
 
 function createDefaultProjectMemory(projectName: string): ProjectMemoryRecord {
@@ -2619,80 +2611,4 @@ function classifyAttachmentKind(filePath: string): AttachmentKind {
   }
 
   return "other";
-}
-
-function classifyWorkspaceFile(filePath: string): { kind: WorkspaceFileKind; artifactKind: ArtifactKind } | null {
-  const extension = path.extname(filePath).toLowerCase();
-
-  if (
-    [
-      ".ts",
-      ".tsx",
-      ".js",
-      ".jsx",
-      ".css",
-      ".sh",
-      ".py",
-      ".yaml",
-      ".yml",
-      ".toml",
-      ".rs",
-      ".go",
-      ".java",
-      ".c",
-      ".cc",
-      ".cpp",
-      ".h",
-      ".hpp"
-    ].includes(extension)
-  ) {
-    return {
-      kind: "code",
-      artifactKind: "code"
-    };
-  }
-
-  if ([".tex", ".bib", ".cls", ".sty"].includes(extension)) {
-    return {
-      kind: "paper",
-      artifactKind: extension === ".bib" ? "bib" : "tex"
-    };
-  }
-
-  if (extension === ".pdf") {
-    return {
-      kind: "paper",
-      artifactKind: "pdf"
-    };
-  }
-
-  if ([".json"].includes(extension)) {
-    return {
-      kind: "artifact",
-      artifactKind: "json"
-    };
-  }
-
-  if ([".csv", ".tsv"].includes(extension)) {
-    return {
-      kind: "artifact",
-      artifactKind: "csv"
-    };
-  }
-
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"].includes(extension)) {
-    return {
-      kind: "artifact",
-      artifactKind: "image"
-    };
-  }
-
-  if ([".txt", ".md", ".log"].includes(extension)) {
-    return {
-      kind: "artifact",
-      artifactKind: extension === ".log" ? "log" : "text"
-    };
-  }
-
-  return null;
 }

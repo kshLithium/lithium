@@ -60,6 +60,7 @@ import {
   toMemoryDraft
 } from "./app-utils";
 import { ChatFeed } from "./ChatFeed";
+import { stabilizeChatProgress } from "./chat-progress";
 import { Composer } from "./Composer";
 import {
   canSubmitComposerPrompt,
@@ -72,6 +73,7 @@ import {
   shouldAutoOpenCodeSurface,
   shouldAutoOpenPaperSurface
 } from "./chat-surface";
+import { usePollingTask } from "./usePollingTask";
 import { useAppPreferences } from "./useAppPreferences";
 import { useCodeWorkbenchState } from "./useCodeWorkbenchState";
 import { isThreadUnread, useThreadSeenState } from "./useThreadSeenState";
@@ -131,6 +133,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<MemoryDraft>(emptyMemoryDraft);
   const [threadMemoryDraft, setThreadMemoryDraft] = useState(emptyThreadMemoryDraft);
+  const [workspaceRevision, setWorkspaceRevision] = useState(0);
   const [contextBundlePreview, setContextBundlePreview] = useState("");
   const [selectedPaperPath, setSelectedPaperPath] = useState("");
   const [paperDraft, setPaperDraft] = useState("");
@@ -158,6 +161,7 @@ export default function App() {
   const paperDirtyRef = useRef(false);
   const paperLoadRequestRef = useRef(0);
   const sidebarWidthRef = useRef(DEFAULT_APP_SETTINGS.sidebarWidth);
+  const workspaceLoadRequestRef = useRef(0);
   const hasBridge =
     typeof window !== "undefined" &&
     typeof window.lithium !== "undefined" &&
@@ -267,6 +271,7 @@ export default function App() {
     onRefreshWorkspace: refreshWorkspace,
     onReportError: setError,
     onRequestWorkspace: async () => await requestWorkspaceForUnsavedFile(),
+    workspaceRevision,
     withBusy,
     workspacePath
   });
@@ -551,15 +556,6 @@ export default function App() {
   }, [hasBridge]);
 
   useEffect(() => {
-    if (!workspacePath) {
-      setWorkspaceFiles([]);
-      return;
-    }
-
-    void loadWorkspaceFiles(workspacePath);
-  }, [workspacePath]);
-
-  useEffect(() => {
     if (!WORKBENCH_SURFACES_ENABLED) {
       setSelectedPaperPath("");
       setPaperFocusLine(undefined);
@@ -625,7 +621,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedPaperPath, workspacePath]);
+  }, [selectedPaperPath, workspacePath, workspaceRevision]);
 
   useEffect(() => {
     if (!WORKBENCH_SURFACES_ENABLED) {
@@ -664,24 +660,23 @@ export default function App() {
     workspacePath
   ]);
 
-  useEffect(() => {
-    if (!workspacePath || !snapshot.latestRun) {
-      setBuilderInspection(null);
-      return;
-    }
-
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const poll = async () => {
+  usePollingTask({
+    deps: [
+      snapshot.latestRun?.finalization,
+      snapshot.latestRun?.id,
+      snapshot.latestRun?.status,
+      workspacePath
+    ],
+    enabled: Boolean(workspacePath && snapshot.latestRun),
+    task: async () => {
       try {
         const inspection = await window.lithium.inspectBuilderRun({
           workspacePath,
           runId: snapshot.latestRun?.id
         });
 
-        if (cancelled || !inspection) {
-          return;
+        if (!inspection) {
+          return null;
         }
 
         setBuilderInspection(inspection);
@@ -692,130 +687,68 @@ export default function App() {
 
         if (finalized) {
           await refreshWorkspace(workspacePath);
+          return null;
         }
 
-        if (inspection.active || inspection.suggestedStatus !== "idle") {
-          timer = window.setTimeout(() => {
-            void poll();
-          }, 900);
-        }
+        return inspection.active || inspection.suggestedStatus !== "idle" ? 900 : null;
       } catch {
-        if (!cancelled) {
-          timer = window.setTimeout(() => {
-            void poll();
-          }, 2_000);
-        }
+        return 2_000;
       }
-    };
-
-    void poll();
-
-    return () => {
-      cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [
-    snapshot.latestRun?.finalization,
-    snapshot.latestRun?.id,
-    snapshot.latestRun?.status,
-    workspacePath
-  ]);
+    }
+  });
 
   useEffect(() => {
-    if (
-      !hasBridge ||
-      ((!busyAction || !pendingChatItems.length) && !automationRunning) ||
-      typeof window.lithium.inspectChatProgress !== "function"
-    ) {
-      setChatProgress(null);
-      return;
+    if (!workspacePath || !snapshot.latestRun) {
+      setBuilderInspection(null);
     }
+  }, [snapshot.latestRun, workspacePath]);
 
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const poll = async () => {
+  usePollingTask({
+    deps: [activeThreadId, automationRunning, busyAction, hasBridge, pendingChatItems.length, workspacePath],
+    enabled:
+      hasBridge &&
+      (Boolean(busyAction && pendingChatItems.length) || automationRunning) &&
+      typeof window.lithium.inspectChatProgress === "function",
+    task: async () => {
       try {
         const inspection = await window.lithium.inspectChatProgress({
           workspacePath: workspacePath || undefined,
           threadId: activeThreadId || undefined
         });
 
-        if (cancelled) {
-          return;
-        }
-
         setChatProgress((current) => stabilizeChatProgress(current, inspection));
-
-        if (inspection?.active || !inspection) {
-          timer = window.setTimeout(() => {
-            void poll();
-          }, 700);
-        }
+        return inspection?.active || !inspection ? 700 : null;
       } catch {
-        if (!cancelled) {
-          timer = window.setTimeout(() => {
-            void poll();
-          }, 1_200);
-        }
+        return 1_200;
       }
-    };
-
-    void poll();
-
-    return () => {
-      cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [activeThreadId, automationRunning, busyAction, hasBridge, pendingChatItems.length, workspacePath]);
+    }
+  });
 
   useEffect(() => {
     if (
-      !workspacePath ||
-      !latestAutomationSession ||
-      !automationRunning
+      hasBridge &&
+      (Boolean(busyAction && pendingChatItems.length) || automationRunning) &&
+      typeof window.lithium.inspectChatProgress === "function"
     ) {
       return;
     }
 
-    let cancelled = false;
-    let timer: number | null = null;
+    setChatProgress(null);
+  }, [activeThreadId, automationRunning, busyAction, hasBridge, pendingChatItems.length, workspacePath]);
 
-    const poll = async () => {
+  usePollingTask({
+    deps: [automationRunning, latestAutomationSession?.id, workspacePath],
+    enabled: Boolean(workspacePath && latestAutomationSession && automationRunning),
+    initialDelayMs: 1200,
+    task: async () => {
       try {
         await refreshProjectSnapshot(workspacePath);
-
-        if (cancelled) {
-          return;
-        }
-
-        timer = window.setTimeout(() => {
-          void poll();
-        }, 1400);
+        return 1400;
       } catch {
-        if (!cancelled) {
-          timer = window.setTimeout(() => {
-            void poll();
-          }, 2200);
-        }
+        return 2200;
       }
-    };
-
-    timer = window.setTimeout(() => {
-      void poll();
-    }, 1200);
-
-    return () => {
-      cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [automationRunning, latestAutomationSession?.id, workspacePath]);
+    }
+  });
 
   useEffect(() => {
     if (!workspacePath) {
@@ -989,6 +922,9 @@ export default function App() {
   }, [appSettings.paperPreviewWidth, appState, paperPreviewWidth, resizeTarget, updateAppSettings]);
 
   async function bootstrap() {
+    const requestId = workspaceLoadRequestRef.current + 1;
+    workspaceLoadRequestRef.current = requestId;
+
     try {
       if (!hasBridge) {
         setAppState({
@@ -1018,37 +954,45 @@ export default function App() {
       }
 
       const nextAppState = await window.lithium.getAppState();
-      const nextSnapshot = nextAppState.selectedWorkspacePath
-        ? await window.lithium.getProjectSnapshot(nextAppState.selectedWorkspacePath)
-        : emptySnapshot;
+      const [nextSnapshot, files] = nextAppState.selectedWorkspacePath
+        ? await Promise.all([
+            window.lithium.getProjectSnapshot(nextAppState.selectedWorkspacePath),
+            window.lithium.listWorkspaceFiles(nextAppState.selectedWorkspacePath)
+          ])
+        : [emptySnapshot, [] as WorkspaceFileRecord[]];
+
+      if (workspaceLoadRequestRef.current !== requestId) {
+        return;
+      }
 
       startTransition(() => {
         setAppState(nextAppState);
         setSnapshot(nextSnapshot);
-        setWorkspaceFiles([]);
+        setWorkspaceFiles(files);
+        setWorkspaceRevision((current) => current + 1);
       });
     } catch (nextError) {
-      setError(toErrorMessage(nextError));
-    }
-  }
-
-  async function loadWorkspaceFiles(nextWorkspacePath: string) {
-    try {
-      const files = await window.lithium.listWorkspaceFiles(nextWorkspacePath);
-      setWorkspaceFiles(files);
-    } catch (nextError) {
-      setError(toErrorMessage(nextError));
+      if (workspaceLoadRequestRef.current === requestId) {
+        setError(toErrorMessage(nextError));
+      }
     }
   }
 
   async function refreshWorkspace(nextWorkspacePath = workspacePath) {
+    const requestId = workspaceLoadRequestRef.current + 1;
+    workspaceLoadRequestRef.current = requestId;
     const nextAppState = await window.lithium.getAppState();
 
     if (!nextWorkspacePath) {
+      if (workspaceLoadRequestRef.current !== requestId) {
+        return;
+      }
+
       startTransition(() => {
         setAppState(nextAppState);
         setSnapshot(emptySnapshot);
         setWorkspaceFiles([]);
+        setWorkspaceRevision((current) => current + 1);
       });
       return;
     }
@@ -1058,22 +1002,35 @@ export default function App() {
       window.lithium.listWorkspaceFiles(nextWorkspacePath)
     ]);
 
+    if (workspaceLoadRequestRef.current !== requestId) {
+      return;
+    }
+
     startTransition(() => {
       setAppState(nextAppState);
       setSnapshot(nextSnapshot);
       setWorkspaceFiles(files);
+      setWorkspaceRevision((current) => current + 1);
     });
   }
 
   async function refreshProjectSnapshot(nextWorkspacePath = workspacePath) {
+    const requestId = workspaceLoadRequestRef.current;
+
     if (!nextWorkspacePath) {
-      startTransition(() => {
-        setSnapshot(emptySnapshot);
-      });
+      if (workspaceLoadRequestRef.current === requestId) {
+        startTransition(() => {
+          setSnapshot(emptySnapshot);
+        });
+      }
       return emptySnapshot;
     }
 
     const nextSnapshot = await window.lithium.getProjectSnapshot(nextWorkspacePath);
+
+    if (workspaceLoadRequestRef.current !== requestId) {
+      return nextSnapshot;
+    }
 
     startTransition(() => {
       setSnapshot(nextSnapshot);
@@ -1177,11 +1134,13 @@ export default function App() {
     options: { preserveWorkbench?: boolean } = {}
   ) {
     const preserveWorkbench = options.preserveWorkbench ?? false;
+    workspaceLoadRequestRef.current += 1;
 
     startTransition(() => {
       setAppState(selection.appState);
       setSnapshot(selection.snapshot);
       setWorkspaceFiles(selection.files);
+      setWorkspaceRevision((current) => current + 1);
     });
 
     if (!preserveWorkbench) {
@@ -2426,74 +2385,5 @@ export default function App() {
 
       {error ? <div className="error-toast">{error}</div> : null}
     </div>
-  );
-}
-
-export function stabilizeChatProgress(
-  current: ChatProgressInspection | null,
-  next: ChatProgressInspection | null
-) {
-  if (current && !next) {
-    return current;
-  }
-
-  if (!current || !next) {
-    return next;
-  }
-
-  if (
-    current.threadId === next.threadId &&
-    current.lane === next.lane &&
-    hasMeaningfulChatProgress(current) &&
-    isGenericChatProgress(next)
-  ) {
-    return current;
-  }
-
-  if (
-    current.active === next.active &&
-    current.lane === next.lane &&
-    current.threadId === next.threadId &&
-    current.progressSummary === next.progressSummary &&
-    current.activeCommand === next.activeCommand &&
-    current.progressDetails.length === next.progressDetails.length &&
-    current.progressDetails.every((detail, index) => detail === next.progressDetails[index])
-  ) {
-    return current;
-  }
-
-  return next;
-}
-
-function hasMeaningfulChatProgress(progress: ChatProgressInspection) {
-  const summary = progress.progressSummary.trim();
-  const details = progress.progressDetails
-    .map((detail) => detail.trim())
-    .filter(Boolean);
-
-  if (!summary && !details.length) {
-    return false;
-  }
-
-  return !isGenericChatProgress(progress);
-}
-
-function isGenericChatProgress(progress: ChatProgressInspection) {
-  const summary = progress.progressSummary.trim();
-  const details = progress.progressDetails
-    .map((detail) => detail.trim())
-    .filter(Boolean);
-
-  if (!summary) {
-    return details.length === 0;
-  }
-
-  if (summary !== "Thinking…") {
-    return false;
-  }
-
-  return (
-    details.length === 0 ||
-    details.every((detail) => detail === "Reviewing the latest thread state and choosing the next move.")
   );
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatProgressInspection } from "../shared/types";
-import { stabilizeChatProgress } from "./App";
+import { stabilizeChatProgress } from "./chat-progress";
 
 function buildProgress(
   input: Partial<ChatProgressInspection> = {}

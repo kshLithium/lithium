@@ -23,6 +23,7 @@ type UseCodeWorkbenchStateArgs = {
   onRefreshWorkspace: (workspacePath?: string) => Promise<void>;
   onReportError: (message: string) => void;
   onRequestWorkspace: () => Promise<string | null>;
+  workspaceRevision: number;
   withBusy: (label: string, work: () => Promise<void>) => Promise<void>;
   workspacePath: string;
 };
@@ -36,6 +37,7 @@ export function useCodeWorkbenchState({
   onRefreshWorkspace,
   onReportError,
   onRequestWorkspace,
+  workspaceRevision,
   withBusy,
   workspacePath
 }: UseCodeWorkbenchStateArgs) {
@@ -164,6 +166,15 @@ export function useCodeWorkbenchState({
         }
       });
   }, [activeCodeTab, enabled, onReportError, selectedCodePath, workspacePath]);
+
+  useEffect(() => {
+    if (!enabled || !workspacePath) {
+      return;
+    }
+
+    codeLoadRequestRef.current += 1;
+    setCodeTabs((current) => invalidateCodeTabsForWorkspaceRefresh(current));
+  }, [enabled, workspacePath, workspaceRevision]);
 
   useEffect(() => {
     if (!enabled) {
@@ -467,6 +478,17 @@ export function useCodeWorkbenchState({
     toggleCodeFolder,
     updateCodeDraft
   };
+}
+
+export function invalidateCodeTabsForWorkspaceRefresh(codeTabs: CodeTab[]) {
+  return codeTabs.map((tab) =>
+    tab.dirty || tab.isUntitled || !tab.loaded
+      ? tab
+      : {
+          ...tab,
+          loaded: false
+        }
+  );
 }
 
 function buildCodeExplorerStorageKey(workspacePath: string) {

@@ -544,7 +544,7 @@ export class AppService {
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation started`);
     await this.store.updateSessionSummary(workspacePath);
-    void this.runAutomationLoop(workspacePath, session.id);
+    this.scheduleAutomationLoop(workspacePath, session.id);
     return await this.store.getSnapshot(workspacePath);
   }
 
@@ -575,7 +575,7 @@ export class AppService {
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation resumed`);
     await this.store.updateSessionSummary(workspacePath);
-    void this.runAutomationLoop(workspacePath, session.id);
+    this.scheduleAutomationLoop(workspacePath, session.id);
     return await this.store.getSnapshot(workspacePath);
   }
 
@@ -773,7 +773,7 @@ export class AppService {
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation checkpoint approved`);
     await this.store.updateSessionSummary(workspacePath);
-    void this.runAutomationLoop(workspacePath, session.id);
+    this.scheduleAutomationLoop(workspacePath, session.id);
     return await this.store.getSnapshot(workspacePath);
   }
 
@@ -1861,7 +1861,10 @@ export class AppService {
         await this.oracleRunner.terminateSession?.(slug).catch(() => undefined);
       }
 
-      const strategistContextFingerprint = buildStrategistContextFingerprint(currentSnapshot);
+      const workspaceContextFingerprint = await this.store.computeWorkspaceContextFingerprint(workspacePath);
+      const strategistContextFingerprint = buildStrategistContextFingerprint(currentSnapshot, {
+        workspaceFingerprint: workspaceContextFingerprint
+      });
       const strategistContext = await this.prepareModelContext({
         workspacePath,
         prompt: request.prompt,
@@ -2879,6 +2882,9 @@ export class AppService {
     );
 
     if (!nextFile.relativePath.startsWith(".lithium/")) {
+      if (await this.store.readProject(resolvedWorkspacePath)) {
+        await this.store.updateSessionSummary(resolvedWorkspacePath);
+      }
       const remoteWorkspace = await this.remoteWorkspaceService.describe(resolvedWorkspacePath);
       if (remoteWorkspace) {
         await this.remoteWorkspaceService.pushWorkspaceFile(resolvedWorkspacePath, nextFile.relativePath);
@@ -3346,7 +3352,7 @@ export class AppService {
             ? "Resuming the in-flight builder and strategist work after Lithium restarted."
             : "Resuming the in-flight builder step after Lithium restarted."
       });
-      void this.runAutomationLoop(workspacePath, refreshedSession.id);
+      this.scheduleAutomationLoop(workspacePath, refreshedSession.id);
       return;
     }
 
@@ -3354,7 +3360,7 @@ export class AppService {
       await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
         currentStepSummary: "Resuming the in-flight strategist step after Lithium restarted."
       });
-      void this.runAutomationLoop(workspacePath, refreshedSession.id);
+      this.scheduleAutomationLoop(workspacePath, refreshedSession.id);
       return;
     }
 
@@ -3375,7 +3381,7 @@ export class AppService {
       await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
         currentStepSummary: "Automation resumed after Lithium restarted."
       });
-      void this.runAutomationLoop(workspacePath, refreshedSession.id);
+      this.scheduleAutomationLoop(workspacePath, refreshedSession.id);
       return;
     }
 
@@ -4746,7 +4752,10 @@ export class AppService {
       cycle,
       strategistStep
     );
-    const strategistContextFingerprint = buildStrategistContextFingerprint(snapshot);
+    const workspaceContextFingerprint = await this.store.computeWorkspaceContextFingerprint(workspacePath);
+    const strategistContextFingerprint = buildStrategistContextFingerprint(snapshot, {
+      workspaceFingerprint: workspaceContextFingerprint
+    });
     const strategistContext = await this.prepareModelContext({
       workspacePath,
       prompt: delegation.prompt,
@@ -6158,9 +6167,13 @@ export class AppService {
       controller.activeBuilderRuns.clear();
       controller.activeStrategistSessions.clear();
       if (shouldRestartAfterFailure) {
-        void this.runAutomationLoop(workspacePath, sessionId);
+        this.scheduleAutomationLoop(workspacePath, sessionId);
       }
     }
+  }
+
+  private scheduleAutomationLoop(workspacePath: string, sessionId: string) {
+    void this.runAutomationLoop(workspacePath, sessionId).catch(() => undefined);
   }
 
   private async waitForAutomationRun(

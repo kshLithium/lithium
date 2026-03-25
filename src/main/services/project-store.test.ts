@@ -80,11 +80,16 @@ describe("ProjectStore", () => {
       memory: "Keep the builder lane focused on reproducible experiment scripts."
     });
 
+    const canonicalPath = store.buildPaths(workspace).contextBundle;
+    await store.buildContextBundle(workspace, "Summarize the current workspace state.");
+    const canonicalBefore = await readFile(canonicalPath, "utf8");
+
     const [bundlePath] = await store.buildContextBundle(workspace, "Implement the next builder step.", {
       lane: "builder",
       artifactId: "R001"
     });
     const content = await readFile(bundlePath, "utf8");
+    const canonicalAfter = await readFile(canonicalPath, "utf8");
 
     expect(bundlePath).toContain("R001.builder.md");
     expect(content).toContain("Lane: builder");
@@ -93,6 +98,8 @@ describe("ProjectStore", () => {
     expect(content).toContain("## Latest Decision");
     expect(content).toContain("## Output Contract");
     expect(content).not.toContain("## Thread Memory");
+    expect(canonicalBefore).toBe(canonicalAfter);
+    expect(canonicalAfter).toContain("Lane: strategist");
   });
 
   it("builds a thin runtime context without the heavy artifact sections", async () => {

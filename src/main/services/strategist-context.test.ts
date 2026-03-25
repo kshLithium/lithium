@@ -73,6 +73,32 @@ describe("strategist-context", () => {
     expect(shouldAttachStrategistRuntimeContext(snapshot, "different")).toBe(true);
   });
 
+  it("treats workspace file changes as part of the strategist fingerprint", () => {
+    const snapshot = {
+      activeThread: {
+        id: "TH001",
+        strategistContextFingerprint: ""
+      },
+      activeThreadAttachments: [],
+      latestRun: null,
+      latestTask: null,
+      latestAutomationSession: null,
+      latestAutomationCheckpoint: null,
+      latestTerminalSession: null,
+      memory: null
+    } as unknown as ProjectSnapshot;
+
+    expect(
+      buildStrategistContextFingerprint(snapshot, {
+        workspaceFingerprint: "workspace-a"
+      })
+    ).not.toBe(
+      buildStrategistContextFingerprint(snapshot, {
+        workspaceFingerprint: "workspace-b"
+      })
+    );
+  });
+
   it("accepts only supported strategist upload file types", () => {
     expect(isSupportedStrategistUploadPath("/tmp/README")).toBe(true);
     expect(isSupportedStrategistUploadPath("/tmp/notes.md")).toBe(true);

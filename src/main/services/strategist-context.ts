@@ -78,7 +78,12 @@ export function shouldAttachStrategistRuntimeContext(
   return thread.strategistContextFingerprint !== fingerprint;
 }
 
-export function buildStrategistContextFingerprint(snapshot: ProjectSnapshot) {
+export function buildStrategistContextFingerprint(
+  snapshot: ProjectSnapshot,
+  options: {
+    workspaceFingerprint?: string;
+  } = {}
+) {
   const payload = {
     projectMemory: snapshot.memory
       ? {
@@ -92,7 +97,7 @@ export function buildStrategistContextFingerprint(snapshot: ProjectSnapshot) {
       : null,
     threadId: snapshot.activeThread?.id ?? "",
     threadMemory: snapshot.activeThread?.memory ?? "",
-    attachmentState: [...snapshot.activeThreadAttachments]
+    attachmentState: [...(snapshot.activeThreadAttachments ?? [])]
       .map((record) => ({
         id: record.id,
         relativePath: record.relativePath,
@@ -113,7 +118,7 @@ export function buildStrategistContextFingerprint(snapshot: ProjectSnapshot) {
             handoffMachineSummary(snapshot.latestRun.handoff) ||
             snapshot.latestRun.finalMessage?.replace(/\s+/g, " ").trim().slice(0, 280) ||
             "",
-          changedFiles: [...snapshot.latestRun.changedFiles].sort((left, right) =>
+          changedFiles: [...(snapshot.latestRun.changedFiles ?? [])].sort((left, right) =>
             left.localeCompare(right)
           )
         }
@@ -149,7 +154,8 @@ export function buildStrategistContextFingerprint(snapshot: ProjectSnapshot) {
           endedAt: snapshot.latestTerminalSession.endedAt,
           cwd: snapshot.latestTerminalSession.cwd
         }
-      : null
+      : null,
+    workspaceFingerprint: options.workspaceFingerprint ?? ""
   };
 
   return JSON.stringify(payload);

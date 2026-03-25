@@ -1,6 +1,4 @@
 import { createWriteStream } from "node:fs";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
 import type { CommandSpec } from "../../shared/types";
 import type { CommandResult } from "./process-runner";
 import {
@@ -11,8 +9,8 @@ import {
   statIfExists
 } from "./fs-utils";
 import { buildLiveResourceKey } from "./live-resource-key";
-import { terminateProcessTree } from "./process-tree";
 import { readTailText } from "./run-artifacts";
+import { startProcessSession } from "./command-session";
 
 export type LiveProcessHandle = {
   id: string;
@@ -40,7 +38,8 @@ type StartLiveProcessOptions = {
 type LiveProcessState = {
   id: string;
   workspacePath: string;
-  child: ChildProcessByStdio<null, Readable, Readable>;
+  child: ReturnType<typeof startProcessSession>["child"];
+  terminate: ReturnType<typeof startProcessSession>["terminate"];
   spec: CommandSpec;
   stdoutPath: string;
   stderrPath: string;
@@ -53,123 +52,61 @@ const activeProcesses = new Map<string, LiveProcessState>();
 const MAX_CAPTURED_OUTPUT_BYTES = 256 * 1024;
 
 export function startLiveProcess(options: StartLiveProcessOptions): LiveProcessHandle {
-  const startedAt = new Date().toISOString();
   const registryKey = buildLiveResourceKey(options.workspacePath, options.id);
   prepareTextFilesSync([options.stdoutPath, options.stderrPath]);
-  const child = spawn(options.spec.command, options.spec.args, {
-    cwd: options.spec.cwd,
-    env: {
-      ...process.env,
-      ...options.env
-    },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-
   let stdout = "";
   let stderr = "";
-  let timedOut = false;
-  let settled = false;
 
   const stdoutStream = createWriteStream(options.stdoutPath, { flags: "a" });
   const stderrStream = createWriteStream(options.stderrPath, { flags: "a" });
-
-  const done = new Promise<CommandResult>((resolve, reject) => {
-    let timer: NodeJS.Timeout | null = null;
-
-    const finish = async (result: Omit<CommandResult, "startedAt">) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      if (timer) {
-        clearTimeout(timer);
-      }
+  const session = startProcessSession({
+    spec: options.spec,
+    timeoutMs: options.timeoutMs,
+    env: options.env,
+    onBeforeResolve: async () => {
       activeProcesses.delete(registryKey);
-
-      try {
-        await Promise.all([
-          endWriteStream(stdoutStream),
-          endWriteStream(stderrStream)
-        ]);
-      } catch (error) {
-        reject(error);
-        return;
-      }
-
-      resolve({
-        startedAt,
-        ...result
-      });
-    };
-
-    const normalizedTimeoutMs =
-      typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-        ? options.timeoutMs
-        : null;
-
-    if (normalizedTimeoutMs !== null) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        void terminateProcessTree(child.pid ?? -1).catch(() => undefined);
-      }, normalizedTimeoutMs);
-    }
-
-    child.stdout.on("data", (chunk) => {
-      const text = chunk.toString();
+      await Promise.all([
+        endWriteStream(stdoutStream),
+        endWriteStream(stderrStream)
+      ]);
+    },
+    onStdout: (text) => {
       stdout = appendTailBuffer(stdout, text, MAX_CAPTURED_OUTPUT_BYTES);
       stdoutStream.write(text);
-    });
-
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
+    },
+    onStderr: (text) => {
       stderr = appendTailBuffer(stderr, text, MAX_CAPTURED_OUTPUT_BYTES);
       stderrStream.write(text);
-    });
-
-    child.on("error", (error) => {
-      stderr = appendTailBuffer(stderr, `${error.message}\n`, MAX_CAPTURED_OUTPUT_BYTES);
-      void finish({
-        endedAt: new Date().toISOString(),
-        exitCode: null,
-        timedOut,
-        stdout,
-        stderr
-      });
-    });
-
-    child.on("close", (code) => {
-      void finish({
-        endedAt: new Date().toISOString(),
-        exitCode: code,
-        timedOut,
-        stdout,
-        stderr
-      });
-    });
+    }
   });
+  const done = session.result.then((payload) => ({
+    ...payload,
+    stdout,
+    stderr
+  }));
 
   activeProcesses.set(registryKey, {
     id: options.id,
     workspacePath: options.workspacePath,
-    child,
+    child: session.child,
+    terminate: session.terminate,
     spec: options.spec,
     stdoutPath: options.stdoutPath,
     stderrPath: options.stderrPath,
     outputPath: options.outputPath,
-    startedAt,
+    startedAt: session.startedAt,
     done
   });
 
   return {
     id: options.id,
     workspacePath: options.workspacePath,
-    pid: child.pid ?? null,
+    pid: session.pid,
     spec: options.spec,
     stdoutPath: options.stdoutPath,
     stderrPath: options.stderrPath,
     outputPath: options.outputPath,
-    startedAt,
+    startedAt: session.startedAt,
     done
   };
 }
@@ -201,25 +138,13 @@ export function stopLiveProcess(workspacePath: string, id: string) {
     return false;
   }
 
-  void terminateProcessTree(state.child.pid ?? -1).catch(() => {
-    try {
-      state.child.kill("SIGTERM");
-    } catch {
-      // Ignore races with already-exited children.
-    }
-  });
+  state.terminate("SIGTERM");
   return true;
 }
 
 export function stopAllLiveProcesses() {
   for (const state of activeProcesses.values()) {
-    void terminateProcessTree(state.child.pid ?? -1).catch(() => {
-      try {
-        state.child.kill("SIGTERM");
-      } catch {
-        // Ignore races with already-exited children.
-      }
-    });
+    state.terminate("SIGTERM");
   }
 }
 
