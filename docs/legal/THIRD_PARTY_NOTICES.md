@@ -2,7 +2,7 @@
 
 Lithium depends on several open-source projects. Your use of packaged builds must also comply with those upstream licenses.
 
-This project itself is licensed under the MIT License. See [LICENSE](LICENSE).
+This project itself is licensed under the MIT License. See [LICENSE](../../LICENSE).
 
 ## Core Runtime Dependencies
 

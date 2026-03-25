@@ -73,7 +73,7 @@
       "build/icon.png",
       "build/icon.icns",
       "LICENSE",
-      "THIRD_PARTY_NOTICES.md",
+      "docs/legal/THIRD_PARTY_NOTICES.md",
       "package.json"
     ],
     "mac": {

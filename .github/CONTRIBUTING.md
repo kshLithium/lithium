@@ -34,4 +34,4 @@ npm run dist:mac
 - Keep renderer logic centered on the main chat instead of bringing back side panels or manual editors.
 - Add or update tests when changing persistence, orchestration, or parsing.
 - Do not persist state only in prompts. If a model needs it later, write it into `.lithium/`.
-- Keep root docs minimal. Standard repo files can stay in the root, but extra docs and assets should live under [`docs/`](/Users/rubidium/project/lithium/docs).
+- Keep root docs minimal. Standard repo files can stay in the root, but extra docs and assets should live under [`docs/`](../docs/).
