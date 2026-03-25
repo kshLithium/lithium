@@ -125,6 +125,19 @@ describe("protocol", () => {
     });
   });
 
+  it("strips builder footer markers even when the JSON starts on the same line", () => {
+    const result = parseBuilderOutput(
+      '사용자에게 보여줄 본문입니다.\n\nLITHIUM_STATUS {"machine_summary":"internal handoff summary","result":"success"}'
+    );
+
+    expect(result).toMatchObject({
+      summary: "internal handoff summary",
+      machineSummary: "internal handoff summary",
+      userMessage: "사용자에게 보여줄 본문입니다.",
+      result: "success"
+    });
+  });
+
   it("accepts loose string lists inside strategist JSON handoffs", () => {
     const result = parseOracleOutput([
       "LITHIUM_HANDOFF",

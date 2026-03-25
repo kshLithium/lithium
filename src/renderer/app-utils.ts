@@ -249,9 +249,18 @@ export function mergeTransientChatItems(
     activeThreadId?: string | null;
   }
 ) {
-  const items = [...chatItems, ...pendingChatItems];
+  const visiblePendingChatItems = filterAcknowledgedPendingChatItems(chatItems, pendingChatItems);
+  const items = [...chatItems, ...visiblePendingChatItems];
   const liveProgressBody = formatLiveProgressBody(input.chatProgress ?? null);
   const order = items.length;
+  const latestPersistedTimestamp = [...chatItems]
+    .reverse()
+    .find((item) => !item.pending)?.timestamp;
+  const transientAssistantTimestamp = maxTimestamp(
+    latestPersistedTimestamp,
+    pendingChatItems[pendingChatItems.length - 1]?.timestamp,
+    input.chatProgress?.updatedAt
+  );
   const transientThreadKey =
     input.chatProgress?.threadId || input.activeThreadId || input.workspacePath || pendingChatItems[0]?.id || "chat";
 
@@ -260,8 +269,7 @@ export function mergeTransientChatItems(
       id: `busy:${transientThreadKey}:${input.busyAction}`,
       role: "assistant",
       body: input.busyBody?.trim() || liveProgressBody || "Working…",
-      timestamp:
-        input.chatProgress?.updatedAt || pendingChatItems[pendingChatItems.length - 1]?.timestamp || new Date().toISOString(),
+      timestamp: transientAssistantTimestamp || new Date().toISOString(),
       order,
       pending: true
     });
@@ -284,6 +292,37 @@ export function mergeTransientChatItems(
   }
 
   return sortChatItems(items);
+}
+
+function filterAcknowledgedPendingChatItems(
+  chatItems: ChatItem[],
+  pendingChatItems: ChatItem[]
+) {
+  return pendingChatItems.filter((pendingItem) => {
+    if (pendingItem.role !== "user") {
+      return true;
+    }
+
+    const normalizedPendingBody = normalizePromptForComparison(pendingItem.body);
+
+    if (!normalizedPendingBody) {
+      return true;
+    }
+
+    return !chatItems.some((item) => {
+      if (item.role !== pendingItem.role || item.pending) {
+        return false;
+      }
+
+      const normalizedBody = normalizePromptForComparison(item.body);
+
+      if (!normalizedBody || normalizedBody !== normalizedPendingBody) {
+        return false;
+      }
+
+      return isAcknowledgedPendingTimestamp(item.timestamp, pendingItem.timestamp);
+    });
+  });
 }
 
 function resolveVisibleDecisionPrompt(decision: ProjectSnapshot["decisions"][number]) {
@@ -820,6 +859,11 @@ function normalizePromptForComparison(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+function maxTimestamp(...values: Array<string | null | undefined>) {
+  const normalized = values.filter((value): value is string => Boolean(value)).sort();
+  return normalized[normalized.length - 1] ?? "";
+}
+
 function isNearDuplicateTimestamp(nextTimestamp: string, previousTimestamp: string) {
   if (!nextTimestamp || !previousTimestamp) {
     return false;
@@ -833,6 +877,21 @@ function isNearDuplicateTimestamp(nextTimestamp: string, previousTimestamp: stri
   }
 
   return Math.abs(nextTime - previousTime) <= 5 * 60 * 1000;
+}
+
+function isAcknowledgedPendingTimestamp(persistedTimestamp: string, pendingTimestamp: string) {
+  if (!isNearDuplicateTimestamp(persistedTimestamp, pendingTimestamp)) {
+    return false;
+  }
+
+  const persistedTime = Date.parse(persistedTimestamp);
+  const pendingTime = Date.parse(pendingTimestamp);
+
+  if (!Number.isFinite(persistedTime) || !Number.isFinite(pendingTime)) {
+    return persistedTimestamp >= pendingTimestamp;
+  }
+
+  return persistedTime >= pendingTime - 2_000;
 }
 
 function buildAttachmentArtifactRefs(
@@ -1161,13 +1220,15 @@ export function formatLiveProgressBody(
     return "";
   }
 
-  const summary = progress.progressSummary.trim();
+  const summary = stripProgressControlFooters(progress.progressSummary).trim();
   const lines: string[] = [];
 
   if (progress.progressDetails.length) {
     for (const detail of progress.progressDetails) {
-      if (detail.trim()) {
-        lines.push(detail.trim());
+      const sanitizedDetail = stripProgressControlFooters(detail).trim();
+
+      if (sanitizedDetail) {
+        lines.push(sanitizedDetail);
       }
     }
   }
@@ -1238,11 +1299,19 @@ function looksLikeInternalExecutionTranscript(value: string) {
 }
 
 function stripBuilderFooterForDisplay(finalMessage: string) {
-  return finalMessage.replace(/\n*LITHIUM_STATUS[\s\S]*$/m, "").trim();
+  return finalMessage.replace(/\n*LITHIUM_STATUS(?:\s*\n|\s+)?[\s\S]*$/i, "").trim();
 }
 
 function stripStrategistFooterForDisplay(rawOutput: string) {
-  return rawOutput.replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "").trim();
+  return rawOutput.replace(/\n*LITHIUM_HANDOFF(?:\s*\n|\s+)?[\s\S]*$/i, "").trim();
+}
+
+function stripProgressControlFooters(value: string) {
+  return value
+    .replace(/\n*LITHIUM_STATUS(?:\s*\n|\s+)?[\s\S]*$/i, "")
+    .replace(/\n*LITHIUM_HANDOFF(?:\s*\n|\s+)?[\s\S]*$/i, "")
+    .replace(/\n*LITHIUM_ROUTE(?:\s*\n|\s+)?[\s\S]*$/i, "")
+    .trim();
 }
 
 function normalizePath(value: string) {

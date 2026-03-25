@@ -52,4 +52,33 @@ describe("parseCodexProgressLog", () => {
       activeCommand: null
     });
   });
+
+  it("strips control footers from agent_message progress text", () => {
+    const progress = parseCodexProgressLog(
+      [
+        '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"정리해 두었습니다.\\n\\nLITHIUM_STATUS\\n{\\"machine_summary\\":\\"internal\\"}"}}'
+      ].join("\n")
+    );
+
+    expect(progress).toEqual({
+      progressSummary: "정리해 두었습니다.",
+      progressDetails: [],
+      activeCommand: null
+    });
+  });
+
+  it("derives eval progress from command outputs when the builder is polling a log file", () => {
+    const progress = parseCodexProgressLog(
+      [
+        '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"중간 진행도를 확인해 보겠습니다."}}',
+        '{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc \\"tail -n 20 logs/run.txt\\"","aggregated_output":"val_progress:1/256\\nval_progress:25/256\\nval_progress:50/256","status":"completed"}}'
+      ].join("\n")
+    );
+
+    expect(progress).toEqual({
+      progressSummary: "Eval progress: 50/256",
+      progressDetails: ["중간 진행도를 확인해 보겠습니다."],
+      activeCommand: null
+    });
+  });
 });

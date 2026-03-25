@@ -4,10 +4,6 @@ export function stabilizeChatProgress(
   current: ChatProgressInspection | null,
   next: ChatProgressInspection | null
 ) {
-  if (current && !next) {
-    return current;
-  }
-
   if (!current || !next) {
     return next;
   }

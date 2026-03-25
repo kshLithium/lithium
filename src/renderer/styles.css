@@ -1,8 +1,4 @@
-:root,
-:root[data-theme="light"],
-:root[data-theme="dark"],
-:root[data-theme="system"] {
-  color-scheme: light;
+:root {
   font-family: "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
   line-height: 1.45;
   font-weight: 400;
@@ -10,17 +6,6 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  --bg: rgb(252 252 251);
-  --text: rgb(23 24 29);
-  --muted: rgb(102 109 120);
-  --subtle: rgb(137 144 154);
-  --border: rgba(15, 23, 42, 0.07);
-  --border-strong: rgba(15, 23, 42, 0.11);
-  --accent-soft: rgba(15, 23, 42, 0.03);
-  --control-bg: rgba(255, 255, 255, 0.82);
-  --panel-raised-soft: rgba(255, 255, 255, 0.9);
-  --rail-bg: linear-gradient(180deg, rgba(247, 248, 250, 0.9), rgba(241, 243, 246, 0.78));
-  --bubble-user: rgba(246, 247, 249, 0.96);
   --surface-radius: 1rem;
   --surface-radius-large: 1.5rem;
   --sidebar-width-open: clamp(13rem, 18vw, 15rem);
@@ -33,6 +18,158 @@
   --chat-bottom-clearance: clamp(8.75rem, 19vh, 11rem);
   --chat-gap: clamp(1rem, 2vh, 1.25rem);
   --mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", monospace;
+}
+
+:root,
+:root[data-theme="light"],
+:root[data-theme="system"] {
+  color-scheme: light;
+  --bg: rgb(252 252 251);
+  --text: rgb(23 24 29);
+  --muted: rgb(102 109 120);
+  --subtle: rgb(137 144 154);
+  --border: rgba(15, 23, 42, 0.07);
+  --border-strong: rgba(15, 23, 42, 0.11);
+  --accent-soft: rgba(15, 23, 42, 0.03);
+  --control-bg: rgba(255, 255, 255, 0.82);
+  --panel-raised-soft: rgba(255, 255, 255, 0.9);
+  --rail-bg: linear-gradient(180deg, rgba(247, 248, 250, 0.9), rgba(241, 243, 246, 0.78));
+  --bubble-user: rgba(246, 247, 249, 0.96);
+  --sidebar-shadow:
+    inset -1px 0 0 rgba(15, 23, 42, 0.085),
+    inset 0 1px 0 rgba(255, 255, 255, 0.54),
+    18px 0 44px rgba(15, 23, 42, 0.055);
+  --thread-row-active-bg: rgba(255, 255, 255, 0.62);
+  --thread-row-active-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.04);
+  --thread-row-hover-bg: rgba(255, 255, 255, 0.42);
+  --sidebar-divider: rgba(15, 23, 42, 0.045);
+  --empty-state-border: rgba(15, 23, 42, 0.055);
+  --empty-state-bg: rgba(255, 255, 255, 0.76);
+  --empty-state-shadow: 0 1.25rem 3.75rem rgba(15, 23, 42, 0.04);
+  --surface-button: rgba(255, 255, 255, 0.88);
+  --message-border: rgba(15, 23, 42, 0.05);
+  --message-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+  --inline-code-bg: rgba(15, 23, 42, 0.045);
+  --code-block-border: rgba(15, 23, 42, 0.07);
+  --code-block-bg: rgba(248, 250, 252, 0.96);
+  --quote-border: rgba(15, 23, 42, 0.12);
+  --link: rgb(21 94 239);
+  --rule: rgba(15, 23, 42, 0.08);
+  --table-border: rgba(15, 23, 42, 0.08);
+  --artifact-bg: rgba(255, 255, 255, 0.86);
+  --menu-shadow: 0 1.5rem 5rem rgba(15, 23, 42, 0.1);
+  --badge-bg: rgba(255, 255, 255, 0.88);
+  --composer-border: rgba(15, 23, 42, 0.08);
+  --composer-bg: rgba(255, 255, 255, 0.82);
+  --composer-shadow: 0 1rem 2.75rem rgba(15, 23, 42, 0.08);
+  --composer-drag-border: rgba(15, 23, 42, 0.15);
+  --composer-drag-shadow: 0 0 0 0.1875rem rgba(15, 23, 42, 0.04);
+  --composer-focus-border: rgba(15, 23, 42, 0.13);
+  --composer-focus-shadow: 0 1.125rem 3rem rgba(15, 23, 42, 0.1);
+  --attachment-bg: rgba(255, 255, 255, 0.86);
+  --scrollbar-thumb: rgba(112, 119, 129, 0.28);
+  --scrollbar-thumb-webkit: rgba(112, 119, 129, 0.24);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: rgb(17 19 24);
+  --text: rgb(235 239 244);
+  --muted: rgb(157 166 178);
+  --subtle: rgb(122 130 143);
+  --border: rgba(148, 163, 184, 0.16);
+  --border-strong: rgba(148, 163, 184, 0.24);
+  --accent-soft: rgba(148, 163, 184, 0.1);
+  --control-bg: rgba(29, 33, 42, 0.82);
+  --panel-raised-soft: rgba(24, 27, 35, 0.92);
+  --rail-bg: linear-gradient(180deg, rgba(20, 23, 30, 0.94), rgba(15, 17, 24, 0.88));
+  --bubble-user: rgba(30, 34, 43, 0.92);
+  --sidebar-shadow:
+    inset -1px 0 0 rgba(148, 163, 184, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    18px 0 44px rgba(0, 0, 0, 0.28);
+  --thread-row-active-bg: rgba(255, 255, 255, 0.06);
+  --thread-row-active-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.12);
+  --thread-row-hover-bg: rgba(255, 255, 255, 0.04);
+  --sidebar-divider: rgba(148, 163, 184, 0.1);
+  --empty-state-border: rgba(148, 163, 184, 0.12);
+  --empty-state-bg: rgba(24, 27, 35, 0.82);
+  --empty-state-shadow: 0 1.25rem 3.75rem rgba(0, 0, 0, 0.32);
+  --surface-button: rgba(29, 33, 42, 0.88);
+  --message-border: rgba(148, 163, 184, 0.12);
+  --message-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --inline-code-bg: rgba(148, 163, 184, 0.14);
+  --code-block-border: rgba(148, 163, 184, 0.14);
+  --code-block-bg: rgba(15, 17, 24, 0.96);
+  --quote-border: rgba(148, 163, 184, 0.28);
+  --link: rgb(125 177 255);
+  --rule: rgba(148, 163, 184, 0.16);
+  --table-border: rgba(148, 163, 184, 0.16);
+  --artifact-bg: rgba(29, 33, 42, 0.86);
+  --menu-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.32);
+  --badge-bg: rgba(29, 33, 42, 0.88);
+  --composer-border: rgba(148, 163, 184, 0.15);
+  --composer-bg: rgba(24, 27, 35, 0.84);
+  --composer-shadow: 0 1rem 2.75rem rgba(0, 0, 0, 0.3);
+  --composer-drag-border: rgba(125, 177, 255, 0.32);
+  --composer-drag-shadow: 0 0 0 0.1875rem rgba(125, 177, 255, 0.12);
+  --composer-focus-border: rgba(125, 177, 255, 0.36);
+  --composer-focus-shadow: 0 1.125rem 3rem rgba(0, 0, 0, 0.34);
+  --attachment-bg: rgba(29, 33, 42, 0.86);
+  --scrollbar-thumb: rgba(148, 163, 184, 0.36);
+  --scrollbar-thumb-webkit: rgba(148, 163, 184, 0.28);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]),
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --bg: rgb(17 19 24);
+    --text: rgb(235 239 244);
+    --muted: rgb(157 166 178);
+    --subtle: rgb(122 130 143);
+    --border: rgba(148, 163, 184, 0.16);
+    --border-strong: rgba(148, 163, 184, 0.24);
+    --accent-soft: rgba(148, 163, 184, 0.1);
+    --control-bg: rgba(29, 33, 42, 0.82);
+    --panel-raised-soft: rgba(24, 27, 35, 0.92);
+    --rail-bg: linear-gradient(180deg, rgba(20, 23, 30, 0.94), rgba(15, 17, 24, 0.88));
+    --bubble-user: rgba(30, 34, 43, 0.92);
+    --sidebar-shadow:
+      inset -1px 0 0 rgba(148, 163, 184, 0.14),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      18px 0 44px rgba(0, 0, 0, 0.28);
+    --thread-row-active-bg: rgba(255, 255, 255, 0.06);
+    --thread-row-active-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.12);
+    --thread-row-hover-bg: rgba(255, 255, 255, 0.04);
+    --sidebar-divider: rgba(148, 163, 184, 0.1);
+    --empty-state-border: rgba(148, 163, 184, 0.12);
+    --empty-state-bg: rgba(24, 27, 35, 0.82);
+    --empty-state-shadow: 0 1.25rem 3.75rem rgba(0, 0, 0, 0.32);
+    --surface-button: rgba(29, 33, 42, 0.88);
+    --message-border: rgba(148, 163, 184, 0.12);
+    --message-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    --inline-code-bg: rgba(148, 163, 184, 0.14);
+    --code-block-border: rgba(148, 163, 184, 0.14);
+    --code-block-bg: rgba(15, 17, 24, 0.96);
+    --quote-border: rgba(148, 163, 184, 0.28);
+    --link: rgb(125 177 255);
+    --rule: rgba(148, 163, 184, 0.16);
+    --table-border: rgba(148, 163, 184, 0.16);
+    --artifact-bg: rgba(29, 33, 42, 0.86);
+    --menu-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.32);
+    --badge-bg: rgba(29, 33, 42, 0.88);
+    --composer-border: rgba(148, 163, 184, 0.15);
+    --composer-bg: rgba(24, 27, 35, 0.84);
+    --composer-shadow: 0 1rem 2.75rem rgba(0, 0, 0, 0.3);
+    --composer-drag-border: rgba(125, 177, 255, 0.32);
+    --composer-drag-shadow: 0 0 0 0.1875rem rgba(125, 177, 255, 0.12);
+    --composer-focus-border: rgba(125, 177, 255, 0.36);
+    --composer-focus-shadow: 0 1.125rem 3rem rgba(0, 0, 0, 0.34);
+    --attachment-bg: rgba(29, 33, 42, 0.86);
+    --scrollbar-thumb: rgba(148, 163, 184, 0.36);
+    --scrollbar-thumb-webkit: rgba(148, 163, 184, 0.28);
+  }
 }
 
 * {
@@ -110,10 +247,7 @@ select {
   background: var(--rail-bg);
   backdrop-filter: blur(28px) saturate(1.06);
   -webkit-backdrop-filter: blur(28px) saturate(1.06);
-  box-shadow:
-    inset -1px 0 0 rgba(15, 23, 42, 0.085),
-    inset 0 1px 0 rgba(255, 255, 255, 0.54),
-    18px 0 44px rgba(15, 23, 42, 0.055);
+  box-shadow: var(--sidebar-shadow);
 }
 
 .chat-sidebar.collapsed {
@@ -175,12 +309,12 @@ select {
 }
 
 .thread-row.active {
-  background: rgba(255, 255, 255, 0.62);
-  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.04);
+  background: var(--thread-row-active-bg);
+  box-shadow: var(--thread-row-active-shadow);
 }
 
 .thread-row:hover {
-  background: rgba(255, 255, 255, 0.42);
+  background: var(--thread-row-hover-bg);
 }
 
 .thread-row-main {
@@ -233,7 +367,7 @@ select {
   content: "";
   position: absolute;
   inset: 0;
-  background: rgba(15, 23, 42, 0.045);
+  background: var(--sidebar-divider);
 }
 
 .content-shell {
@@ -268,6 +402,7 @@ select {
   min-width: 0;
   min-height: 0;
   display: grid;
+  overflow-x: clip;
 }
 
 .chat-column {
@@ -276,6 +411,7 @@ select {
   min-width: 0;
   min-height: 0;
   background: var(--bg);
+  overflow-x: clip;
 }
 
 .chat-scroll {
@@ -298,8 +434,11 @@ select {
 
 .chat-feed {
   width: min(var(--chat-width), 100%);
+  max-width: 100%;
+  min-width: 0;
   display: grid;
   align-content: start;
+  justify-items: center;
   gap: var(--chat-gap);
 }
 
@@ -311,12 +450,12 @@ select {
   justify-items: center;
   gap: 0.875rem;
   padding: clamp(2rem, 4vw, 2.75rem);
-  border: 1px solid rgba(15, 23, 42, 0.055);
+  border: 1px solid var(--empty-state-border);
   border-radius: calc(var(--surface-radius-large) + 0.125rem);
-  background: rgba(255, 255, 255, 0.76);
+  background: var(--empty-state-bg);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
-  box-shadow: 0 1.25rem 3.75rem rgba(15, 23, 42, 0.04);
+  box-shadow: var(--empty-state-shadow);
   text-align: center;
 }
 
@@ -362,7 +501,7 @@ select {
   padding: 0 0.875rem;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--surface-button);
   color: var(--text);
   font-size: 0.74rem;
   transition:
@@ -403,10 +542,10 @@ select {
   display: grid;
   gap: 0.5rem;
   padding: 0.875rem 1rem;
-  border: 1px solid rgba(15, 23, 42, 0.05);
+  border: 1px solid var(--message-border);
   border-radius: calc(var(--surface-radius) - 0.125rem);
   background: var(--bubble-user);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+  box-shadow: var(--message-shadow);
 }
 
 .message.assistant,
@@ -429,6 +568,7 @@ select {
 }
 
 .message-body {
+  max-width: 100%;
   word-break: break-word;
   overflow-wrap: anywhere;
   font-size: 0.94rem;
@@ -456,6 +596,13 @@ select {
 
 .chat-markdown {
   display: block;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-markdown > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chat-markdown > :first-child {
@@ -500,16 +647,17 @@ select {
 .chat-file-ref {
   padding: 0.12em 0.4em;
   border-radius: 0.375rem;
-  background: rgba(15, 23, 42, 0.045);
+  background: var(--inline-code-bg);
   font-size: 0.9em;
   font-family: var(--mono);
 }
 
 .chat-markdown pre {
+  max-width: 100%;
   padding: 0.875rem 1rem;
-  border: 1px solid rgba(15, 23, 42, 0.07);
+  border: 1px solid var(--code-block-border);
   border-radius: calc(var(--surface-radius) - 0.125rem);
-  background: rgba(248, 250, 252, 0.96);
+  background: var(--code-block-bg);
   overflow: auto;
 }
 
@@ -522,12 +670,12 @@ select {
 
 .chat-markdown blockquote {
   padding-left: 0.75rem;
-  border-left: 0.1875rem solid rgba(15, 23, 42, 0.12);
+  border-left: 0.1875rem solid var(--quote-border);
   color: var(--muted);
 }
 
 .chat-markdown a {
-  color: rgb(21 94 239);
+  color: var(--link);
   text-decoration: none;
 }
 
@@ -537,11 +685,12 @@ select {
 
 .chat-markdown hr {
   border: 0;
-  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  border-top: 1px solid var(--rule);
 }
 
 .chat-markdown table {
   width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
   font-size: 0.79rem;
 }
@@ -550,7 +699,7 @@ select {
 .chat-markdown td {
   padding: 7px 9px;
   text-align: left;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  border-bottom: 1px solid var(--table-border);
 }
 
 .chat-markdown th {
@@ -592,7 +741,7 @@ select {
   padding: 0 0.5rem;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--artifact-bg);
   color: var(--muted);
   font-size: 0.68rem;
 }
@@ -634,7 +783,7 @@ select {
   border: 1px solid var(--border-strong);
   border-radius: calc(var(--surface-radius) + 0.125rem);
   background: var(--panel-raised-soft);
-  box-shadow: 0 1.5rem 5rem rgba(15, 23, 42, 0.1);
+  box-shadow: var(--menu-shadow);
   margin-inline: auto;
   pointer-events: auto;
   backdrop-filter: blur(20px);
@@ -747,7 +896,7 @@ select {
   padding: 0 0.625rem;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--badge-bg);
   color: var(--muted);
   font-size: 0.7rem;
   font-weight: 650;
@@ -766,10 +915,10 @@ select {
   pointer-events: auto;
   width: min(100%, var(--composer-width));
   margin-inline: auto;
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  border: 1px solid var(--composer-border);
   border-radius: calc(var(--surface-radius) + 0.125rem);
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 1rem 2.75rem rgba(15, 23, 42, 0.08);
+  background: var(--composer-bg);
+  box-shadow: var(--composer-shadow);
   backdrop-filter: blur(20px) saturate(1.04);
   -webkit-backdrop-filter: blur(20px) saturate(1.04);
   -webkit-app-region: no-drag;
@@ -779,13 +928,13 @@ select {
 }
 
 .composer-card.drag-active {
-  border-color: rgba(15, 23, 42, 0.15);
-  box-shadow: 0 0 0 0.1875rem rgba(15, 23, 42, 0.04);
+  border-color: var(--composer-drag-border);
+  box-shadow: var(--composer-drag-shadow);
 }
 
 .composer-card:focus-within {
-  border-color: rgba(15, 23, 42, 0.13);
-  box-shadow: 0 1.125rem 3rem rgba(15, 23, 42, 0.1);
+  border-color: var(--composer-focus-border);
+  box-shadow: var(--composer-focus-shadow);
 }
 
 .composer-input {
@@ -826,7 +975,7 @@ select {
   padding: 0 0.5625rem;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--attachment-bg);
   color: var(--text);
   font-size: 0.69rem;
 }
@@ -858,7 +1007,7 @@ select {
 .chat-scroll,
 .composer-slash-menu {
   scrollbar-width: thin;
-  scrollbar-color: rgba(112, 119, 129, 0.28) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 .thread-list::-webkit-scrollbar,
@@ -872,7 +1021,7 @@ select {
 .composer-slash-menu::-webkit-scrollbar-thumb {
   border: 0.1875rem solid transparent;
   border-radius: 999px;
-  background-color: rgba(112, 119, 129, 0.24);
+  background-color: var(--scrollbar-thumb-webkit);
   background-clip: padding-box;
 }
 

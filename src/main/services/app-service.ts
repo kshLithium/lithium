@@ -2197,6 +2197,17 @@ export class AppService {
           status: "failed",
           updatedAt: new Date().toISOString()
         });
+      })
+      .finally(() => {
+        if (manageProgress) {
+          this.clearChatProgressIfCurrentMatches(
+            workspacePath,
+            activeThread.id,
+            progressOperationId,
+            runPaths.stdoutPath,
+            runPaths.stderrPath
+          );
+        }
       });
 
     return await this.store.getSnapshot(workspacePath);
@@ -5713,6 +5724,30 @@ export class AppService {
     }
   }
 
+  private clearChatProgressIfCurrentMatches(
+    workspacePath: string,
+    threadId: string,
+    operationId: string,
+    stdoutPath?: string,
+    stderrPath?: string
+  ) {
+    const key = this.chatProgressKey(workspacePath, threadId, operationId);
+    const current = this.activeChatProgressByWorkspace.get(key);
+
+    if (!current) {
+      return;
+    }
+
+    if (
+      (stdoutPath && current.stdoutPath && current.stdoutPath !== stdoutPath) ||
+      (stderrPath && current.stderrPath && current.stderrPath !== stderrPath)
+    ) {
+      return;
+    }
+
+    this.activeChatProgressByWorkspace.delete(key);
+  }
+
   private listChatProgressEntries(workspacePath: string, threadId?: string) {
     if (threadId?.trim()) {
       const threadPrefix = `${workspacePath}::${threadId}::`;
@@ -6228,8 +6263,7 @@ function extractRunSummary(finalMessage: string) {
     return machineSummary;
   }
 
-  return finalMessage
-    .replace(/\n*LITHIUM_STATUS\s*\n[\s\S]*$/i, "")
+  return stripConversationControlFooters(finalMessage)
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 180);
@@ -7105,11 +7139,16 @@ function buildOrchestratorParallelFollowupPrompt(input: {
 }
 
 function sanitizeConversationBody(value: string) {
-  return value
-    .replace(/\n*LITHIUM_STATUS\s*\n[\s\S]*$/i, "")
-    .replace(/\n*LITHIUM_HANDOFF\s*\n[\s\S]*$/i, "")
+  return stripConversationControlFooters(value)
     .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
     .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripConversationControlFooters(value: string) {
+  return value
+    .replace(/\n*LITHIUM_STATUS(?:\s*\n|\s+)?[\s\S]*$/i, "")
+    .replace(/\n*LITHIUM_HANDOFF(?:\s*\n|\s+)?[\s\S]*$/i, "")
     .trim();
 }
 

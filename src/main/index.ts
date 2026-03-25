@@ -4,6 +4,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeTheme,
   nativeImage,
   protocol,
   session,
@@ -98,7 +99,7 @@ function createWindow() {
     minHeight: 760,
     show: false,
     title: APP_NAME,
-    backgroundColor: "#ffffff",
+    backgroundColor: getWindowBackgroundColor(),
     icon: APP_ICON_PATH,
     titleBarStyle: process.platform === "darwin" ? "hidden" : "default",
     trafficLightPosition:
@@ -138,8 +139,15 @@ function createWindow() {
     maybeShowWindow(win);
   });
   win.on("closed", () => {
+    nativeTheme.removeListener("updated", syncWindowTheme);
     windowReadiness.delete(win);
   });
+
+  const syncWindowTheme = () => {
+    win.setBackgroundColor(getWindowBackgroundColor());
+  };
+
+  nativeTheme.on("updated", syncWindowTheme);
 
   if (process.env.LITHIUM_DEBUG_WINDOW === "1") {
     win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
@@ -198,6 +206,10 @@ function createWindow() {
       return;
     }
   });
+}
+
+function getWindowBackgroundColor() {
+  return nativeTheme.shouldUseDarkColors ? "#111318" : "#fcfcfb";
 }
 
 function resolveAppIconPath() {

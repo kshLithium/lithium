@@ -210,7 +210,7 @@ function parseWholeJsonBlock(rawText: string) {
 }
 
 function stripMarkedBlock(rawText: string, marker: string) {
-  return rawText.replace(new RegExp(`\\n*${marker}\\s*\\n[\\s\\S]*$`, "i"), "").trim();
+  return rawText.replace(new RegExp(`\\n*${escapeRegExp(marker)}(?:\\s*\\n|\\s+)?[\\s\\S]*$`, "i"), "").trim();
 }
 
 function extractVisibleStrategistMessage(rawOutput: string) {
@@ -492,6 +492,10 @@ function readStringList(...values: unknown[]) {
   }
 
   return [];
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function splitLooseList(value: string) {

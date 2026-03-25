@@ -3,6 +3,7 @@ type CodexEventItem = {
   type?: string;
   text?: string;
   command?: string;
+  aggregated_output?: string;
 };
 
 type CodexEvent = {
@@ -22,6 +23,14 @@ export function parseCodexProgressLog(stdout: string): CodexProgressState {
   const agentMessages = new Map<string, string>();
   const agentMessageOrder: string[] = [];
   const activeCommands = new Map<string, string>();
+  let latestAgentMessageLineIndex = -1;
+  let latestDerivedProgress:
+    | {
+        lineIndex: number;
+        summary: string;
+        details: string[];
+      }
+    | null = null;
 
   for (const [lineIndex, line] of stdout.split("\n").entries()) {
     const event = parseJsonLine(line);
@@ -45,6 +54,7 @@ export function parseCodexProgressLog(stdout: string): CodexProgressState {
       }
 
       agentMessages.set(itemId, chooseRicherProgressMessage(existing, message));
+      latestAgentMessageLineIndex = lineIndex;
       continue;
     }
 
@@ -64,6 +74,16 @@ export function parseCodexProgressLog(stdout: string): CodexProgressState {
       continue;
     }
 
+    const derivedProgress = deriveCommandProgress(event.item.aggregated_output);
+
+    if (derivedProgress) {
+      latestDerivedProgress = {
+        lineIndex,
+        summary: derivedProgress.summary,
+        details: derivedProgress.details
+      };
+    }
+
     if (event.type === "item.completed") {
       activeCommands.delete(itemId);
     }
@@ -72,12 +92,36 @@ export function parseCodexProgressLog(stdout: string): CodexProgressState {
   const orderedMessages = normalizeProgressMessageHistory(
     agentMessageOrder.map((itemId) => agentMessages.get(itemId) ?? "")
   );
-  const progressSummary = orderedMessages.at(-1) ?? "";
-  const progressDetails = orderedMessages
+  let progressSummary = orderedMessages.at(-1) ?? "";
+  let progressDetails = orderedMessages
     .slice(0, -1)
     .slice(-MAX_PROGRESS_DETAILS)
     .map((message) => summarizeProgressMessage(message));
   const activeCommand = Array.from(activeCommands.values()).at(-1) ?? null;
+
+  if (latestDerivedProgress) {
+    const derivedSummary = summarizeProgressMessage(latestDerivedProgress.summary);
+    const derivedDetails = latestDerivedProgress.details
+      .map((detail) => summarizeProgressMessage(detail))
+      .filter(Boolean);
+
+    if (
+      derivedSummary &&
+      (!progressSummary || latestDerivedProgress.lineIndex >= latestAgentMessageLineIndex)
+    ) {
+      const nextDetails = progressSummary && progressSummary !== derivedSummary
+        ? [...progressDetails, progressSummary, ...derivedDetails]
+        : [...progressDetails, ...derivedDetails];
+      progressSummary = derivedSummary;
+      progressDetails = dedupeProgressDetails(nextDetails).slice(-MAX_PROGRESS_DETAILS);
+    } else if (derivedSummary) {
+      progressDetails = dedupeProgressDetails([
+        ...progressDetails,
+        derivedSummary,
+        ...derivedDetails
+      ]).slice(-MAX_PROGRESS_DETAILS);
+    }
+  }
 
   return {
     progressSummary,
@@ -105,7 +149,7 @@ function normalizeAgentMessage(value: string | undefined) {
     return "";
   }
 
-  return value.replace(/\r\n/g, "\n").trim();
+  return stripControlFooters(value.replace(/\r\n/g, "\n")).trim();
 }
 
 function summarizeProgressMessage(value: string) {
@@ -186,5 +230,58 @@ function normalizeCommandLabel(value: string | undefined) {
     .replace(/\\"/g, "\"")
     .replace(/\\'/g, "'")
     .replace(/\\n/g, " ")
+    .trim();
+}
+
+function deriveCommandProgress(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = stripControlFooters(value.replace(/\r\n/g, "\n")).trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  const progressMatches = Array.from(normalized.matchAll(/\b(?:sliding_)?val_progress:(\d+)\/(\d+)\b/g));
+  const latestProgress = progressMatches.at(-1);
+  const exactMatches = Array.from(
+    normalized.matchAll(/(?:^|\n)[^\n]*_exact[^\n]*?\bval_bpb:([0-9.]+)/g)
+  );
+  const latestExact = exactMatches.at(-1)?.[1]?.trim() || "";
+
+  if (latestExact) {
+    return {
+      summary: `Exact val_bpb: ${latestExact}`,
+      details: latestProgress ? [`Eval progress: ${latestProgress[1]}/${latestProgress[2]}`] : []
+    };
+  }
+
+  if (latestProgress) {
+    return {
+      summary: `Eval progress: ${latestProgress[1]}/${latestProgress[2]}`,
+      details: []
+    };
+  }
+
+  return null;
+}
+
+function dedupeProgressDetails(values: string[]) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function stripControlFooters(value: string) {
+  return value
+    .replace(/\n*LITHIUM_STATUS(?:\s*\n|\s+)?[\s\S]*$/i, "")
+    .replace(/\n*LITHIUM_HANDOFF(?:\s*\n|\s+)?[\s\S]*$/i, "")
+    .replace(/\n*LITHIUM_ROUTE(?:\s*\n|\s+)?[\s\S]*$/i, "")
     .trim();
 }
