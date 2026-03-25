@@ -2,13 +2,13 @@ const CWD_MARKER_PREFIX = "\u001b]633;cwd=";
 const BELL_TERMINATOR = "\u0007";
 const ST_TERMINATOR = "\u001b\\";
 
-type TerminalMarkerParseResult = {
+type ShellOutputMarkerParseResult = {
   cwd: string | null;
   output: string;
   pending: string;
 };
 
-export function stripTerminalMarkers(input: string, pending = ""): TerminalMarkerParseResult {
+export function stripShellOutputMarkers(input: string, pending = ""): ShellOutputMarkerParseResult {
   const source = `${pending}${input}`;
   let cursor = 0;
   let output = "";

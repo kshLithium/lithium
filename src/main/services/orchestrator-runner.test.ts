@@ -78,7 +78,7 @@ describe("OrchestratorRunner", () => {
     const result = await runner.runTurn({
       workspacePath: workspace,
       prompt: "이어서 진행해줘",
-      runtimeContext: "# Lithium Runtime Context",
+      runtimeContext: "# Runtime Context",
       stdoutPath: path.join(requestDir, "orchestrator.stdout.log"),
       stderrPath: path.join(requestDir, "orchestrator.stderr.log"),
       outputPath,
@@ -157,7 +157,7 @@ describe("OrchestratorRunner", () => {
     const result = await runner.runTurn({
       workspacePath: workspace,
       prompt: "리서치랑 로컬 실험을 같이 진행해줘",
-      runtimeContext: "# Lithium Runtime Context",
+      runtimeContext: "# Runtime Context",
       stdoutPath: path.join(requestDir, "orchestrator.stdout.log"),
       stderrPath: path.join(requestDir, "orchestrator.stderr.log"),
       outputPath,
@@ -212,7 +212,7 @@ describe("OrchestratorRunner", () => {
       workspacePath: workspace,
       sessionId: "orch-thread-split",
       prompt: "분리된 lane 경로로도 이어서 진행해줘",
-      runtimeContext: "# Lithium Runtime Context",
+      runtimeContext: "# Runtime Context",
       stdoutPath: path.join(workspace, ".lithium", "orchestrator", "stdout.log"),
       stderrPath: path.join(workspace, ".lithium", "orchestrator", "stderr.log"),
       outputPath,

@@ -30,7 +30,7 @@ describe("ProjectStore", () => {
 
     await store.initProject(workspace);
     await store.writeProjectMemory(workspace, {
-      projectBrief: "Investigate the Lithium strategist loop.",
+      projectBrief: "Investigate the strategist loop.",
       researchGoal: "Ship the smallest useful research cockpit.",
       openQuestions: ["How should memory be persisted?"]
     });
@@ -39,7 +39,7 @@ describe("ProjectStore", () => {
     const content = await readFile(bundlePath, "utf8");
 
     expect(content).toContain("## Project Memory");
-    expect(content).toContain("Investigate the Lithium strategist loop.");
+    expect(content).toContain("Investigate the strategist loop.");
     expect(content.indexOf("## Project Memory")).toBeLessThan(content.indexOf("## Latest Decision"));
   });
 
@@ -55,7 +55,7 @@ describe("ProjectStore", () => {
 
     const secondThread = await store.createThread(workspace, "Literature sweep");
     await store.updateThread(workspace, secondThread.id, {
-      summary: "Track related SVM papers and baselines."
+      summary: "Track related SVM baselines and evidence."
     });
     await store.selectThread(workspace, project.defaultThreadId);
 
@@ -66,7 +66,7 @@ describe("ProjectStore", () => {
     expect(content).toContain("Main thread");
     expect(content).toContain("## Other Thread Summaries");
     expect(content).toContain("Literature sweep");
-    expect(content).toContain("Track related SVM papers and baselines.");
+    expect(content).toContain("Track related SVM baselines and evidence.");
   });
 
   it("writes artifact-specific lane context packs", async () => {
@@ -114,7 +114,7 @@ describe("ProjectStore", () => {
       projectBrief: "Investigate a simpler orchestration context.",
       researchGoal: "Keep model inputs small and stable.",
       openQuestions: ["Should runtime context carry explicit open questions?"],
-      activeHypotheses: ["The builder should see the strategist next task directly."],
+      activeHypotheses: ["The execution loop should see the latest research task directly."],
       preferences: {
         strategistStyle: "Hypothesis-first.",
         builderStyle: "Bounded artifact updates."
@@ -132,7 +132,6 @@ describe("ProjectStore", () => {
       displayPrompt: "Find the next bounded step.",
       model: "gpt-5.4",
       summary: "Summarize the current orchestration trade-off.",
-      nextTask: "Update notes/runtime-context.md with the missing context fields.",
       rationale: "The next run needs a sharper handoff.",
       rawOutput: [
         "Summarize the current orchestration trade-off in one clean builder-facing plan.",
@@ -172,13 +171,13 @@ describe("ProjectStore", () => {
       }
     );
 
-    expect(runtimeContext.content).toContain("# Lithium Runtime Context");
+    expect(runtimeContext.content).toContain("# Runtime Context");
     expect(runtimeContext.content).toContain("## Project Memory");
     expect(runtimeContext.content).toContain("## Active Thread");
     expect(runtimeContext.content).toContain("## Latest State");
     expect(runtimeContext.content).toContain("## Active Attachments");
     expect(runtimeContext.content).toContain("Open Questions: Should runtime context carry explicit open questions?");
-    expect(runtimeContext.content).toContain("Active Hypotheses: The builder should see the strategist next task directly.");
+    expect(runtimeContext.content).toContain("Active Hypotheses: The execution loop should see the latest research task directly.");
     expect(runtimeContext.content).toContain(
       "Latest strategist reply: Summarize the current orchestration trade-off in one clean builder-facing plan."
     );
@@ -240,10 +239,10 @@ describe("ProjectStore", () => {
       stderrPath: path.join(workspace, ".lithium", "runs", "R042.stderr.log"),
       finalMessagePath: path.join(workspace, ".lithium", "runs", "R042.output.txt"),
       finalMessage: [
-        "Lithium terminated a detached builder process after an app restart left it running without an active session.",
+        "The app terminated a detached builder process after restart left it running without an active session.",
         "",
         "LITHIUM_STATUS",
-        '{"summary":"Lithium terminated a detached builder process after an app restart left it running without an active session.","result":"partial"}'
+        '{"machine_summary":"The app terminated a detached builder process after restart left it running without an active session.","result":"partial"}'
       ].join("\n"),
       changedFiles: [],
       finalization: "auto",
@@ -259,14 +258,14 @@ describe("ProjectStore", () => {
     const memory = await store.readProjectMemory(workspace);
 
     expect(runtimeContext.content).toContain("Latest builder status: completed");
-    expect(runtimeContext.content).toContain("Latest builder summary: full eval reached 2.45 bpb");
+    expect(runtimeContext.content).toContain("Latest builder summary: Full eval finished.");
     expect(runtimeContext.content).toContain(
-      "Latest operational issue: Lithium terminated a detached builder process after an app restart left it running without an active session."
+      "Latest operational issue: The app terminated a detached builder process after restart left it running without an active session."
     );
     expect(memory?.sessionSummary).toContain("Latest research run: R041 (completed, exit 0)");
-    expect(memory?.sessionSummary).toContain("Latest builder summary: full eval reached 2.45 bpb");
+    expect(memory?.sessionSummary).toContain("Latest builder summary: Full eval finished.");
     expect(memory?.sessionSummary).toContain(
-      "Latest operational issue: Lithium terminated a detached builder process after an app restart left it running without an active session."
+      "Latest operational issue: The app terminated a detached builder process after restart left it running without an active session."
     );
   });
 
@@ -284,51 +283,6 @@ describe("ProjectStore", () => {
     expect(decisionPaths.id).toBe("D002");
     expect(decisionPaths.stdoutPath).toContain("D002.stdout.log");
     expect(decisionPaths.outputPath).toContain("D002.output.txt");
-  });
-
-  it("reads and writes workspace files while rejecting workspace escapes", async () => {
-    const workspace = await createWorkspace();
-    const outsideDir = await createTempDir("lithium-store-outside-");
-    const store = new ProjectStore();
-    const outsideFile = path.join(outsideDir, "outside.txt");
-
-    await writeFile(outsideFile, "secret\n", "utf8");
-
-    const created = await store.writeWorkspaceFile(workspace, "experiments/quickstart.py", "print('hello')\n");
-    const readBack = await store.readWorkspaceFile(workspace, "experiments/quickstart.py");
-    const bytes = await store.readWorkspaceFileBytes(workspace, "experiments/quickstart.py");
-
-    expect(created.relativePath).toBe("experiments/quickstart.py");
-    expect(readBack.content).toContain("print('hello')");
-    expect(Buffer.from(bytes).toString("utf8")).toContain("print('hello')");
-
-    await expect(store.readWorkspaceFile(workspace, "../outside.txt")).rejects.toThrow(
-      "Workspace files must stay inside the selected workspace."
-    );
-    await expect(store.readWorkspaceFileBytes(workspace, "../outside.txt")).rejects.toThrow(
-      "Workspace files must stay inside the selected workspace."
-    );
-    await expect(store.writeWorkspaceFile(workspace, "../outside.py", "print('nope')\n")).rejects.toThrow(
-      "Workspace files must stay inside the selected workspace."
-    );
-  });
-
-  it("rejects symlink escapes that point outside the workspace", async () => {
-    const workspace = await createWorkspace();
-    const outsideDir = await createTempDir("lithium-store-symlink-outside-");
-    const store = new ProjectStore();
-    const outsideFile = path.join(outsideDir, "secret.txt");
-    const symlinkPath = path.join(workspace, "linked-secret.txt");
-
-    await writeFile(outsideFile, "secret\n", "utf8");
-    await symlink(outsideFile, symlinkPath);
-
-    await expect(store.readWorkspaceFile(workspace, "linked-secret.txt")).rejects.toThrow(
-      "Workspace files must stay inside the selected workspace."
-    );
-    await expect(store.readWorkspaceFileBytes(workspace, "linked-secret.txt")).rejects.toThrow(
-      "Workspace files must stay inside the selected workspace."
-    );
   });
 
   it("lists every indexed workspace file instead of truncating after the first 200", async () => {
@@ -378,22 +332,30 @@ describe("ProjectStore", () => {
     const snapshot = await store.getSnapshot(workspace);
     const notesPath = path.join(sourceDir, "notes.md");
     const metricsPath = path.join(sourceDir, "metrics.csv");
+    const reportPath = path.join(sourceDir, "report.pdf");
+    const slidesPath = path.join(sourceDir, "slides.pptx");
 
     await writeFile(notesPath, "# Notes\n\nTrack the next ablation and explain the failure mode.\n", "utf8");
     await writeFile(metricsPath, "step,score\n1,0.42\n2,0.51\n", "utf8");
+    await writeFile(reportPath, "%PDF-1.4\n%dummy\n", "utf8");
+    await writeFile(slidesPath, "PK\x03\x04dummy\n", "utf8");
 
     const imported = await store.importAttachments(workspace, snapshot.activeThreadId!, [
       notesPath,
-      metricsPath
+      metricsPath,
+      reportPath,
+      slidesPath
     ]);
     const nextSnapshot = await store.getSnapshot(workspace);
     const [bundlePath] = await store.buildContextBundle(workspace, "Review the imported evidence.");
     const bundle = await readFile(bundlePath, "utf8");
 
-    expect(imported).toHaveLength(2);
-    expect(nextSnapshot.activeThreadAttachments).toHaveLength(2);
+    expect(imported).toHaveLength(4);
+    expect(nextSnapshot.activeThreadAttachments).toHaveLength(4);
     expect(nextSnapshot.activeThreadAttachments.map((record) => record.kind).sort()).toEqual([
       "csv",
+      "document",
+      "document",
       "text"
     ]);
     await expect(access(path.join(workspace, imported[0].relativePath))).resolves.toBeUndefined();
@@ -404,6 +366,8 @@ describe("ProjectStore", () => {
     expect(bundle).toContain("attachments/TH001/notes.md");
     expect(bundle).toContain("Track the next ablation and explain the failure mode.");
     expect(bundle).toContain("metrics.csv");
+    expect(bundle).toContain("report.pdf");
+    expect(bundle).toContain("Document attachment. Reference the file path directly when asking the model to inspect it.");
   });
 
   it("skips malformed record files instead of failing the snapshot", async () => {
@@ -420,7 +384,7 @@ describe("ProjectStore", () => {
     expect(snapshot.latestDecision).toBeNull();
   });
 
-  it("backfills missing thread ids on legacy decision artifacts", async () => {
+  it("backfills missing thread ids on stored decision records", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
     const paths = store.buildPaths(workspace);
@@ -431,11 +395,9 @@ describe("ProjectStore", () => {
       paths.projectFile,
       JSON.stringify(
         {
-          id: "project-legacy",
-          name: "Legacy",
+          id: "project-history",
+          name: "History",
           workspacePath: workspace,
-          lithiumPath: paths.root,
-          manuscriptPath: paths.resultsSection,
           oracleModel: "gpt-5.4-pro",
           codexModel: "gpt-5.4",
           createdAt: now,
@@ -450,11 +412,10 @@ describe("ProjectStore", () => {
       JSON.stringify(
         {
           id: "D001",
-          prompt: "Legacy prompt",
-          rawOutput: "SUMMARY: Legacy summary",
-          summary: "Legacy summary",
-          nextTask: "Legacy task",
-          rationale: "Legacy rationale",
+          prompt: "Historical prompt",
+          rawOutput: "Historical summary",
+          summary: "Historical summary",
+          rationale: "Historical rationale",
           model: "gpt-5.4-pro",
           engine: "browser",
           status: "completed",
@@ -497,7 +458,6 @@ describe("ProjectStore", () => {
       "LITHIUM_HANDOFF",
       JSON.stringify({
         summary: "자연스럽게 정리된 최종 답변.",
-        next_task: "필요하면 치트시트로 압축한다.",
         rationale: "The workspace had no local notes."
       }),
       "",
@@ -510,7 +470,6 @@ describe("ProjectStore", () => {
       prompt: "오버워치 2 캐릭터를 정리해줘",
       rawOutput,
       summary: "운영 메모: 공식 소스를 사용했다.",
-      nextTask: "Wait for the user's next request and do not change any files.",
       rationale: "Oracle did not return a structured rationale.",
       model: "gpt-5.4",
       engine: "browser",
@@ -525,11 +484,10 @@ describe("ProjectStore", () => {
     const repaired = await store.getSnapshot(workspace);
 
     expect(repaired.latestDecision?.summary).toBe("자연스럽게 정리된 최종 답변.");
-    expect(repaired.latestDecision?.nextTask).toBeUndefined();
     expect(repaired.latestDecision?.rationale).toBe("The workspace had no local notes.");
   });
 
-  it("builds a context bundle even when a legacy run omits changedFiles", async () => {
+  it("builds a context bundle even when a stored run omits changedFiles", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
     const paths = store.buildPaths(workspace);
@@ -543,8 +501,8 @@ describe("ProjectStore", () => {
     await store.writeTask(workspace, {
       id: taskPaths.id,
       threadId: snapshot.activeThreadId!,
-      title: "Legacy run task",
-      prompt: "Legacy run task",
+      title: "Recovered run task",
+      prompt: "Recovered run task",
       status: "completed",
       createdAt: now,
       updatedAt: now
@@ -557,7 +515,7 @@ describe("ProjectStore", () => {
           id: runPaths.id,
           threadId: snapshot.activeThreadId,
           taskId: taskPaths.id,
-          prompt: "Legacy run task",
+          prompt: "Recovered run task",
           model: "gpt-5.4",
           status: "completed",
           exitCode: 0,
@@ -566,7 +524,7 @@ describe("ProjectStore", () => {
           stdoutPath: runPaths.stdoutPath,
           stderrPath: runPaths.stderrPath,
           finalMessagePath: runPaths.outputPath,
-          finalMessage: "Completed legacy run.",
+          finalMessage: "Completed recovered run.",
           finalization: "auto",
           createdAt: now,
           startedAt: now,
@@ -577,137 +535,12 @@ describe("ProjectStore", () => {
       )
     );
 
-    const [bundlePath] = await store.buildContextBundle(workspace, "Summarize the legacy run.");
+    const [bundlePath] = await store.buildContextBundle(workspace, "Summarize the recovered run.");
     const content = await readFile(bundlePath, "utf8");
 
-    expect(content).toContain("Paper artifact changed: no");
     expect(content).toContain("Changed files: none");
   });
 
-  it("renames and deletes threads while cleaning thread artifacts", async () => {
-    const workspace = await createWorkspace();
-    const sourceDir = await createTempDir("lithium-thread-attachments-");
-    const store = new ProjectStore();
-    const project = await store.initProject(workspace);
-    const paths = store.buildPaths(workspace);
-    const secondThread = await store.createThread(workspace, "Second thread");
-    const thirdThread = await store.createThread(workspace, "Third thread");
-
-    await store.renameThread(workspace, secondThread.id, "  Literature sweep  ");
-    const renamedThread = (await store.listThreads(workspace)).find((thread) => thread.id === secondThread.id);
-    expect(renamedThread?.title).toBe("Literature sweep");
-
-    const notesPath = path.join(sourceDir, "thread-notes.md");
-    await writeFile(notesPath, "Thread-specific literature findings.\n", "utf8");
-    const [attachment] = await store.importAttachments(workspace, secondThread.id, [notesPath]);
-
-    const decisionPaths = await store.allocateDecision(workspace);
-    const taskPaths = await store.allocateTask(workspace);
-    const runPaths = await store.allocateRun(workspace);
-    const sessionPaths = await store.allocateTerminalSession(workspace);
-    const now = "2026-03-18T00:00:00.000Z";
-
-    await Promise.all([
-      writeFile(decisionPaths.stdoutPath, "decision stdout"),
-      writeFile(decisionPaths.stderrPath, "decision stderr"),
-      writeFile(decisionPaths.outputPath, "decision output"),
-      writeFile(runPaths.stdoutPath, "run stdout"),
-      writeFile(runPaths.stderrPath, "run stderr"),
-      writeFile(runPaths.outputPath, "run output"),
-      writeFile(sessionPaths.transcriptPath, "terminal stdout\nterminal stderr"),
-      writeFile(sessionPaths.stdoutPath, ""),
-      writeFile(sessionPaths.stderrPath, "")
-    ]);
-
-    await store.writeDecision(workspace, {
-      id: decisionPaths.id,
-      threadId: secondThread.id,
-      prompt: "Thread decision",
-      rawOutput: "SUMMARY: Thread decision",
-      summary: "Thread decision",
-      nextTask: "Thread task",
-      rationale: "Thread rationale",
-      model: "gpt-5.4-pro",
-      engine: "browser",
-      status: "completed",
-      command: { command: "npx", args: ["oracle"], cwd: workspace },
-      stdoutPath: decisionPaths.stdoutPath,
-      stderrPath: decisionPaths.stderrPath,
-      outputPath: decisionPaths.outputPath,
-      createdAt: now
-    });
-
-    await store.writeTask(workspace, {
-      id: taskPaths.id,
-      threadId: secondThread.id,
-      title: "Thread task",
-      prompt: "Thread task",
-      status: "completed",
-      createdAt: now,
-      updatedAt: now
-    });
-
-    await store.writeRun(workspace, {
-      id: runPaths.id,
-      threadId: secondThread.id,
-      taskId: taskPaths.id,
-      prompt: "Thread run",
-      model: "gpt-5.4",
-      status: "completed",
-      exitCode: 0,
-      pid: null,
-      command: { command: "codex", args: ["exec"], cwd: workspace },
-      stdoutPath: runPaths.stdoutPath,
-      stderrPath: runPaths.stderrPath,
-      finalMessagePath: runPaths.outputPath,
-      finalMessage: "SUMMARY: thread run",
-      changedFiles: [],
-      finalization: "auto",
-      createdAt: now,
-      startedAt: now,
-      endedAt: now
-    });
-
-    await store.writeTerminalSession(workspace, {
-      id: sessionPaths.id,
-      threadId: secondThread.id,
-      workspacePath: workspace,
-      shell: "zsh",
-      cwd: workspace,
-      status: "completed",
-      exitCode: 0,
-      pid: null,
-      transcriptPath: sessionPaths.transcriptPath,
-      stdoutPath: sessionPaths.stdoutPath,
-      stderrPath: sessionPaths.stderrPath,
-      cols: 120,
-      rows: 32,
-      startedAt: now,
-      endedAt: now
-    });
-
-    await store.deleteThread(workspace, secondThread.id);
-    const snapshot = await store.getSnapshot(workspace);
-
-    expect(snapshot.threads).toHaveLength(2);
-    expect(snapshot.activeThreadId).toBe(thirdThread.id);
-    expect(snapshot.project?.defaultThreadId).toBe(project.defaultThreadId);
-    await expect(access(path.join(paths.threadsDir, `${secondThread.id}.json`))).rejects.toThrow();
-    await expect(access(path.join(paths.decisionsDir, `${decisionPaths.id}.json`))).rejects.toThrow();
-    await expect(access(path.join(paths.tasksDir, `${taskPaths.id}.json`))).rejects.toThrow();
-    await expect(access(path.join(paths.runsDir, `${runPaths.id}.json`))).rejects.toThrow();
-    await expect(access(path.join(paths.terminalsDir, `${sessionPaths.id}.json`))).rejects.toThrow();
-    await expect(access(path.join(paths.attachmentRecordsDir, `${attachment.id}.json`))).rejects.toThrow();
-    await expect(access(decisionPaths.outputPath)).rejects.toThrow();
-    await expect(access(runPaths.outputPath)).rejects.toThrow();
-    await expect(access(sessionPaths.transcriptPath)).rejects.toThrow();
-    await expect(access(path.join(workspace, attachment.relativePath))).rejects.toThrow();
-
-    await store.deleteThread(workspace, thirdThread.id);
-    await expect(store.deleteThread(workspace, project.defaultThreadId)).rejects.toThrow(
-      "Cannot delete the last thread."
-    );
-  });
 });
 
 async function createWorkspace() {

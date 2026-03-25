@@ -4,6 +4,19 @@ import path from "node:path";
 import type { ArtifactKind, WorkspaceFileKind } from "../../shared/types";
 
 const LITHIUM_DIR = ".lithium";
+const DOCUMENT_EXTENSIONS = new Set([
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".rtf",
+  ".odt",
+  ".ods",
+  ".odp"
+]);
 
 export const WORKSPACE_INDEX_IGNORED_DIRS = new Set([
   ".git",
@@ -78,17 +91,10 @@ export function classifyWorkspaceFile(filePath: string): { kind: WorkspaceFileKi
     };
   }
 
-  if ([".tex", ".bib", ".cls", ".sty"].includes(extension)) {
+  if (DOCUMENT_EXTENSIONS.has(extension)) {
     return {
-      kind: "paper",
-      artifactKind: extension === ".bib" ? "bib" : "tex"
-    };
-  }
-
-  if (extension === ".pdf") {
-    return {
-      kind: "paper",
-      artifactKind: "pdf"
+      kind: "artifact",
+      artifactKind: "document"
     };
   }
 

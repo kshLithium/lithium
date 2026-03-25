@@ -7,9 +7,9 @@ describe("CodexRunner", () => {
   it("frames builder prompts as natural chat replies instead of terse operator logs", () => {
     const runner = new CodexRunner();
     const prompt = (runner as any).normalizePrompt(
-      "Update the experiment summary in the paper.",
-      "# Lithium Runtime Context\nLatest task: update the paper",
-      "## Latest run\nThe compile passed."
+      "Update the experiment summary in the notes.",
+      "# Runtime Context\nLatest task: update the notes",
+      "## Latest run\nThe validation passed."
     );
 
     expect(prompt).toContain("Reply to the user naturally in markdown");
@@ -25,7 +25,7 @@ describe("CodexRunner", () => {
       "/tmp/workspace",
       "Inspect the repository.",
       "/tmp/out.txt",
-      "# Lithium Runtime Context",
+      "# Runtime Context",
       undefined,
       "gpt-5.4",
       "xhigh"
@@ -45,13 +45,13 @@ describe("CodexRunner", () => {
     const runner = new CodexRunner();
     const prompt = (runner as any).normalizePrompt(
       "새로운 svm 알고리즘 후보를 정리해줘",
-      "# Lithium Runtime Context\nLatest task: svm novelty memo",
+      "# Runtime Context\nLatest task: svm novelty memo",
       undefined,
       "ko"
     );
 
-    expect(prompt).toContain("당신은 현재 저장소 안에서 작업하는 Lithium builder입니다.");
+    expect(prompt).toContain("당신은 현재 저장소 안에서 작업하는 자동화 실행 에이전트입니다.");
     expect(prompt).toContain("JSON 앞뒤에 마크다운 코드 펜스를 쓰지 마세요.");
-    expect(prompt).not.toContain("You are the Lithium builder running inside the active repository.");
+    expect(prompt).not.toContain("You are the automation execution agent working inside the active repository.");
   });
 });

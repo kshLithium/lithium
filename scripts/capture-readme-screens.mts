@@ -1,9 +1,9 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
+import { _electron as electron, type Page } from "playwright-core";
 import { ProjectStore } from "../src/main/services/project-store.ts";
-import type { DecisionRecord, RunRecord, TaskRecord } from "../src/shared/types.ts";
+import type { ConversationEntryRecord } from "../src/shared/types.ts";
 
 const APP_WIDTH = 1512;
 const APP_HEIGHT = 980;
@@ -14,15 +14,14 @@ async function main() {
   const outputDir = path.join(process.cwd(), "docs", "readme");
   await mkdir(outputDir, { recursive: true });
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    LITHIUM_APP_NAME: appName,
-    LITHIUM_WORKSPACE: workspacePath
-  };
-
-  if (process.env.VITE_DEV_SERVER_URL?.trim()) {
-    env.VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
-  }
+  const env = Object.fromEntries(
+    Object.entries({
+      ...process.env,
+      LITHIUM_APP_NAME: appName,
+      LITHIUM_WORKSPACE: workspacePath,
+      VITE_DEV_SERVER_URL: process.env.VITE_DEV_SERVER_URL?.trim() || undefined
+    }).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+  );
 
   const electronApp = await electron.launch({
     args: [path.join(process.cwd(), "dist-electron", "index.cjs")],
@@ -34,105 +33,10 @@ async function main() {
     await page.setViewportSize({ width: APP_WIDTH, height: APP_HEIGHT });
     await page.waitForLoadState("domcontentloaded");
     await page.waitForSelector("textarea.composer-input", { timeout: 30_000 });
-
-    await page.evaluate(async (targetWorkspacePath) => {
-      await window.lithium.updateAppSettings({
-        onboardingDismissed: true,
-        strategistSessionReady: true,
-        themePreference: "light"
-      });
-      await window.lithium.initProject(targetWorkspacePath);
-    }, workspacePath);
-
-    await page.reload();
-    await page.waitForLoadState("domcontentloaded");
-    await page.waitForSelector("textarea.composer-input", { timeout: 30_000 });
-    await page.waitForTimeout(800);
-
-    await page.evaluate(async (targetWorkspacePath) => {
-      const snapshot = await window.lithium.getProjectSnapshot(targetWorkspacePath);
-      const threads = snapshot.threads;
-      const firstThread = threads[0];
-
-      if (firstThread) {
-        await window.lithium.renameThread({
-          workspacePath: targetWorkspacePath,
-          threadId: firstThread.id,
-          title: "loop sketch"
-        });
-      }
-
-      await window.lithium.createThread({
-        workspacePath: targetWorkspacePath,
-        title: "notes"
-      });
-
-      await window.lithium.createThread({
-        workspacePath: targetWorkspacePath,
-        title: "paper"
-      });
-
-      const refreshed = await window.lithium.getProjectSnapshot(targetWorkspacePath);
-      const targetThread = refreshed.threads.find((thread) => thread.title === "loop sketch");
-
-      if (targetThread) {
-        await window.lithium.selectThread({
-          workspacePath: targetWorkspacePath,
-          threadId: targetThread.id
-        });
-      }
-
-      await window.lithium.updateProjectMemory({
-        workspacePath: targetWorkspacePath,
-        projectBrief: "Loose demo workspace for Lithium README shots.",
-        researchGoal: "Figure out what a local research loop should automate next.",
-        openQuestions: [
-          "What should stay in chat versus become a durable file?",
-          "How much of the loop can run without feeling fake?"
-        ],
-        activeHypotheses: [
-          "A thin strategist + builder split is enough for a first useful prototype."
-        ]
-      });
-
-      try {
-        await window.lithium.compilePaper(targetWorkspacePath);
-      } catch {
-        // README screenshots can still proceed without a compiled preview.
-      }
-    }, workspacePath);
-
-    await page.reload();
-    await page.waitForLoadState("domcontentloaded");
-    await page.waitForSelector("textarea.composer-input", { timeout: 30_000 });
     await page.waitForTimeout(1200);
-
-    await showChatPrompt(
-      page,
-      "gpt-5.4 pro랑 codex cli 묶어서 지금 이 워크스페이스에서 돌아갈 만한 research loop를 대충 정리해줘"
-    );
+    await ensureLatestMessageVisible(page);
     await page.screenshot({
       path: path.join(outputDir, "hero-chat.png")
-    });
-
-    await showSlashCommand(page, "/co");
-    await page.locator("#composer-slash-command-code-panel").click();
-    await page.waitForSelector(".code-workbench", { timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await page.screenshot({
-      path: path.join(outputDir, "code-workbench.png")
-    });
-
-    await page.locator(".workbench-close-button").click();
-    await page.waitForSelector(".chat-column", { timeout: 10_000 });
-    await page.waitForTimeout(300);
-
-    await showSlashCommand(page, "/pa");
-    await page.locator("#composer-slash-command-paper-panel").click();
-    await page.waitForSelector(".paper-surface", { timeout: 10_000 });
-    await page.waitForTimeout(800);
-    await page.screenshot({
-      path: path.join(outputDir, "paper-workbench.png")
     });
   } finally {
     await electronApp.close().catch(() => undefined);
@@ -142,19 +46,12 @@ async function main() {
   }
 }
 
-async function showChatPrompt(page: Page, prompt: string) {
-  const textarea = page.locator("textarea.composer-input");
-  await textarea.click();
-  await textarea.fill(prompt);
-  await page.waitForTimeout(250);
-}
-
-async function showSlashCommand(page: Page, query: string) {
-  const textarea = page.locator("textarea.composer-input");
-  await textarea.click();
-  await textarea.fill(query);
-  await page.waitForSelector(".composer-slash-menu", { timeout: 10_000 });
-  await page.waitForTimeout(250);
+async function ensureLatestMessageVisible(page: Page) {
+  const scroller = page.locator(".chat-scroll");
+  await scroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await page.waitForTimeout(200);
 }
 
 async function createCaptureWorkspace() {
@@ -163,40 +60,36 @@ async function createCaptureWorkspace() {
 
   await mkdir(path.join(workspacePath, "src"), { recursive: true });
   await mkdir(path.join(workspacePath, "notes"), { recursive: true });
-  await mkdir(path.join(workspacePath, "paper", "sections"), { recursive: true });
   await mkdir(path.join(workspacePath, "results"), { recursive: true });
+  await mkdir(path.join(workspacePath, "experiments"), { recursive: true });
 
   await Promise.all([
     writeFile(
       path.join(workspacePath, "README.md"),
-      ["# demo-loop", "", "small fake workspace for Lithium screenshots.", ""].join("\n"),
+      ["# demo-loop", "", "Small local workspace for the Lithium README capture.", ""].join("\n"),
       "utf8"
     ),
     writeFile(
       path.join(workspacePath, "src", "research-loop.ts"),
       [
-        "export type ResearchStep = {",
-        "  title: string;",
-        "  owner: \"strategist\" | \"builder\";",
-        "};",
-        "",
-        "export const draftLoop: ResearchStep[] = [",
-        "  { title: \"skim recent signals\", owner: \"strategist\" },",
-        "  { title: \"turn the next task into files\", owner: \"builder\" },",
-        "  { title: \"write down what changed\", owner: \"builder\" }",
+        "export const draftLoop = [",
+        "  \"scan recent signals\",",
+        "  \"turn the next move into files\",",
+        "  \"write back results into the workspace\"",
         "];",
         ""
       ].join("\n"),
       "utf8"
     ),
     writeFile(
-      path.join(workspacePath, "notes", "loop-notes.md"),
+      path.join(workspacePath, "notes", "automation-loop.md"),
       [
-        "# loop notes",
+        "# automation loop",
         "",
         "- keep the workspace local",
-        "- let chat stay messy",
-        "- save artifacts when something becomes real",
+        "- let chat stay conversational",
+        "- save durable outputs into files",
+        "- keep the UI focused on the main thread",
         ""
       ].join("\n"),
       "utf8"
@@ -205,8 +98,12 @@ async function createCaptureWorkspace() {
       path.join(workspacePath, "results", "summary.json"),
       JSON.stringify(
         {
-          lastRun: "dry",
-          signals: ["chat is the entry point", "files are the memory", "paper should lag less"]
+          lastRun: "seeded",
+          themes: [
+            "chat is the entry point",
+            "files are the durable memory",
+            "automation should stay visible in one thread"
+          ]
         },
         null,
         2
@@ -214,36 +111,8 @@ async function createCaptureWorkspace() {
       "utf8"
     ),
     writeFile(
-      path.join(workspacePath, "paper", "main.tex"),
-      [
-        "\\documentclass{article}",
-        "\\begin{document}",
-        "\\section{Abstract}",
-        "\\input{sections/abstract}",
-        "",
-        "\\section{Results}",
-        "\\input{sections/results}",
-        "\\end{document}",
-        ""
-      ].join("\n"),
-      "utf8"
-    ),
-    writeFile(
-      path.join(workspacePath, "paper", "sections", "abstract.tex"),
-      [
-        "Lithium is a rough local research loop prototype.",
-        "It keeps strategist notes, builder runs, and paper files in one workspace.",
-        ""
-      ].join("\n"),
-      "utf8"
-    ),
-    writeFile(
-      path.join(workspacePath, "paper", "sections", "results.tex"),
-      [
-        "The current build mostly proves the interaction model.",
-        "It is still buggy and the actual automation depth is unfinished.",
-        ""
-      ].join("\n"),
+      path.join(workspacePath, "experiments", "next-step.txt"),
+      "Tighten the local loop until it can move from planning to repeatable execution.\n",
       "utf8"
     )
   ]);
@@ -253,115 +122,101 @@ async function createCaptureWorkspace() {
 }
 
 async function seedCaptureState(workspacePath: string) {
-  const projectStore = new ProjectStore();
-  const project = await projectStore.initProject(workspacePath, {
+  const store = new ProjectStore();
+  const project = await store.initProject(workspacePath, {
     name: "demo-loop"
   });
-  const activeThreadId = project.activeThreadId;
-  const now = new Date().toISOString();
 
-  const decisionPaths = await projectStore.allocateDecision(workspacePath);
-  const strategistOutput = [
-    "SUMMARY: Keep the loop local and lightweight.",
-    "NEXT_TASK: Sketch the builder-facing loop, keep paper notes visible, and leave a short result summary in the workspace.",
-    "RATIONALE: The prototype is most convincing when the chat, code, and paper surfaces all point at the same local state."
-  ].join("\n");
-  const decision: DecisionRecord = {
-    id: decisionPaths.id,
-    threadId: activeThreadId,
-    prompt: "roughly map the next version of this local research loop",
-    displayPrompt: "roughly map the next version of this local research loop",
-    rawOutput: strategistOutput,
-    summary: "Keep the loop local and lightweight.",
-    nextTask:
-      "Sketch the builder-facing loop, keep paper notes visible, and leave a short result summary in the workspace.",
-    rationale:
-      "The prototype is most convincing when the chat, code, and paper surfaces all point at the same local state.",
-    model: "gpt-5.4-pro",
-    engine: "browser",
-    status: "completed",
-    command: {
-      command: "npx",
-      args: ["@openai/codex", "strategize"],
-      cwd: workspacePath
-    },
-    stdoutPath: decisionPaths.stdoutPath,
-    stderrPath: decisionPaths.stderrPath,
-    outputPath: decisionPaths.outputPath,
-    createdAt: now
-  };
-
-  const taskPaths = await projectStore.allocateTask(workspacePath);
-  const task: TaskRecord = {
-    id: taskPaths.id,
-    threadId: activeThreadId,
-    sourceDecisionId: decision.id,
-    title: "shape the local loop surface",
-    prompt:
-      "Sketch the builder-facing loop, keep paper notes visible, and leave a short result summary in the workspace.",
-    status: "completed",
-    createdAt: now,
-    updatedAt: now
-  };
-
-  const runPaths = await projectStore.allocateRun(workspacePath);
-  const finalMessage = [
-    "SUMMARY: added a rough loop sketch, seeded paper files, and left a small workspace summary.",
-    "FILES: src/research-loop.ts, notes/loop-notes.md, paper/main.tex, paper/sections/abstract.tex, paper/sections/results.tex, results/summary.json",
-    "RESULT: success"
-  ].join("\n");
-  const run: RunRecord = {
-    id: runPaths.id,
-    threadId: activeThreadId,
-    taskId: task.id,
-    prompt: task.prompt,
-    displayPrompt: "shape the local loop surface",
-    model: "gpt-5.4",
-    status: "completed",
-    exitCode: 0,
-    pid: null,
-    command: {
-      command: "codex",
-      args: ["exec", task.prompt],
-      cwd: workspacePath
-    },
-    stdoutPath: runPaths.stdoutPath,
-    stderrPath: runPaths.stderrPath,
-    finalMessagePath: runPaths.outputPath,
-    finalMessage,
-    changedFiles: [
-      "src/research-loop.ts",
-      "notes/loop-notes.md",
-      "paper/main.tex",
-      "paper/sections/abstract.tex",
-      "paper/sections/results.tex",
-      "results/summary.json"
+  await store.writeProjectMemory(workspacePath, {
+    projectBrief: "Small local workspace for README capture.",
+    researchGoal: "Tighten the automation loop until the main chat can carry real research work.",
+    openQuestions: [
+      "Which updates should stay as chat versus become files?",
+      "How much of the loop can run unattended before trust drops?"
     ],
-    finalization: "auto",
-    createdAt: now,
-    startedAt: now,
-    endedAt: now
-  };
-
-  await Promise.all([
-    writeFile(decisionPaths.stdoutPath, "", "utf8"),
-    writeFile(decisionPaths.stderrPath, "", "utf8"),
-    writeFile(decisionPaths.outputPath, strategistOutput, "utf8"),
-    writeFile(runPaths.stdoutPath, "", "utf8"),
-    writeFile(runPaths.stderrPath, "", "utf8"),
-    writeFile(runPaths.outputPath, finalMessage, "utf8")
-  ]);
-
-  await projectStore.writeDecision(workspacePath, decision);
-  await projectStore.writeTask(workspacePath, task);
-  await projectStore.writeRun(workspacePath, run);
-  await projectStore.updateThread(workspacePath, activeThreadId, {
-    summary: "Local loop prototype with strategist notes, builder output, and paper files kept in one workspace."
+    activeHypotheses: [
+      "A single main thread plus durable workspace state is enough for the first useful version."
+    ],
+    sessionSummary: "Seeded workspace for a single-view Lithium screenshot."
   });
-  await projectStore.updateSessionSummary(workspacePath);
-  await projectStore.buildContextBundle(
+
+  await store.updateThread(workspacePath, project.defaultThreadId, {
+    title: "working notes",
+    summary: "Loose observations and scratch prompts."
+  });
+
+  const baselineThread = await store.createThread(workspacePath, "baseline sweep");
+  await store.updateThread(workspacePath, baselineThread.id, {
+    summary: "Quick scan of prior signals and open questions."
+  });
+
+  const resultsThread = await store.createThread(workspacePath, "results review");
+  await store.updateThread(workspacePath, resultsThread.id, {
+    summary: "Summaries, metrics, and workspace artifacts to revisit."
+  });
+
+  const mainThread = await store.createThread(workspacePath, "automation loop");
+  await store.updateThread(workspacePath, mainThread.id, {
+    summary: "Main thread for steering the local research loop."
+  });
+  await store.selectThread(workspacePath, mainThread.id);
+
+  const startedAt = Date.parse("2026-03-26T08:00:00.000Z");
+  const entries: Array<Omit<ConversationEntryRecord, "id">> = [
+    {
+      threadId: mainThread.id,
+      role: "user",
+      source: "user",
+      body: "현재 워크스페이스 기준으로 자동화 연구 루프를 더 가볍게 정리해줘.",
+      createdAt: new Date(startedAt).toISOString()
+    },
+    {
+      threadId: mainThread.id,
+      role: "assistant",
+      source: "orchestrator",
+      body: [
+        "정리 방향은 이렇습니다.",
+        "",
+        "1. 메인 채팅 하나에서 계획, 실행, 요약을 끝냅니다.",
+        "2. 산출물은 [`notes/automation-loop.md`](" + path.join(workspacePath, "notes", "automation-loop.md") + ") 같은 파일에 남깁니다.",
+        "3. 실험 결과는 [`results/summary.json`](" + path.join(workspacePath, "results", "summary.json") + ") 에 축적합니다."
+      ].join("\n"),
+      createdAt: new Date(startedAt + 60_000).toISOString()
+    },
+    {
+      threadId: mainThread.id,
+      role: "user",
+      source: "user",
+      body: "좋아. 그럼 지금 코드베이스에서 main chat이 아닌 나머지 개념은 계속 줄여도 되는지 체크해줘.",
+      createdAt: new Date(startedAt + 120_000).toISOString()
+    },
+    {
+      threadId: mainThread.id,
+      role: "assistant",
+      source: "automation",
+      body: [
+        "네. 현재 기준으로는 다음 원칙이 안전합니다.",
+        "",
+        "- UI는 thread rail + main chat + composer 정도만 유지",
+        "- durable state는 `.lithium/` 과 워크스페이스 파일에만 남기기",
+        "- 수동 편집기나 추가 패널은 다시 붙이지 않기"
+      ].join("\n"),
+      createdAt: new Date(startedAt + 180_000).toISOString()
+    }
+  ];
+
+  for (const entry of entries) {
+    const allocated = await store.allocateConversationEntry(workspacePath);
+    await store.writeConversationEntry(workspacePath, {
+      id: allocated.id,
+      ...entry
+    });
+  }
+
+  await store.updateSessionSummary(workspacePath);
+  await store.buildContextBundle(
     workspacePath,
-    "Refresh the Lithium context bundle for README capture."
+    "Refresh the workspace context bundle for README capture."
   );
 }
 

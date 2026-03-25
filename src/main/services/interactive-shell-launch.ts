@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 
-export type TerminalShellLaunch = {
+export type InteractiveShellLaunch = {
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
@@ -10,7 +10,7 @@ export type TerminalShellLaunch = {
   cleanup: () => Promise<void>;
 };
 
-export async function prepareInteractiveShellLaunch(shellPath?: string): Promise<TerminalShellLaunch> {
+export async function prepareInteractiveShellLaunch(shellPath?: string): Promise<InteractiveShellLaunch> {
   const command = shellPath || process.env.SHELL || "/bin/zsh";
   const label = path.basename(command);
 
@@ -31,7 +31,7 @@ export async function prepareInteractiveShellLaunch(shellPath?: string): Promise
   };
 }
 
-async function prepareZshLaunch(command: string, label: string): Promise<TerminalShellLaunch> {
+async function prepareZshLaunch(command: string, label: string): Promise<InteractiveShellLaunch> {
   const originalHome = process.env.HOME || os.homedir();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "lithium-zsh-"));
   const escapedHome = toShellLiteral(originalHome);
@@ -98,7 +98,7 @@ async function prepareZshLaunch(command: string, label: string): Promise<Termina
   };
 }
 
-async function prepareBashLaunch(command: string, label: string): Promise<TerminalShellLaunch> {
+async function prepareBashLaunch(command: string, label: string): Promise<InteractiveShellLaunch> {
   const originalHome = process.env.HOME || os.homedir();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "lithium-bash-"));
   const rcPath = path.join(tempDir, "lithium.bashrc");

@@ -40,7 +40,6 @@ export type OrchestratorAutomationDirective = {
   maxSteps?: number;
   maxRuntimeMinutes?: number;
   maxRetries?: number;
-  paperWriteEnabled?: boolean;
 };
 
 export type OrchestratorDelegationDirective =
@@ -65,8 +64,6 @@ const AUTOMATION_HEADER_KEYS = new Set([
   "maxsteps",
   "maxruntimeminutes",
   "maxretries",
-  "paperwrite",
-  "paperwriteenabled",
   "task"
 ]);
 
@@ -130,8 +127,7 @@ export function parseOrchestratorDelegationRequest(
     mode: parseAutomationMode(parsed.headers.mode),
     maxSteps: parsePositiveInteger(parsed.headers.maxsteps),
     maxRuntimeMinutes: parsePositiveInteger(parsed.headers.maxruntimeminutes),
-    maxRetries: parseNonNegativeInteger(parsed.headers.maxretries),
-    paperWriteEnabled: parseBooleanLike(parsed.headers.paperwriteenabled ?? parsed.headers.paperwrite)
+    maxRetries: parseNonNegativeInteger(parsed.headers.maxretries)
   };
 }
 

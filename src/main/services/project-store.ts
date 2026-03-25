@@ -11,7 +11,6 @@ import type {
   ConversationEntryRecord,
   ContextPackLane,
   DecisionRecord,
-  ManuscriptSectionRecord,
   LithiumHandoff,
   ProjectMemoryLayer,
   ProjectMemoryRecord,
@@ -20,10 +19,7 @@ import type {
   RouterTraceRecord,
   ThreadRecord,
   RunRecord,
-  TerminalSessionSummary,
-  TerminalSessionRecord,
   TaskRecord,
-  WorkspaceFileContent,
   WorkspaceFileRecord
 } from "../../shared/types";
 import { DEFAULT_PROJECT_RESEARCH_GOAL } from "../../shared/types";
@@ -32,18 +28,31 @@ import {
   handoffUserMessage,
   isOperationalAutomationMessage
 } from "../../shared/handoff-utils";
-import { extractFinalSummary, readTailText } from "./run-artifacts";
+import { extractFinalSummary } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
-import { parseTerminalCapture } from "./terminal-session";
 import { pathExists } from "./fs-utils";
 import { classifyWorkspaceFile, walkWorkspaceIndex } from "./workspace-index";
-import { resolveWorkspaceMemberPath } from "./workspace-paths";
 
 const LITHIUM_DIR = ".lithium";
 const PROJECT_FILE = "project.json";
 const ACTIVITY_LOG = "activity.log";
 const PROMPT_LOG = "prompt-log.jsonl";
 const RECORD_READ_BATCH_SIZE = 32;
+const DOCUMENT_ATTACHMENT_EXCERPT =
+  "Document attachment. Reference the file path directly when asking the model to inspect it.";
+const DOCUMENT_EXTENSIONS = new Set([
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".rtf",
+  ".odt",
+  ".ods",
+  ".odp"
+]);
 
 type ProjectPaths = {
   root: string;
@@ -59,15 +68,11 @@ type ProjectPaths = {
   automationCyclesDir: string;
   automationStepsDir: string;
   automationCheckpointsDir: string;
-  terminalsDir: string;
-  manuscriptDir: string;
-  sectionsDir: string;
   contextDir: string;
   memoryDir: string;
   projectFile: string;
   activityLog: string;
   promptLog: string;
-  resultsSection: string;
   contextBundle: string;
   projectMemoryFile: string;
   memoryBriefFile: string;
@@ -98,7 +103,6 @@ type ContextPackOptions = {
 type RuntimeContextOptions = {
   lane?: ContextPackLane | "router";
   artifactId?: string;
-  includeManuscript?: boolean;
 };
 
 export class ProjectStore {
@@ -119,15 +123,11 @@ export class ProjectStore {
       automationCyclesDir: path.join(root, "automation", "cycles"),
       automationStepsDir: path.join(root, "automation", "steps"),
       automationCheckpointsDir: path.join(root, "automation", "checkpoints"),
-      terminalsDir: path.join(root, "terminals"),
-      manuscriptDir: path.join(root, "manuscript"),
-      sectionsDir: path.join(root, "manuscript", "sections"),
       contextDir: path.join(root, "context"),
       memoryDir: path.join(root, "memory"),
       projectFile: path.join(root, PROJECT_FILE),
       activityLog: path.join(root, ACTIVITY_LOG),
       promptLog: path.join(root, PROMPT_LOG),
-      resultsSection: path.join(root, "manuscript", "sections", "results.md"),
       contextBundle: path.join(root, "context", "current-context.md"),
       projectMemoryFile: path.join(root, "memory", "project-memory.json"),
       memoryBriefFile: path.join(root, "memory", "brief.md"),
@@ -156,8 +156,6 @@ export class ProjectStore {
     await mkdir(paths.automationCyclesDir, { recursive: true });
     await mkdir(paths.automationStepsDir, { recursive: true });
     await mkdir(paths.automationCheckpointsDir, { recursive: true });
-    await mkdir(paths.terminalsDir, { recursive: true });
-    await mkdir(paths.sectionsDir, { recursive: true });
     await mkdir(paths.contextDir, { recursive: true });
     await mkdir(paths.memoryDir, { recursive: true });
     await mkdir(paths.workspaceAttachmentsDir, { recursive: true });
@@ -170,8 +168,6 @@ export class ProjectStore {
       id: `project-${randomUUID()}`,
       name: path.basename(workspacePath),
       workspacePath,
-      lithiumPath: paths.root,
-      manuscriptPath: paths.resultsSection,
       oracleModel: "gpt-5.4",
       codexModel: "gpt-5.4",
       defaultThreadId: "",
@@ -198,27 +194,14 @@ export class ProjectStore {
       ...project,
       ...projectPatch,
       workspacePath,
-      lithiumPath: paths.root,
-      manuscriptPath: paths.resultsSection,
       defaultThreadId: projectPatch.defaultThreadId ?? defaultThread.id,
       activeThreadId: projectPatch.activeThreadId ?? activeThread.id,
       updatedAt: now
     };
 
     await this.writeJson(paths.projectFile, merged);
-    await this.backfillLegacyThreadIds(workspacePath, merged.defaultThreadId);
+    await this.ensureThreadIds(workspacePath, merged.defaultThreadId);
     await this.ensureProjectMemory(workspacePath, merged.name);
-
-    if (!(await this.exists(paths.resultsSection))) {
-      const initialSection = [
-        "# Results",
-        "",
-        "Lithium will project strategist decisions and builder runs into this section.",
-        ""
-      ].join("\n");
-
-      await writeFile(paths.resultsSection, initialSection, "utf8");
-    }
 
     if (createdFresh) {
       await this.appendActivity(workspacePath, `project initialized at ${workspacePath}`);
@@ -276,26 +259,6 @@ export class ProjectStore {
 
     await this.writeJson(this.buildPaths(workspacePath).projectFile, updatedProject);
     return updatedProject;
-  }
-
-  async renameThread(workspacePath: string, threadId: string, title: string) {
-    const normalizedTitle = normalizeThreadTitle(title);
-    const paths = this.buildPaths(workspacePath);
-    const existing = await this.readJson<ThreadRecord>(path.join(paths.threadsDir, `${threadId}.json`));
-
-    if (!existing) {
-      throw new Error(`Thread not found: ${threadId}`);
-    }
-
-    const nextThread: ThreadRecord = {
-      ...existing,
-      title: normalizedTitle,
-      updatedAt: new Date().toISOString()
-    };
-
-    await this.writeThread(workspacePath, nextThread);
-    await this.appendActivity(workspacePath, `${threadId} renamed to "${normalizedTitle}"`);
-    return nextThread;
   }
 
   async importAttachments(workspacePath: string, threadId: string, filePaths: string[]) {
@@ -396,60 +359,11 @@ export class ProjectStore {
     );
   }
 
-  async deleteThread(workspacePath: string, threadId: string) {
-    const project = await this.readProject(workspacePath);
-    if (!project) {
-      throw new Error("Project is not initialized.");
-    }
-
-    const threads = await this.listThreads(workspacePath);
-    if (threads.length <= 1) {
-      throw new Error("Cannot delete the last thread.");
-    }
-
-    if (!threads.some((thread) => thread.id === threadId)) {
-      throw new Error(`Thread not found: ${threadId}`);
-    }
-
-    const remainingThreads = threads.filter((thread) => thread.id !== threadId);
-    const nextThread =
-      remainingThreads.find((thread) => thread.id === project.activeThreadId) ??
-      remainingThreads.find((thread) => thread.id === project.defaultThreadId) ??
-      remainingThreads[0] ??
-      null;
-
-    if (!nextThread) {
-      throw new Error("No remaining thread to activate.");
-    }
-
-    const updatedProject: ProjectRecord = {
-      ...project,
-      activeThreadId: nextThread.id,
-      defaultThreadId: project.defaultThreadId === threadId ? nextThread.id : project.defaultThreadId,
-      updatedAt: new Date().toISOString()
-    };
-
-    await this.deleteThreadArtifacts(workspacePath, threadId);
-    await this.deleteThreadJson(workspacePath, threadId);
-    await this.writeJson(this.buildPaths(workspacePath).projectFile, updatedProject);
-    await this.appendActivity(workspacePath, `${threadId} deleted`);
-    await this.updateSessionSummary(workspacePath);
-    await this.buildContextBundle(
-      workspacePath,
-      "Refresh the Lithium context bundle after deleting a thread."
-    );
-
-    return updatedProject;
-  }
-
   async updateThread(
     workspacePath: string,
     threadId: string,
     patch: Partial<
-      Pick<
-        ThreadRecord,
-        "title" | "summary" | "memory" | "strategistContextFingerprint" | "strategistLastContextAttachedAt"
-      >
+      Pick<ThreadRecord, "title" | "summary" | "memory" | "strategistContextFingerprint">
     >
   ) {
     const paths = this.buildPaths(workspacePath);
@@ -466,8 +380,6 @@ export class ProjectStore {
       memory: patch.memory ?? existing.memory ?? "",
       strategistContextFingerprint:
         patch.strategistContextFingerprint ?? existing.strategistContextFingerprint,
-      strategistLastContextAttachedAt:
-        patch.strategistLastContextAttachedAt ?? existing.strategistLastContextAttachedAt,
       updatedAt: new Date().toISOString()
     };
 
@@ -653,7 +565,7 @@ export class ProjectStore {
 
     await this.buildContextBundle(
       workspacePath,
-      "Refresh the Lithium context bundle after updating the session summary."
+      "Refresh the workspace context bundle after updating the session summary."
     );
 
     return updatedMemory;
@@ -743,10 +655,6 @@ export class ProjectStore {
     };
   }
 
-  async allocateTerminalSession(workspacePath: string) {
-    return this.allocateArtifacts(workspacePath, "S", this.buildPaths(workspacePath).terminalsDir);
-  }
-
   async writeDecision(workspacePath: string, decision: DecisionRecord) {
     const jsonPath = path.join(this.buildPaths(workspacePath).decisionsDir, `${decision.id}.json`);
     await this.writeJson(jsonPath, decision);
@@ -769,7 +677,7 @@ export class ProjectStore {
 
   async readAttachment(workspacePath: string, attachmentId: string) {
     const jsonPath = path.join(this.buildPaths(workspacePath).attachmentRecordsDir, `${attachmentId}.json`);
-    return this.readJson<AttachmentRecord>(jsonPath);
+    return await this.readJson<AttachmentRecord>(jsonPath);
   }
 
   async writeConversationEntry(workspacePath: string, entry: ConversationEntryRecord) {
@@ -822,21 +730,6 @@ export class ProjectStore {
     return this.readRecordDirectory<RunRecord>(paths.runsDir);
   }
 
-  async writeTerminalSession(workspacePath: string, session: TerminalSessionRecord) {
-    const jsonPath = path.join(this.buildPaths(workspacePath).terminalsDir, `${session.id}.json`);
-    await this.writeJson(jsonPath, session);
-  }
-
-  async readTerminalSession(workspacePath: string, sessionId: string) {
-    const jsonPath = path.join(this.buildPaths(workspacePath).terminalsDir, `${sessionId}.json`);
-    return this.readJson<TerminalSessionRecord>(jsonPath);
-  }
-
-  async listTerminalSessions(workspacePath: string) {
-    const paths = this.buildPaths(workspacePath);
-    return this.readRecordDirectory<TerminalSessionRecord>(paths.terminalsDir);
-  }
-
   async readAutomationSession(workspacePath: string, sessionId: string) {
     const jsonPath = path.join(this.buildPaths(workspacePath).automationSessionsDir, `${sessionId}.json`);
     const session = await this.readJson<AutomationSessionRecord>(jsonPath);
@@ -878,18 +771,6 @@ export class ProjectStore {
   async listConversationEntries(workspacePath: string) {
     const paths = this.buildPaths(workspacePath);
     return this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir);
-  }
-
-  async writeManuscriptSection(workspacePath: string, content: string) {
-    const paths = this.buildPaths(workspacePath);
-    await writeFile(paths.resultsSection, content, "utf8");
-
-    return {
-      section: "results",
-      path: paths.resultsSection,
-      content,
-      updatedAt: new Date().toISOString()
-    } satisfies ManuscriptSectionRecord;
   }
 
   async appendActivity(workspacePath: string, message: string) {
@@ -962,9 +843,6 @@ export class ProjectStore {
           .map((record) => formatRuntimeAttachment(record))
           .join("\n")
       : "- none";
-    const manuscriptExcerpt = snapshot.manuscript?.content
-      ? truncateRuntimeExcerpt(snapshot.manuscript.content, 320)
-      : "none";
     const automationState = formatAutomationContextState(snapshot.latestAutomationSession, contextLanguage);
     const latestStateLines =
       lane === "strategist"
@@ -978,11 +856,7 @@ export class ProjectStore {
               ? `Latest operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 220)}`
               : null,
             automationState,
-            latestCycle ? `Latest automation cycle: ${truncateInline(latestCycle.summary || latestCycle.id, 220)}` : null,
-            snapshot.latestTerminalSession?.cwd
-              ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
-              : "Latest terminal cwd: none",
-            snapshot.manuscript?.content ? "Manuscript content: available" : "Manuscript content: none"
+            latestCycle ? `Latest automation cycle: ${truncateInline(latestCycle.summary || latestCycle.id, 220)}` : null
           ].filter((line): line is string => Boolean(line))
         : [
             `Latest strategist summary: ${truncateInline(latestStrategistSummary || "none", 260)}`,
@@ -999,11 +873,7 @@ export class ProjectStore {
               ? `Latest operational issue: ${truncateInline(extractFinalSummary(latestOperationalRun.finalMessage), 220)}`
               : null,
             automationState,
-            latestCycle ? `Latest automation cycle: ${truncateInline(latestCycle.summary || latestCycle.id, 220)}` : null,
-            snapshot.latestTerminalSession?.cwd
-              ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
-              : "Latest terminal cwd: none",
-            snapshot.manuscript?.content ? "Manuscript content: available" : "Manuscript content: none"
+            latestCycle ? `Latest automation cycle: ${truncateInline(latestCycle.summary || latestCycle.id, 220)}` : null
           ].filter((line): line is string => Boolean(line));
     const keyFiles =
       lane === "strategist"
@@ -1027,7 +897,7 @@ export class ProjectStore {
           ) || "none"
         : "none";
     const note = [
-      "# Lithium Runtime Context",
+      "# Runtime Context",
       `Lane: ${lane}`,
       `Workspace: ${workspacePath}`,
       `Generated: ${new Date().toISOString()}`,
@@ -1078,10 +948,7 @@ export class ProjectStore {
       lane === "strategist" ? readmeExcerpt : "",
       "",
       "## Active Attachments",
-      attachmentLines,
-      options.includeManuscript
-        ? ["", "## Manuscript Excerpt", manuscriptExcerpt].join("\n")
-        : ""
+      attachmentLines
     ]
       .filter(Boolean)
       .join("\n");
@@ -1124,16 +991,6 @@ export class ProjectStore {
       snapshot.latestAutomationSession?.displayObjective || "",
       snapshot.latestAutomationSession?.objective || ""
     ]);
-    const manuscriptExcerpt = snapshot.manuscript?.content
-      ? snapshot.manuscript.content.slice(0, lane === "paper" ? 1200 : 420)
-      : "No manuscript content yet.";
-    const paperStatus = latestContextRun
-      ? [
-          `Latest paper-related run: ${latestContextRun.id}`,
-          `Status: ${latestContextRun.status}`,
-          `Paper artifact changed: ${latestRunChangedFiles.includes("paper/main.pdf") ? "yes" : "no"}`
-        ].join("\n")
-      : "No paper compile state yet.";
     const workingSet = [
       snapshot.latestTask ? `Latest task: ${snapshot.latestTask.title}` : "Latest task: none",
       latestRunChangedFiles.length
@@ -1145,15 +1002,12 @@ export class ProjectStore {
         : "Latest automation cycle: none",
       snapshot.activeThreadAttachments.length
         ? `Attachments: ${snapshot.activeThreadAttachments.map((record) => record.relativePath).join(", ")}`
-        : "Attachments: none",
-      snapshot.latestTerminalSession
-        ? `Latest terminal cwd: ${snapshot.latestTerminalSession.cwd}`
-        : "Latest terminal cwd: none"
+        : "Attachments: none"
     ].join("\n");
 
     const sections = [
       {
-        title: "# Lithium Context Pack",
+        title: "# Context Pack",
         body: [
           `Lane: ${lane}`,
           `Workspace: ${workspacePath}`,
@@ -1164,7 +1018,7 @@ export class ProjectStore {
       {
         title: "## Project",
         body: snapshot.project
-          ? `Name: ${snapshot.project.name}\nWorkspace: ${snapshot.project.workspacePath}\nStore: ${snapshot.project.lithiumPath}`
+          ? `Name: ${snapshot.project.name}\nWorkspace: ${snapshot.project.workspacePath}`
           : "Project is not initialized yet."
       },
       {
@@ -1241,13 +1095,6 @@ export class ProjectStore {
           : "No builder handoff yet."
       },
       {
-        title: "## Paper State",
-        body:
-          lane === "builder"
-            ? paperStatus
-            : `${paperStatus}\n\n${manuscriptExcerpt}`
-      },
-      {
         title: "## Working Set",
         body: `${workingSet}\n\nKey Files:\n${keyFiles || "- No indexed files."}`
       },
@@ -1295,9 +1142,6 @@ export class ProjectStore {
         latestTask: null,
         latestRun: null,
         latestRouterTrace: null,
-        terminalSessions: [],
-        latestTerminalSession: null,
-        manuscript: null,
         automationSessions: [],
         automationCycles: [],
         automationSteps: [],
@@ -1330,16 +1174,9 @@ export class ProjectStore {
     const runs = (await this.readRecordDirectory<RunRecord>(paths.runsDir))
       .map((record) => normalizeRunRecord(record, project.defaultThreadId))
       .filter((record) => record.threadId === activeThreadId);
-    const latestBuilderRun = runs.find((run) => run.model !== "tectonic") ?? null;
     const routerTraces = (await this.readRecordDirectory<RouterTraceRecord>(paths.routesDir))
       .filter((record) => record.threadId === activeThreadId)
       .sort((left, right) => right.completedAt.localeCompare(left.completedAt));
-    const terminalSessions = await Promise.all(
-      (await this.readRecordDirectory<TerminalSessionRecord>(paths.terminalsDir))
-        .filter((record) => record.threadId === activeThreadId)
-        .slice(0, 16)
-        .map(async (record) => this.readTerminalSessionSummary(record))
-    );
     const automationSessions = (await this.readRecordDirectory<AutomationSessionRecord>(paths.automationSessionsDir))
       .map(normalizeAutomationSessionRecord)
       .filter((record) => record.threadId === activeThreadId)
@@ -1356,17 +1193,7 @@ export class ProjectStore {
     )
       .filter((record) => record.threadId === activeThreadId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    const manuscriptContent = await this.safeRead(paths.resultsSection);
     const logContent = await this.safeRead(paths.activityLog);
-
-    const manuscript = manuscriptContent
-      ? ({
-          section: "results",
-          path: paths.resultsSection,
-          content: manuscriptContent,
-          updatedAt: (await stat(paths.resultsSection)).mtime.toISOString()
-        } satisfies ManuscriptSectionRecord)
-      : null;
 
     const logs = logContent
       ? logContent
@@ -1393,11 +1220,8 @@ export class ProjectStore {
       routerTraces,
       latestDecision: decisions[0] ?? null,
       latestTask: tasks[0] ?? null,
-      latestRun: latestBuilderRun,
+      latestRun: runs[0] ?? null,
       latestRouterTrace: routerTraces[0] ?? null,
-      terminalSessions,
-      latestTerminalSession: terminalSessions[0] ?? null,
-      manuscript,
       automationSessions,
       automationCycles,
       automationSteps,
@@ -1445,46 +1269,6 @@ export class ProjectStore {
     return hash.digest("hex");
   }
 
-  async readWorkspaceFile(workspacePath: string, filePath: string): Promise<WorkspaceFileContent> {
-    const absolutePath = await resolveWorkspaceMemberPath(workspacePath, filePath);
-    const relativePath = path.relative(path.resolve(workspacePath), absolutePath) || path.basename(absolutePath);
-    const fileMeta = classifyWorkspaceFile(absolutePath) ?? {
-      kind: "artifact",
-      artifactKind: "text" as const
-    };
-    const content = fileMeta.artifactKind === "pdf"
-      ? ""
-      : (await this.safeRead(absolutePath)) ?? "";
-
-    return {
-      path: absolutePath,
-      relativePath,
-      name: path.basename(absolutePath),
-      kind: fileMeta.kind,
-      artifactKind: fileMeta.artifactKind,
-      content
-    };
-  }
-
-  async readWorkspaceFileBytes(workspacePath: string, filePath: string): Promise<Uint8Array> {
-    const absolutePath = await resolveWorkspaceMemberPath(workspacePath, filePath);
-    return await readFile(absolutePath);
-  }
-
-  async writeWorkspaceFile(workspacePath: string, filePath: string, content: string) {
-    const absolutePath = await resolveWorkspaceMemberPath(workspacePath, filePath);
-    const extension = path.extname(absolutePath).toLowerCase();
-
-    if (extension === ".pdf") {
-      throw new Error("PDF files are binary and cannot be edited in the text editor.");
-    }
-
-    await mkdir(path.dirname(absolutePath), { recursive: true });
-    await writeFile(absolutePath, content, "utf8");
-
-    return this.readWorkspaceFile(workspacePath, absolutePath);
-  }
-
   private async allocateAttachmentDestination(
     workspaceAttachmentsDir: string,
     threadId: string,
@@ -1517,8 +1301,8 @@ export class ProjectStore {
   private async buildAttachmentExcerpt(filePath: string) {
     const kind = classifyAttachmentKind(filePath);
 
-    if (kind === "pdf") {
-      return "PDF attachment. Reference the file path directly when asking the model to inspect it.";
+    if (kind === "document") {
+      return DOCUMENT_ATTACHMENT_EXCERPT;
     }
 
     if (kind === "image") {
@@ -1560,69 +1344,15 @@ export class ProjectStore {
     return thread;
   }
 
-  private async deleteThreadJson(workspacePath: string, threadId: string) {
-    const jsonPath = path.join(this.buildPaths(workspacePath).threadsDir, `${threadId}.json`);
-    await this.removeFileIfExists(jsonPath);
-  }
-
-  private async deleteThreadArtifacts(workspacePath: string, threadId: string) {
-    const paths = this.buildPaths(workspacePath);
-    const attachmentRecords = await this.readRecordDirectory<AttachmentRecord>(paths.attachmentRecordsDir);
-    const conversationRecords = await this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir);
-    const decisionRecords = await this.readRecordDirectory<DecisionRecord>(paths.decisionsDir);
-    const taskRecords = await this.readRecordDirectory<TaskRecord>(paths.tasksDir);
-    const runRecords = await this.readRecordDirectory<RunRecord>(paths.runsDir);
-    const routeRecords = await this.readRecordDirectory<RouterTraceRecord>(paths.routesDir);
-    const terminalRecords = await this.readRecordDirectory<TerminalSessionRecord>(paths.terminalsDir);
-
-    await Promise.all([
-      ...attachmentRecords.filter((record) => record.threadId === threadId).flatMap((record) => [
-        this.removeFileIfExists(path.join(paths.attachmentRecordsDir, `${record.id}.json`)),
-        this.removeFileIfExists(path.join(workspacePath, record.relativePath))
-      ]),
-      ...conversationRecords
-        .filter((record) => record.threadId === threadId)
-        .map((record) => this.removeFileIfExists(path.join(paths.conversationEntriesDir, `${record.id}.json`))),
-      ...decisionRecords.filter((record) => record.threadId === threadId).flatMap((record) => [
-        this.removeFileIfExists(path.join(paths.decisionsDir, `${record.id}.json`)),
-        this.removeFileIfExists(record.stdoutPath),
-        this.removeFileIfExists(record.stderrPath),
-        this.removeFileIfExists(record.outputPath)
-      ]),
-      ...taskRecords
-        .filter((record) => record.threadId === threadId)
-        .map((record) => this.removeFileIfExists(path.join(paths.tasksDir, `${record.id}.json`))),
-      ...runRecords.filter((record) => record.threadId === threadId).flatMap((record) => [
-        this.removeFileIfExists(path.join(paths.runsDir, `${record.id}.json`)),
-        this.removeFileIfExists(record.stdoutPath),
-        this.removeFileIfExists(record.stderrPath),
-        this.removeFileIfExists(record.finalMessagePath)
-      ]),
-      ...routeRecords.filter((record) => record.threadId === threadId).flatMap((record) => [
-        this.removeFileIfExists(path.join(paths.routesDir, `${record.id}.json`)),
-        this.removeFileIfExists(record.stdoutPath),
-        this.removeFileIfExists(record.stderrPath),
-        this.removeFileIfExists(record.outputPath)
-      ]),
-      ...terminalRecords.filter((record) => record.threadId === threadId).flatMap((record) => [
-        this.removeFileIfExists(path.join(paths.terminalsDir, `${record.id}.json`)),
-        record.transcriptPath ? this.removeFileIfExists(record.transcriptPath) : Promise.resolve(),
-        record.stdoutPath ? this.removeFileIfExists(record.stdoutPath) : Promise.resolve(),
-        record.stderrPath ? this.removeFileIfExists(record.stderrPath) : Promise.resolve()
-      ])
-    ]);
-  }
-
-  private async backfillLegacyThreadIds(workspacePath: string, defaultThreadId: string) {
+  private async ensureThreadIds(workspacePath: string, defaultThreadId: string) {
     const paths = this.buildPaths(workspacePath);
 
-    await this.backfillThreadIdsInDirectory<DecisionRecord>(paths.decisionsDir, defaultThreadId);
-    await this.backfillThreadIdsInDirectory<TaskRecord>(paths.tasksDir, defaultThreadId);
-    await this.backfillThreadIdsInDirectory<RunRecord>(paths.runsDir, defaultThreadId);
-    await this.backfillThreadIdsInDirectory<TerminalSessionRecord>(paths.terminalsDir, defaultThreadId);
+    await this.ensureThreadIdsInDirectory<DecisionRecord>(paths.decisionsDir, defaultThreadId);
+    await this.ensureThreadIdsInDirectory<TaskRecord>(paths.tasksDir, defaultThreadId);
+    await this.ensureThreadIdsInDirectory<RunRecord>(paths.runsDir, defaultThreadId);
   }
 
-  private async backfillThreadIdsInDirectory<T extends { id: string; threadId?: string }>(
+  private async ensureThreadIdsInDirectory<T extends { id: string; threadId?: string }>(
     directory: string,
     defaultThreadId: string
   ) {
@@ -1644,7 +1374,7 @@ export class ProjectStore {
 
   private async allocateArtifacts(
     workspacePath: string,
-    prefix: "D" | "Q" | "R" | "S",
+    prefix: "D" | "Q" | "R",
     directory: string
   ): Promise<ArtifactPaths> {
     const id = await this.nextId(directory, prefix);
@@ -1727,36 +1457,6 @@ export class ProjectStore {
     await unlink(filePath).catch(() => undefined);
   }
 
-  private async readTerminalSessionSummary(record: TerminalSessionRecord): Promise<TerminalSessionSummary> {
-    const output = await this.readTerminalTranscriptTail(record);
-
-    return {
-      ...record,
-      output
-    };
-  }
-
-  private async readTerminalTranscriptTail(record: TerminalSessionRecord) {
-    if (record.transcriptPath) {
-      const output = await readTailText(record.transcriptPath, 24 * 1024);
-
-      if (output) {
-        return output.trimEnd();
-      }
-    }
-
-    if (!record.stdoutPath && !record.stderrPath) {
-      return "";
-    }
-
-    const [stdout, stderr] = await Promise.all([
-      record.stdoutPath ? readTailText(record.stdoutPath, 24 * 1024) : Promise.resolve(""),
-      record.stderrPath ? readTailText(record.stderrPath, 24 * 1024) : Promise.resolve("")
-    ]);
-    const parsed = parseTerminalCapture(stdout, stderr, record.cwd);
-    return parsed.output;
-  }
-
   private async safeRead(filePath: string) {
     if (!(await this.exists(filePath))) {
       return null;
@@ -1802,7 +1502,7 @@ export class ProjectStore {
 }
 
 function createDefaultProjectMemory(projectName: string): ProjectMemoryRecord {
-  const projectBrief = `${projectName} is the active Lithium workspace.`;
+  const projectBrief = `${projectName} is the active research workspace.`;
   const researchGoal = DEFAULT_PROJECT_RESEARCH_GOAL;
   const constraints = ["Local-first", "Single-user", "Prototype-first"];
   const openQuestions = ["What is the next concrete experiment or validation step?"];
@@ -1832,8 +1532,7 @@ function createDefaultProjectMemory(projectName: string): ProjectMemoryRecord {
     constraints,
     preferences: {
       strategistStyle: "Direct, critical, high-level.",
-      builderStyle: "Concrete tasks with minimal narration.",
-      manuscriptStyle: "Evidence-linked and concise."
+      builderStyle: "Concrete tasks with minimal narration."
     },
     openQuestions,
     activeHypotheses,
@@ -2094,18 +1793,13 @@ function normalizeDecisionRecord(record: DecisionRecord, defaultThreadId: string
     typeof record.rawOutput === "string" && record.rawOutput.includes("LITHIUM_HANDOFF")
       ? parseOracleOutput(record.rawOutput)
       : record.handoff;
-  const handoff = structured
-    ? stripLegacyNextTask(structured)
-    : record.handoff
-      ? stripLegacyNextTask(record.handoff)
-      : undefined;
+  const handoff = structured ?? record.handoff;
 
   return {
     ...record,
     threadId: record.threadId || defaultThreadId,
     summary: handoffMachineSummary(structured) || structured?.summary || record.summary,
     rationale: structured?.rationale ?? record.rationale,
-    nextTask: undefined,
     handoff
   };
 }
@@ -2172,7 +1866,6 @@ function deriveDecisionHandoff(record: DecisionRecord | null): LithiumHandoff | 
       rationale: record.rationale,
       files: [],
       risks: [],
-      paperActions: [],
       runActions: [],
       successCriteria: [],
       openQuestions: []
@@ -2194,7 +1887,6 @@ function deriveRunHandoff(record: RunRecord | null): LithiumHandoff | null {
       result: record.status === "completed" ? "success" : "failed",
       files: record.changedFiles ?? [],
       risks: [],
-      paperActions: [],
       runActions: [],
       successCriteria: [],
       openQuestions: []
@@ -2203,14 +1895,10 @@ function deriveRunHandoff(record: RunRecord | null): LithiumHandoff | null {
 }
 
 function resolveLatestMeaningfulBuilderRun(runs: RunRecord[]) {
-  const latestBuilderRun = runs.find((run) => run.model !== "tectonic") ?? null;
+  const latestBuilderRun = runs[0] ?? null;
 
   return (
     runs.find((run) => {
-      if (run.model === "tectonic") {
-        return false;
-      }
-
       const summary =
         handoffMachineSummary(run.handoff) ||
         extractFinalSummary(run.finalMessage || "");
@@ -2236,7 +1924,6 @@ function formatHandoff(handoff: LithiumHandoff) {
     handoff.result ? `Result: ${handoff.result}` : null,
     `Files: ${handoff.files.join("; ") || "none"}`,
     `Risks: ${handoff.risks.join("; ") || "none"}`,
-    `Paper Actions: ${handoff.paperActions.join("; ") || "none"}`,
     `Run Actions: ${handoff.runActions.join("; ") || "none"}`,
     `Success Criteria: ${handoff.successCriteria.join("; ") || "none"}`,
     `Open Questions: ${handoff.openQuestions.join("; ") || "none"}`
@@ -2263,11 +1950,7 @@ function renderOutputContract(lane: ContextPackLane) {
     ].join("\n");
   }
 
-  return [
-    "Produce artifact-grounded paper update guidance.",
-    "Prefer evidence-linked section edits over free-form prose.",
-    "Keep changes traceable back to local decisions, runs, and manuscript state."
-  ].join("\n");
+  return "";
 }
 
 function compareRecordFiles(left: string, right: string) {
@@ -2382,11 +2065,6 @@ function isAttachmentRecordActive(record: AttachmentRecord) {
   return !record.consumedAt && !record.conversationEntryId && !record.decisionId && !record.runId;
 }
 
-function stripLegacyNextTask(handoff: LithiumHandoff) {
-  const { nextTask: _legacyNextTask, ...rest } = handoff;
-  return rest;
-}
-
 function truncateAttachmentExcerpt(value: string, maxLength: number) {
   if (value.length <= maxLength) {
     return value;
@@ -2425,7 +2103,7 @@ function looksLikeStructuredStrategistOnly(value: string) {
     .filter(Boolean);
 
   return meaningfulLines.every((line) =>
-    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|run_actions|success_criteria|open_questions)\s*:/i.test(
       line
     )
   );
@@ -2598,15 +2276,42 @@ function classifyAttachmentKind(filePath: string): AttachmentKind {
     return "csv";
   }
 
-  if ([".pdf"].includes(extension)) {
-    return "pdf";
+  if (DOCUMENT_EXTENSIONS.has(extension)) {
+    return "document";
   }
 
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].includes(extension)) {
     return "image";
   }
 
-  if ([".txt", ".md", ".tex", ".bib", ".py", ".sh", ".yaml", ".yml"].includes(extension)) {
+  if (
+    [
+      ".txt",
+      ".md",
+      ".py",
+      ".sh",
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".mjs",
+      ".cjs",
+      ".css",
+      ".html",
+      ".xml",
+      ".toml",
+      ".rs",
+      ".go",
+      ".java",
+      ".c",
+      ".cc",
+      ".cpp",
+      ".h",
+      ".hpp",
+      ".yaml",
+      ".yml"
+    ].includes(extension)
+  ) {
     return "text";
   }
 

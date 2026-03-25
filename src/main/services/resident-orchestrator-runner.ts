@@ -3,11 +3,11 @@ import path from "node:path";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { BuilderModel, BuilderReasoningEffort } from "../../shared/types";
 import {
-  getLiveTerminal,
-  startLiveTerminal,
-  stopLiveTerminal,
-  writeToLiveTerminal
-} from "./terminal-pty-registry";
+  getLiveShell,
+  startLiveShell,
+  stopLiveShell,
+  writeToLiveShell
+} from "./live-shell-registry";
 import {
   OrchestratorRunner,
   type OrchestratorRunOptions,
@@ -121,7 +121,7 @@ export class ResidentOrchestratorRunner {
     ]);
     const shellCommand = buildResidentShellCommand(scriptPath);
 
-    if (!writeToLiveTerminal(options.workspacePath, host.id, `${shellCommand}\r`)) {
+    if (!writeToLiveShell(options.workspacePath, host.id, `${shellCommand}\r`)) {
       throw new Error("Resident orchestrator shell is unavailable.");
     }
 
@@ -152,7 +152,7 @@ export class ResidentOrchestratorRunner {
   }
 
   private async ensureHost(workspacePath: string, hostKey?: string): Promise<HostSession> {
-    const existing = getLiveTerminal(workspacePath, hostSessionId(workspacePath, hostKey));
+    const existing = getLiveShell(workspacePath, hostSessionId(workspacePath, hostKey));
 
     if (existing) {
       return {
@@ -161,7 +161,7 @@ export class ResidentOrchestratorRunner {
       };
     }
 
-    const handle = await startLiveTerminal({
+    const handle = await startLiveShell({
       id: hostSessionId(workspacePath, hostKey),
       workspacePath,
       cwd: workspacePath,
@@ -178,7 +178,7 @@ export class ResidentOrchestratorRunner {
   }
 
   private async resetHost(workspacePath: string, hostKey?: string) {
-    stopLiveTerminal(workspacePath, hostSessionId(workspacePath, hostKey));
+    stopLiveShell(workspacePath, hostSessionId(workspacePath, hostKey));
     await rm(hostTranscriptPath(workspacePath, hostKey), { force: true }).catch(() => undefined);
   }
 
@@ -189,7 +189,7 @@ export class ResidentOrchestratorRunner {
     exitPath: string
   ) {
     while (true) {
-      if (!getLiveTerminal(workspacePath, hostSessionId(workspacePath, hostKey)) || !getLiveTerminal(workspacePath, hostId)) {
+      if (!getLiveShell(workspacePath, hostSessionId(workspacePath, hostKey)) || !getLiveShell(workspacePath, hostId)) {
         throw new Error("Resident orchestrator shell exited before finishing the turn.");
       }
 

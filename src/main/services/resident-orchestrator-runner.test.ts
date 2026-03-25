@@ -3,19 +3,19 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("./terminal-pty-registry", () => ({
-  getLiveTerminal: vi.fn(),
-  startLiveTerminal: vi.fn(),
-  stopLiveTerminal: vi.fn(),
-  writeToLiveTerminal: vi.fn()
+vi.mock("./live-shell-registry", () => ({
+  getLiveShell: vi.fn(),
+  startLiveShell: vi.fn(),
+  stopLiveShell: vi.fn(),
+  writeToLiveShell: vi.fn()
 }));
 
 import { ResidentOrchestratorRunner } from "./resident-orchestrator-runner";
 import {
-  getLiveTerminal,
-  startLiveTerminal,
-  writeToLiveTerminal
-} from "./terminal-pty-registry";
+  getLiveShell,
+  startLiveShell,
+  writeToLiveShell
+} from "./live-shell-registry";
 
 const tempDirs: string[] = [];
 
@@ -39,7 +39,7 @@ describe("ResidentOrchestratorRunner", () => {
     const outputPath = path.join(requestDir, "orchestrator.reply.md");
     let shellCommand = "";
 
-    vi.mocked(getLiveTerminal).mockReturnValueOnce(null).mockReturnValue({
+    vi.mocked(getLiveShell).mockReturnValueOnce(null).mockReturnValue({
       id: "__resident__",
       workspacePath: workspace,
       pid: 1234,
@@ -50,7 +50,7 @@ describe("ResidentOrchestratorRunner", () => {
       rows: 32,
       startedAt: "2026-03-24T14:00:00.000Z"
     });
-    vi.mocked(startLiveTerminal).mockResolvedValue({
+    vi.mocked(startLiveShell).mockResolvedValue({
       id: "__resident__",
       workspacePath: workspace,
       pid: 1234,
@@ -61,7 +61,7 @@ describe("ResidentOrchestratorRunner", () => {
       rows: 32,
       startedAt: "2026-03-24T14:00:00.000Z"
     });
-    vi.mocked(writeToLiveTerminal).mockImplementationOnce((_workspacePath, _id, command) => {
+    vi.mocked(writeToLiveShell).mockImplementationOnce((_workspacePath, _id, command) => {
       shellCommand = command;
       const scriptMatch = command.match(/^sh '([^']+\/run-turn\.sh)'\r?$/);
 
@@ -96,15 +96,15 @@ describe("ResidentOrchestratorRunner", () => {
       workspacePath: workspace,
       sessionId: undefined,
       prompt: "이어서 진행해줘",
-      runtimeContext: "# Lithium Runtime Context",
+      runtimeContext: "# Runtime Context",
       stdoutPath,
       stderrPath,
       outputPath,
       requestPaths
     });
 
-    expect(startLiveTerminal).toHaveBeenCalledTimes(1);
-    expect(writeToLiveTerminal).toHaveBeenCalledTimes(1);
+    expect(startLiveShell).toHaveBeenCalledTimes(1);
+    expect(writeToLiveShell).toHaveBeenCalledTimes(1);
     expect(shellCommand).toMatch(/^sh '[^']+\/run-turn\.sh'\r?$/);
     expect(result.sessionId).toBe("resident-thread-1");
     expect(result.requestedLane).toBe("builder");

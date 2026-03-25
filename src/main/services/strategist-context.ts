@@ -148,13 +148,6 @@ export function buildStrategistContextFingerprint(
           updatedAt: snapshot.latestAutomationCheckpoint.updatedAt
         }
       : null,
-    latestTerminalSession: snapshot.latestTerminalSession
-      ? {
-          id: snapshot.latestTerminalSession.id,
-          endedAt: snapshot.latestTerminalSession.endedAt,
-          cwd: snapshot.latestTerminalSession.cwd
-        }
-      : null,
     workspaceFingerprint: options.workspaceFingerprint ?? ""
   };
 

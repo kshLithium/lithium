@@ -42,7 +42,7 @@ The repo is set up so that:
 
 ## Things This Project Does Not Protect You From
 
-- unsafe shell commands produced by the builder lane
+- unsafe shell commands produced by the automation loop
 - malicious code inside a workspace you choose to open
 - sensitive data you attach to a thread on purpose
 - secrets already present in your Git history
@@ -52,5 +52,5 @@ The repo is set up so that:
 - use a separate API key for this app
 - prefer environment variables over checked-in config files
 - do not attach private credentials, SSH keys, or database dumps
-- review the selected workspace before letting the builder run unattended
+- review the selected workspace before letting automation run unattended
 - if you ever leak a secret, rotate it and then rewrite history before opening the repo

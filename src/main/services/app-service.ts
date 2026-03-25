@@ -12,7 +12,6 @@ import type {
   AppSettings,
   AttachmentDeleteRequest,
   AttachmentImportRequest,
-  AutomationCheckpointApprovalRequest,
   AutomationCheckpointRecord,
   AutomationCycleLaneState,
   AutomationCyclePhase,
@@ -41,40 +40,17 @@ import type {
   ConversationEntryRecord,
   DecisionRecord,
   LithiumHandoff,
-  PaperSourceTarget,
-  PaperSourceTargetRequest,
-  PaperSyncTarget,
-  PaperSyncTargetRequest,
   ProjectMemoryRecord,
-  ProjectMemoryUpdate,
   ProjectSnapshot,
   RecordStatus,
-  RemoteWorkspaceProfile,
   RouterTraceRecord,
   RuntimeAppState,
-  StrategistBrowserProbeRequest,
-  StrategistBrowserProbeResponse,
   StrategistRequest,
-  ThreadDeleteRequest,
   ThreadCreateRequest,
-  ThreadMemoryUpdateRequest,
   ThreadRecord,
-  ThreadRenameRequest,
   ThreadSelectionRequest,
-  TerminalSessionCreateRequest,
-  TerminalEvent,
-  TerminalSessionInputRequest,
-  TerminalSessionResizeRequest,
-  TerminalSessionRequest,
-  TerminalSessionState,
   TaskRecord,
-  TerminalSessionRecord,
   RunRecord,
-  WorkspaceFileContent,
-  WorkspaceDiffRequest,
-  WorkspaceFileRecord,
-  WorkspaceFileDiff,
-  WorkspaceFileRequest,
   WorkspaceSelectionResult
 } from "../../shared/types";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types";
@@ -90,41 +66,23 @@ import { parseCodexProgressLog } from "./codex-progress";
 import { RouterRunner } from "./router-runner";
 import { OrchestratorRunner, type OrchestratorDelegationLane } from "./orchestrator-runner";
 import { type OrchestratorDelegationDirective } from "./orchestrator-directives";
-import { ManuscriptEngine } from "./manuscript-engine";
 import { ChatgptAuthRunner } from "./chatgpt-auth-runner";
 import {
   describeIncompleteStrategistOutput,
   parseBuilderOutput,
   parseOracleOutput
 } from "./protocol";
-import { runCommand } from "./process-runner";
 import {
   collectGitChangedFiles,
   inferFinalRunStatus,
   inferRunStatus,
   mergeChangedFiles,
   parseChangedFilesFromFinalMessage,
-  readWorkspaceFileDiff,
   readTailText,
   readTextFile
 } from "./run-artifacts";
 import { getLiveProcess, inspectLiveProcessFiles, startLiveProcess, stopLiveProcess } from "./live-process-registry";
-import {
-  getLiveTerminal,
-  onLiveTerminalEvent,
-  resizeLiveTerminal,
-  startLiveTerminal,
-  stopLiveTerminal,
-  writeToLiveTerminal
-} from "./terminal-pty-registry";
-import { resolveSyncTeXSourceLocation, resolveSyncTeXTarget } from "./synctex";
 import { resolveWorkspaceCommandContext } from "./workspace-execution";
-import {
-  RemoteWorkspaceService,
-  type RemoteWorkspaceServiceLike
-} from "./remote-workspace-service";
-import { startStrategistBrowserProbeMonitor } from "./strategist-browser-probe";
-import { resolveWorkspaceMemberPath } from "./workspace-paths";
 import {
   buildStrategistContextFingerprint,
   buildStrategistOracleSessionId,
@@ -147,10 +105,7 @@ type AppServiceDependencies = {
     Partial<Pick<OracleRunner, "startConsult" | "terminateSession">>;
   chatgptAuthRunner?: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   codexRunner?: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
-  manuscriptEngine?: Pick<ManuscriptEngine, "updateResults">;
   untitledWorkspaceRoot?: string;
-  remoteWorkspaceRoot?: string;
-  remoteWorkspaceService?: RemoteWorkspaceServiceLike;
   onSelectedWorkspacePathChange?: (workspacePath: string) => void;
   getAppSettings?: () => Promise<AppSettings>;
 };
@@ -208,7 +163,6 @@ type AutomationDelegatedWorkerResult =
   | AutomationDelegatedStrategistResult;
 
 export class AppService {
-  private static terminalEventUnsubscribe: (() => void) | null = null;
   private selectedWorkspacePath: string;
   private readonly terminatingRunIds = new Set<string>();
   private readonly activeChatProgressByWorkspace = new Map<string, ActiveChatProgress>();
@@ -221,9 +175,7 @@ export class AppService {
     Partial<Pick<OracleRunner, "startConsult" | "terminateSession">>;
   private readonly chatgptAuthRunner: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   private readonly codexRunner: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
-  private readonly manuscriptEngine: Pick<ManuscriptEngine, "updateResults">;
   private readonly untitledWorkspaceRoot: string;
-  private readonly remoteWorkspaceService: RemoteWorkspaceServiceLike;
   private readonly onSelectedWorkspacePathChange?: (workspacePath: string) => void;
   private readonly getAppSettings: () => Promise<AppSettings>;
 
@@ -235,21 +187,10 @@ export class AppService {
     this.oracleRunner = dependencies.oracleRunner ?? new OracleRunner();
     this.chatgptAuthRunner = dependencies.chatgptAuthRunner ?? new ChatgptAuthRunner();
     this.codexRunner = dependencies.codexRunner ?? new CodexRunner();
-    this.manuscriptEngine = dependencies.manuscriptEngine ?? new ManuscriptEngine();
     this.untitledWorkspaceRoot =
       dependencies.untitledWorkspaceRoot ?? path.join(os.homedir(), "Documents", "Lithium");
-    this.remoteWorkspaceService =
-      dependencies.remoteWorkspaceService ??
-      new RemoteWorkspaceService(
-        dependencies.remoteWorkspaceRoot ??
-          path.join(os.homedir(), ".lithium", "remote-workspaces")
-      );
     this.onSelectedWorkspacePathChange = dependencies.onSelectedWorkspacePathChange;
     this.getAppSettings = dependencies.getAppSettings ?? (async () => DEFAULT_APP_SETTINGS);
-    AppService.terminalEventUnsubscribe?.();
-    AppService.terminalEventUnsubscribe = onLiveTerminalEvent((event) => {
-      void this.handleLiveTerminalEvent(event);
-    });
   }
 
   setSelectedWorkspacePath(workspacePath: string): WorkspaceSelectionResult {
@@ -260,48 +201,14 @@ export class AppService {
 
   async getAppState(input: {
     platform: string;
-    electronVersion: string;
-    chromeVersion: string;
-    nodeVersion: string;
-    cwd: string;
-    oracleReady: boolean;
-    codexReady: boolean;
-    oracleChromePath: string | null;
-    discordBotStatus: RuntimeAppState["discordBotStatus"];
     settings: AppSettings;
   }): Promise<RuntimeAppState> {
     const selectedWorkspacePath = this.selectedWorkspacePath;
-    const remoteWorkspace = selectedWorkspacePath
-      ? await this.remoteWorkspaceService.describe(selectedWorkspacePath).catch(() => null)
-      : null;
 
     return {
       ...input,
-      selectedWorkspacePath,
-      selectedWorkspaceLabel:
-        remoteWorkspace?.label ?? (selectedWorkspacePath ? basename(selectedWorkspacePath) : ""),
-      selectedWorkspaceKind: remoteWorkspace?.kind ?? "local",
-      selectedWorkspaceRemoteHost: remoteWorkspace?.remoteHost ?? null,
-      selectedWorkspaceRemotePath: remoteWorkspace?.remotePath ?? null
+      selectedWorkspacePath
     };
-  }
-
-  async connectRemoteWorkspace(profile: RemoteWorkspaceProfile): Promise<WorkspaceSelectionResult> {
-    const connected = await this.remoteWorkspaceService.connect(profile);
-    this.updateSelectedWorkspacePath(connected.workspacePath);
-    return { selectedWorkspacePath: connected.workspacePath };
-  }
-
-  async syncRemoteWorkspace(workspacePath?: string): Promise<WorkspaceSelectionResult> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(workspacePath);
-    const remoteWorkspace = await this.remoteWorkspaceService.describe(resolvedWorkspacePath);
-
-    if (remoteWorkspace) {
-      await this.remoteWorkspaceService.syncWorkspace(resolvedWorkspacePath);
-    }
-
-    this.updateSelectedWorkspacePath(resolvedWorkspacePath);
-    return { selectedWorkspacePath: resolvedWorkspacePath };
   }
 
   async initProject(workspacePath?: string) {
@@ -309,11 +216,10 @@ export class AppService {
     await this.store.initProject(resolvedWorkspacePath, {
       name: await this.resolveProjectName(resolvedWorkspacePath)
     });
-    await this.store.buildContextBundle(
+    return await this.buildContextBundleSnapshot(
       resolvedWorkspacePath,
-      "Initialize the Lithium context bundle for this workspace."
+      "Initialize the workspace context bundle for this workspace."
     );
-    return await this.store.getSnapshot(resolvedWorkspacePath);
   }
 
   async getSnapshot(workspacePath?: string) {
@@ -328,105 +234,44 @@ export class AppService {
     return await this.store.getSnapshot(resolvedWorkspacePath);
   }
 
+  private async getSummarizedSnapshot(workspacePath: string) {
+    await this.store.updateSessionSummary(workspacePath);
+    return await this.store.getSnapshot(workspacePath);
+  }
+
+  private async buildContextBundleSnapshot(
+    workspacePath: string,
+    prompt: string,
+    options: {
+      includeSessionSummary?: boolean;
+    } = {}
+  ) {
+    if (options.includeSessionSummary) {
+      await this.store.updateSessionSummary(workspacePath);
+    }
+
+    await this.store.buildContextBundle(workspacePath, prompt);
+    return await this.store.getSnapshot(workspacePath);
+  }
+
   async createThread(request: ThreadCreateRequest = {}): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
     await this.store.createThread(workspacePath, request.title);
-    await this.store.updateSessionSummary(workspacePath);
-    await this.store.buildContextBundle(
+    return await this.buildContextBundleSnapshot(
       workspacePath,
-      "Refresh the Lithium context bundle after creating a new thread."
+      "Refresh the workspace context bundle after creating a new thread.",
+      { includeSessionSummary: true }
     );
-    return await this.store.getSnapshot(workspacePath);
   }
 
   async selectThread(request: ThreadSelectionRequest): Promise<ProjectSnapshot> {
     const workspacePath = this.requireWorkspacePath(request.workspacePath);
     await this.store.selectThread(workspacePath, request.threadId);
-    await this.store.updateSessionSummary(workspacePath);
-    await this.store.buildContextBundle(
+    return await this.buildContextBundleSnapshot(
       workspacePath,
-      "Refresh the Lithium context bundle after switching threads."
+      "Refresh the workspace context bundle after switching threads.",
+      { includeSessionSummary: true }
     );
-    return await this.store.getSnapshot(workspacePath);
-  }
-
-  async renameThread(request: ThreadRenameRequest): Promise<ProjectSnapshot> {
-    const workspacePath = this.requireWorkspacePath(request.workspacePath);
-    await this.store.renameThread(workspacePath, request.threadId, request.title);
-    await this.store.updateSessionSummary(workspacePath);
-    await this.store.buildContextBundle(
-      workspacePath,
-      "Refresh the Lithium context bundle after renaming a thread."
-    );
-    return await this.store.getSnapshot(workspacePath);
-  }
-
-  async updateThreadMemory(request: ThreadMemoryUpdateRequest): Promise<ProjectSnapshot> {
-    const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
-    await this.store.initProject(workspacePath, {
-      name: await this.resolveProjectName(workspacePath)
-    });
-    const snapshot = await this.store.getSnapshot(workspacePath);
-    const threadId = request.threadId ?? snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? null;
-
-    if (!threadId) {
-      throw new Error("No active thread is available.");
-    }
-
-    const updatedThread = await this.store.updateThread(workspacePath, threadId, {
-      memory: request.memory.trim()
-    });
-
-    if (!updatedThread) {
-      throw new Error(`Thread not found: ${threadId}`);
-    }
-
-    await this.store.appendActivity(workspacePath, `${threadId} memory updated`);
-    await this.store.updateSessionSummary(workspacePath);
-    await this.store.buildContextBundle(
-      workspacePath,
-      "Refresh the Lithium context bundle after updating thread memory."
-    );
-    return await this.store.getSnapshot(workspacePath);
-  }
-
-  async deleteThread(request: ThreadDeleteRequest): Promise<ProjectSnapshot> {
-    const workspacePath = this.requireWorkspacePath(request.workspacePath);
-    await this.stopLiveProcessesForThread(workspacePath, request.threadId);
-    await this.store.deleteThread(workspacePath, request.threadId);
-    return await this.store.getSnapshot(workspacePath);
-  }
-
-  async getProjectMemory(workspacePath?: string): Promise<ProjectMemoryRecord | null> {
-    const resolvedWorkspacePath = this.resolveWorkspacePath(workspacePath);
-
-    if (!resolvedWorkspacePath) {
-      return null;
-    }
-
-    return await this.store.readProjectMemory(resolvedWorkspacePath);
-  }
-
-  async updateProjectMemory(request: ProjectMemoryUpdate): Promise<ProjectSnapshot> {
-    const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
-    await this.store.initProject(workspacePath, {
-      name: await this.resolveProjectName(workspacePath)
-    });
-    await this.store.writeProjectMemory(workspacePath, {
-      projectBrief: request.projectBrief,
-      researchGoal: request.researchGoal,
-      constraints: request.constraints,
-      openQuestions: request.openQuestions,
-      activeHypotheses: request.activeHypotheses,
-      sessionSummary: request.sessionSummary,
-      preferences: request.preferences
-    });
-    await this.store.appendActivity(workspacePath, "project memory updated");
-    await this.store.buildContextBundle(
-      workspacePath,
-      "Refresh the Lithium context bundle after updating project memory."
-    );
-    return await this.store.getSnapshot(workspacePath);
   }
 
   async createAutomationSession(request: AutomationSessionCreateRequest): Promise<ProjectSnapshot> {
@@ -481,10 +326,8 @@ export class AppService {
         "code-edit",
         "experiment-run",
         "result-analysis",
-        "paper-sync",
         "checkpoint"
       ],
-      paperWriteEnabled: request.paperWriteEnabled ?? false,
       evidenceMode: "strict",
       budget: {
         maxSteps: Math.max(1, request.maxSteps ?? 24),
@@ -509,17 +352,14 @@ export class AppService {
       threadId: activeThread.id,
       sessionId: session.id,
       objective: session.objective,
-      mode: session.mode,
-      paperWriteEnabled: session.paperWriteEnabled
+      mode: session.mode
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation session created`);
-    await this.store.updateSessionSummary(workspacePath);
-    await this.store.buildContextBundle(
+    return await this.buildContextBundleSnapshot(
       workspacePath,
-      "Refresh the Lithium context bundle after creating an automation session."
+      "Refresh the workspace context bundle after creating an automation session.",
+      { includeSessionSummary: true }
     );
-
-    return await this.store.getSnapshot(workspacePath);
   }
 
   async startAutomationSession(request: AutomationSessionControlRequest): Promise<ProjectSnapshot> {
@@ -559,8 +399,7 @@ export class AppService {
       updatedAt: new Date().toISOString()
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation pause requested`);
-    await this.store.updateSessionSummary(workspacePath);
-    return await this.store.getSnapshot(workspacePath);
+    return await this.getSummarizedSnapshot(workspacePath);
   }
 
   async resumeAutomationSession(request: AutomationSessionControlRequest): Promise<ProjectSnapshot> {
@@ -632,8 +471,7 @@ export class AppService {
         stopNow: true
       });
       await this.store.appendActivity(workspacePath, `${session.id} automation stopped`);
-      await this.store.updateSessionSummary(workspacePath);
-      return await this.store.getSnapshot(workspacePath);
+      return await this.getSummarizedSnapshot(workspacePath);
     }
 
     const snapshot = await this.store.getSnapshot(workspacePath);
@@ -699,13 +537,15 @@ export class AppService {
       workspacePath,
       shouldQueueRedirect ? `${session.id} automation redirect queued` : `${session.id} automation status update sent`
     );
-    await this.store.updateSessionSummary(workspacePath);
-    return await this.store.getSnapshot(workspacePath);
+    return await this.getSummarizedSnapshot(workspacePath);
   }
 
-  async approveAutomationCheckpoint(
-    request: AutomationCheckpointApprovalRequest
-  ): Promise<ProjectSnapshot> {
+  private async approveAutomationCheckpoint(request: {
+    workspacePath?: string;
+    sessionId: string;
+    checkpointId?: string;
+    response?: string;
+  }): Promise<ProjectSnapshot> {
     const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
     const session = await this.requireAutomationSession(workspacePath, request.sessionId);
     const checkpoints = await this.store.listAutomationCheckpoints(workspacePath);
@@ -982,8 +822,7 @@ export class AppService {
           mode: automationMode,
           maxSteps: automationDelegation.maxSteps ?? 64,
           maxRuntimeMinutes: automationDelegation.maxRuntimeMinutes ?? 24 * 60,
-          maxRetries: automationDelegation.maxRetries ?? 8,
-          paperWriteEnabled: automationDelegation.paperWriteEnabled ?? false
+          maxRetries: automationDelegation.maxRetries ?? 8
         });
         const sessionId = createdSnapshot.latestAutomationSession?.id;
 
@@ -1011,8 +850,7 @@ export class AppService {
           summary: reply
         });
         await this.store.appendActivity(input.workspacePath, `${sessionId} automation started from orchestrator chat`);
-        await this.store.updateSessionSummary(input.workspacePath);
-        return await this.store.getSnapshot(input.workspacePath);
+        return await this.getSummarizedSnapshot(input.workspacePath);
       }
 
       if (!workerDelegations.length) {
@@ -1029,8 +867,7 @@ export class AppService {
           summary: reply
         });
         await this.store.appendActivity(input.workspacePath, "orchestrator answered directly in chat");
-        await this.store.updateSessionSummary(input.workspacePath);
-        return await this.store.getSnapshot(input.workspacePath);
+        return await this.getSummarizedSnapshot(input.workspacePath);
       }
 
       this.clearChatProgress(input.workspacePath, input.activeThread.id, "orchestrator");
@@ -1063,8 +900,7 @@ export class AppService {
           summary: reply
         });
         await this.store.appendActivity(input.workspacePath, "orchestrator started a live builder run from chat");
-        await this.store.updateSessionSummary(input.workspacePath);
-        return await this.store.getSnapshot(input.workspacePath);
+        return await this.getSummarizedSnapshot(input.workspacePath);
       }
       const refreshedThread =
         workerTurn.snapshot.threads.find((thread) => thread.id === input.activeThread.id) ?? input.activeThread;
@@ -1150,8 +986,7 @@ export class AppService {
         input.workspacePath,
         `orchestrator completed a ${describeDelegationSetForActivity(workerDelegations)} follow-up in chat`
       );
-      await this.store.updateSessionSummary(input.workspacePath);
-      return await this.store.getSnapshot(input.workspacePath);
+      return await this.getSummarizedSnapshot(input.workspacePath);
     } finally {
       this.clearChatProgress(input.workspacePath, input.activeThread.id, "orchestrator");
     }
@@ -1477,7 +1312,7 @@ export class AppService {
       await this.store.updateSessionSummary(workspacePath);
       await this.store.buildContextBundle(
         workspacePath,
-        "Refresh the Lithium context bundle after importing attachments."
+        "Refresh the workspace context bundle after importing attachments."
       );
     }
 
@@ -1493,7 +1328,7 @@ export class AppService {
       await this.store.updateSessionSummary(workspacePath);
       await this.store.buildContextBundle(
         workspacePath,
-        "Refresh the Lithium context bundle after removing an attachment."
+        "Refresh the workspace context bundle after removing an attachment."
       );
     }
 
@@ -1503,57 +1338,6 @@ export class AppService {
   async beginStrategistSignIn(): Promise<void> {
     await this.chatgptAuthRunner.signIn();
     await this.chatgptAuthRunner.prepareReusableSession?.();
-  }
-
-  async runStrategistBrowserProbe(
-    request: StrategistBrowserProbeRequest,
-    options: {
-      strategistSessionReady?: boolean;
-    } = {}
-  ): Promise<StrategistBrowserProbeResponse> {
-    const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
-    const prompt =
-      request.prompt?.trim() ||
-      "Reply with one short sentence confirming that the strategist browser visibility probe is live.";
-    const reasoningIntensity = coerceStrategistThinkingTime(request.model, request.reasoningIntensity);
-    const monitor = await startStrategistBrowserProbeMonitor({
-      workspacePath,
-      prompt,
-      model: request.model,
-      reasoningIntensity,
-      strategistSessionReady: Boolean(options.strategistSessionReady)
-    });
-
-    let snapshot: ProjectSnapshot;
-    let errorMessage: string | undefined;
-
-    try {
-      snapshot = await this.consultStrategist(
-        {
-          workspacePath,
-          threadId: request.threadId,
-          prompt,
-          displayPrompt: prompt,
-          model: request.model,
-          reasoningIntensity
-        },
-        options
-      );
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error);
-      snapshot = await this.getSnapshot(workspacePath);
-    }
-
-    const probe = await monitor.stop({
-      error: errorMessage
-    });
-
-    return {
-      ok: !errorMessage,
-      error: errorMessage,
-      snapshot,
-      probe
-    };
   }
 
   async sendChatMessage(
@@ -1789,7 +1573,7 @@ export class AppService {
     }
   }
 
-  async consultStrategist(
+  private async consultStrategist(
     request: StrategistRequest,
     options: {
       strategistSessionReady?: boolean;
@@ -1951,13 +1735,6 @@ export class AppService {
         });
       }
 
-      if (result.chromePath) {
-        await this.store.initProject(workspacePath, {
-          name: await this.resolveProjectName(workspacePath),
-          oracleChromePath: result.chromePath
-        });
-      }
-
       const strategistOutput = result.outputText || result.stdout || result.stderr;
       const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
 
@@ -2005,8 +1782,7 @@ export class AppService {
         summary: handoffUserMessage(decision.handoff) || decision.summary,
         strategistContextFingerprint: attachStrategistRuntimeContext
           ? strategistContextFingerprint
-          : undefined,
-        strategistContextAttachedAt: attachStrategistRuntimeContext ? new Date().toISOString() : undefined
+          : undefined
       });
       await this.store.appendActivity(
         workspacePath,
@@ -2022,7 +1798,7 @@ export class AppService {
     }
   }
 
-  async runBuilderTask(
+  private async runBuilderTask(
     request: BuilderRequest,
     options: {
       manageProgress?: boolean;
@@ -2063,7 +1839,7 @@ export class AppService {
           id: (await this.store.allocateTask(workspacePath)).id,
           threadId: activeThread.id,
           sourceDecisionId: snapshot.latestDecision?.id,
-          title: prompt.slice(0, 80) || "Lithium builder task",
+          title: prompt.slice(0, 80) || "Workspace task",
           prompt,
           status: "pending",
           createdAt: new Date().toISOString(),
@@ -2181,7 +1957,6 @@ export class AppService {
       });
       await this.store.appendActivity(workspacePath, `${runPaths.id} finished with status ${status}`);
       await this.store.updateSessionSummary(workspacePath);
-      await this.syncRemoteChangedFiles(workspacePath, changedFiles);
 
       return await this.store.getSnapshot(workspacePath);
     } finally {
@@ -2191,7 +1966,7 @@ export class AppService {
     }
   }
 
-  async startBuilderTask(
+  private async startBuilderTask(
     request: BuilderRequest,
     options: {
       manageProgress?: boolean;
@@ -2258,7 +2033,7 @@ export class AppService {
         id: (await this.store.allocateTask(workspacePath)).id,
         threadId: activeThread.id,
         sourceDecisionId: snapshot.latestDecision?.id,
-        title: prompt.slice(0, 80) || "Lithium builder task",
+        title: prompt.slice(0, 80) || "Workspace task",
         prompt,
         status: "running",
         createdAt: new Date().toISOString(),
@@ -2427,7 +2202,7 @@ export class AppService {
     return await this.store.getSnapshot(workspacePath);
   }
 
-  async inspectBuilderRun(request: BuilderRunControlRequest): Promise<BuilderRunInspection | null> {
+  private async inspectBuilderRun(request: BuilderRunControlRequest): Promise<BuilderRunInspection | null> {
     const workspacePath = this.resolveWorkspacePath(request.workspacePath);
 
     if (!workspacePath) {
@@ -2556,7 +2331,7 @@ export class AppService {
     return inspection;
   }
 
-  async terminateBuilderRun(request: BuilderRunControlRequest): Promise<ProjectSnapshot> {
+  private async terminateBuilderRun(request: BuilderRunControlRequest): Promise<ProjectSnapshot> {
     const workspacePath = this.resolveWorkspacePath(request.workspacePath);
 
     if (!workspacePath) {
@@ -2625,8 +2400,8 @@ export class AppService {
           finalMessage: shouldUseCancelledMessage
             ? createSyntheticBuilderFinalMessage(
                 terminatedDetachedProcess
-                  ? "Lithium cancelled this task while recovering a detached builder process."
-                  : "Lithium cancelled this task before it finished.",
+                  ? "The app cancelled this task while recovering a detached builder process."
+                  : "The app cancelled this task before it finished.",
                 "partial"
               )
             : finalMessage,
@@ -2643,7 +2418,7 @@ export class AppService {
     return await this.store.getSnapshot(workspacePath);
   }
 
-  async finalizeBuilderRun(
+  private async finalizeBuilderRun(
     request: BuilderRunControlRequest,
     override?: {
       exitCode: number | null;
@@ -2730,437 +2505,8 @@ export class AppService {
 
     await this.store.appendActivity(workspacePath, `${run.id} finalized as ${status}`);
     await this.store.updateSessionSummary(workspacePath);
-    await this.syncRemoteChangedFiles(workspacePath, changedFiles);
 
     return await this.store.getSnapshot(workspacePath);
-  }
-
-  async updateManuscript(workspacePath?: string): Promise<ProjectSnapshot> {
-    const resolvedWorkspacePath = await this.resolveResearchWorkspacePath(workspacePath);
-    await this.store.initProject(resolvedWorkspacePath, {
-      name: await this.resolveProjectName(resolvedWorkspacePath)
-    });
-    const snapshot = await this.store.getSnapshot(resolvedWorkspacePath);
-    const content = this.manuscriptEngine.updateResults({
-      decision: snapshot.latestDecision ?? undefined,
-      run: snapshot.latestRun ?? undefined
-    });
-    await this.store.writeManuscriptSection(resolvedWorkspacePath, content);
-    await this.store.appendActivity(resolvedWorkspacePath, "manuscript updated from latest artifacts");
-    await this.store.updateSessionSummary(resolvedWorkspacePath);
-
-    return await this.store.getSnapshot(resolvedWorkspacePath);
-  }
-
-  async compilePaper(workspacePath?: string): Promise<ProjectSnapshot> {
-    const resolvedWorkspacePath = await this.resolveResearchWorkspacePath(workspacePath);
-    await this.store.initProject(resolvedWorkspacePath, {
-      name: await this.resolveProjectName(resolvedWorkspacePath)
-    });
-
-    const texPath = path.join(resolvedWorkspacePath, "paper", "main.tex");
-
-    try {
-      await access(texPath);
-    } catch {
-      throw new Error("paper/main.tex is missing.");
-    }
-
-    const runPaths = await this.store.allocateRun(resolvedWorkspacePath);
-    const remoteWorkspace = await this.remoteWorkspaceService.describe(resolvedWorkspacePath);
-    const result = remoteWorkspace
-      ? await this.remoteWorkspaceService.runWorkspaceCommand(
-          resolvedWorkspacePath,
-          {
-            command: "tectonic",
-            args: ["-X", "compile", "--synctex", "paper/main.tex"],
-            cwd: resolvedWorkspacePath
-          },
-          {
-            stdoutPath: runPaths.stdoutPath,
-            stderrPath: runPaths.stderrPath
-          }
-        )
-      : await runCommand({
-          spec: {
-            command: "tectonic",
-            args: ["-X", "compile", "--synctex", "paper/main.tex"],
-            cwd: resolvedWorkspacePath
-          },
-          stdoutPath: runPaths.stdoutPath,
-          stderrPath: runPaths.stderrPath
-        });
-
-    const finalMessage = [
-      result.stdout.trim(),
-      result.stderr.trim()
-    ]
-      .filter(Boolean)
-      .join("\n");
-    await writeFile(runPaths.outputPath, finalMessage, "utf8");
-
-    if (remoteWorkspace) {
-      try {
-        await this.remoteWorkspaceService.pullWorkspaceFiles(resolvedWorkspacePath, [
-          "paper/main.pdf",
-          "paper/main.synctex.gz",
-          "paper/main.log"
-        ]);
-      } catch (error) {
-        await this.store.appendActivity(
-          resolvedWorkspacePath,
-          "paper compiled remotely with tectonic: failed while syncing artifacts"
-        );
-        throw error;
-      }
-    }
-
-    if (result.exitCode === 0) {
-      await this.store.appendActivity(
-        resolvedWorkspacePath,
-        remoteWorkspace
-          ? "paper compiled remotely with tectonic: completed"
-          : "paper compiled locally with tectonic: completed"
-      );
-      return await this.store.getSnapshot(resolvedWorkspacePath);
-    }
-
-    await this.store.appendActivity(
-      resolvedWorkspacePath,
-      remoteWorkspace
-        ? "paper compiled remotely with tectonic: failed"
-        : "paper compiled locally with tectonic: failed"
-    );
-    throw new Error(finalMessage || "Paper compilation failed.");
-  }
-
-  async listWorkspaceFiles(workspacePath?: string): Promise<WorkspaceFileRecord[]> {
-    const resolvedWorkspacePath = this.resolveWorkspacePath(workspacePath);
-
-    if (!resolvedWorkspacePath) {
-      return [];
-    }
-
-    return await this.store.listWorkspaceFiles(resolvedWorkspacePath);
-  }
-
-  async readWorkspaceFile(request: WorkspaceFileRequest): Promise<WorkspaceFileContent> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(request.workspacePath);
-    return await this.store.readWorkspaceFile(
-      resolvedWorkspacePath,
-      await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.path)
-    );
-  }
-
-  async readWorkspaceDiff(request: WorkspaceDiffRequest): Promise<WorkspaceFileDiff | null> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(request.workspacePath);
-    return await readWorkspaceFileDiff(
-      resolvedWorkspacePath,
-      await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.path),
-      request.contextLines ?? 3
-    );
-  }
-
-  async readWorkspaceFileBytes(request: WorkspaceFileRequest): Promise<Uint8Array> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(request.workspacePath);
-    return await this.store.readWorkspaceFileBytes(
-      resolvedWorkspacePath,
-      await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.path)
-    );
-  }
-
-  async saveWorkspaceFile(request: {
-    workspacePath?: string;
-    path: string;
-    content: string;
-  }): Promise<WorkspaceFileContent> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(request.workspacePath);
-    const nextFile = await this.store.writeWorkspaceFile(
-      resolvedWorkspacePath,
-      await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.path),
-      request.content
-    );
-
-    if (!nextFile.relativePath.startsWith(".lithium/")) {
-      if (await this.store.readProject(resolvedWorkspacePath)) {
-        await this.store.updateSessionSummary(resolvedWorkspacePath);
-      }
-      const remoteWorkspace = await this.remoteWorkspaceService.describe(resolvedWorkspacePath);
-      if (remoteWorkspace) {
-        await this.remoteWorkspaceService.pushWorkspaceFile(resolvedWorkspacePath, nextFile.relativePath);
-      }
-    }
-
-    return nextFile;
-  }
-
-  async resolvePaperSyncTarget(request: PaperSyncTargetRequest): Promise<PaperSyncTarget | null> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(request.workspacePath);
-    const pdfPath = await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.pdfPath);
-    const sourcePath = await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.sourcePath);
-    const synctexPath = this.resolveSyncTeXPath(pdfPath);
-
-    try {
-      await access(synctexPath);
-    } catch {
-      return null;
-    }
-
-    return await resolveSyncTeXTarget({
-      synctexPath,
-      sourcePath,
-      lineNumber: request.lineNumber
-    });
-  }
-
-  async resolvePaperSourceTarget(request: PaperSourceTargetRequest): Promise<PaperSourceTarget | null> {
-    const resolvedWorkspacePath = this.requireWorkspacePath(request.workspacePath);
-    const pdfPath = await resolveWorkspaceMemberPath(resolvedWorkspacePath, request.pdfPath);
-    const synctexPath = this.resolveSyncTeXPath(pdfPath);
-
-    try {
-      await access(synctexPath);
-    } catch {
-      return null;
-    }
-
-    return await resolveSyncTeXSourceLocation({
-      synctexPath,
-      pageNumber: request.pageNumber,
-      yRatio: request.yRatio
-    });
-  }
-
-  async createTerminalSession(request: TerminalSessionCreateRequest): Promise<TerminalSessionState> {
-    const workspacePath = await this.resolveResearchWorkspacePath(request.workspacePath);
-    await this.store.initProject(workspacePath, {
-      name: await this.resolveProjectName(workspacePath)
-    });
-    if (request.threadId) {
-      await this.store.selectThread(workspacePath, request.threadId);
-    }
-    const snapshot = await this.store.getSnapshot(workspacePath);
-    const activeThread = snapshot.activeThread;
-    if (!activeThread) {
-      throw new Error("No active thread is available.");
-    }
-    const cwd = request.cwd
-      ? path.isAbsolute(request.cwd)
-        ? request.cwd
-        : path.join(workspacePath, request.cwd)
-      : workspacePath;
-    const bootstrapCommand =
-      request.bootstrapCommand?.trim() ||
-      (await this.remoteWorkspaceService.buildTerminalBootstrapCommand(workspacePath).catch(() => null)) ||
-      undefined;
-    const cols = clampTerminalSize(request.cols, 120, 40, 240);
-    const rows = clampTerminalSize(request.rows, 32, 12, 120);
-    const liveSession = await this.findActiveTerminalSession(workspacePath, activeThread.id);
-
-    if (liveSession && !request.forceNew) {
-      const resized = request.cols || request.rows
-        ? resizeLiveTerminal(workspacePath, liveSession.id, cols, rows)
-        : getLiveTerminal(workspacePath, liveSession.id);
-
-      if (resized) {
-        await this.store.writeTerminalSession(workspacePath, {
-          ...liveSession,
-          pid: resized.pid,
-          cwd: resized.cwd,
-          cols: resized.cols,
-          rows: resized.rows
-        });
-      }
-
-      const existingSession = await this.getTerminalSession({
-        workspacePath,
-        sessionId: liveSession.id
-      });
-
-      if (!existingSession) {
-        throw new Error("Failed to restore the active terminal session.");
-      }
-
-      return existingSession;
-    }
-
-    await this.stopLiveTerminalSessionsForThread(workspacePath, activeThread.id);
-    const sessionPaths = await this.store.allocateTerminalSession(workspacePath);
-    const liveHandle = await startLiveTerminal({
-      id: sessionPaths.id,
-      workspacePath,
-      cwd,
-      transcriptPath: sessionPaths.transcriptPath,
-      cols,
-      rows,
-      shell: request.shell,
-      bootstrapCommand
-    });
-    const record: TerminalSessionRecord = {
-      id: sessionPaths.id,
-      threadId: activeThread.id,
-      workspacePath,
-      shell: liveHandle.shell,
-      cwd,
-      status: "running",
-      exitCode: null,
-      pid: liveHandle.pid,
-      transcriptPath: sessionPaths.transcriptPath,
-      stdoutPath: sessionPaths.stdoutPath,
-      stderrPath: sessionPaths.stderrPath,
-      cols,
-      rows,
-      startedAt: liveHandle.startedAt,
-      endedAt: undefined
-    };
-
-    await this.store.writeTerminalSession(workspacePath, record);
-    await Promise.all([
-      writeFile(sessionPaths.stdoutPath, "", "utf8"),
-      writeFile(sessionPaths.stderrPath, "", "utf8")
-    ]);
-
-    return (await this.getTerminalSession({
-      workspacePath,
-      sessionId: record.id
-    })) as TerminalSessionState;
-  }
-
-  async getTerminalSession(request: TerminalSessionRequest): Promise<TerminalSessionState | null> {
-    const workspacePath = this.resolveWorkspacePath(request.workspacePath);
-
-    if (!workspacePath) {
-      return null;
-    }
-
-    const session = await this.store.readTerminalSession(workspacePath, request.sessionId);
-
-    if (!session) {
-      return null;
-    }
-
-    const liveTerminal = getLiveTerminal(workspacePath, session.id);
-
-    return {
-      ...session,
-      shell: session.shell || liveTerminal?.shell || "shell",
-      cwd: liveTerminal?.cwd || session.cwd,
-      pid: liveTerminal?.pid ?? session.pid,
-      cols: liveTerminal?.cols ?? session.cols ?? 120,
-      rows: liveTerminal?.rows ?? session.rows ?? 32,
-      active: Boolean(liveTerminal),
-      output: await this.readTerminalTranscript(session)
-    };
-  }
-
-  async writeTerminalInput(request: TerminalSessionInputRequest): Promise<boolean> {
-    if (!request.data) {
-      return false;
-    }
-
-    const workspacePath = this.resolveWorkspacePath(request.workspacePath);
-
-    if (!workspacePath) {
-      return false;
-    }
-
-    return writeToLiveTerminal(workspacePath, request.sessionId, request.data);
-  }
-
-  async resizeTerminalSession(request: TerminalSessionResizeRequest): Promise<TerminalSessionState | null> {
-    const workspacePath = this.resolveWorkspacePath(request.workspacePath);
-
-    if (!workspacePath) {
-      return null;
-    }
-
-    const session = await this.store.readTerminalSession(workspacePath, request.sessionId);
-
-    if (!session) {
-      return null;
-    }
-
-    const liveTerminal = resizeLiveTerminal(
-      workspacePath,
-      session.id,
-      clampTerminalSize(request.cols, session.cols || 120, 40, 240),
-      clampTerminalSize(request.rows, session.rows || 32, 12, 120)
-    );
-
-    if (!liveTerminal) {
-      return await this.getTerminalSession({
-        workspacePath,
-        sessionId: session.id
-      });
-    }
-
-    await this.store.writeTerminalSession(workspacePath, {
-      ...session,
-      pid: liveTerminal.pid,
-      cwd: liveTerminal.cwd,
-      cols: liveTerminal.cols,
-      rows: liveTerminal.rows
-    });
-
-    return await this.getTerminalSession({
-      workspacePath,
-      sessionId: session.id
-    });
-  }
-
-  async closeTerminalSession(request: TerminalSessionRequest): Promise<TerminalSessionState | null> {
-    const workspacePath = this.resolveWorkspacePath(request.workspacePath);
-
-    if (!workspacePath) {
-      return null;
-    }
-
-    const session = await this.store.readTerminalSession(workspacePath, request.sessionId);
-
-    if (!session) {
-      return null;
-    }
-
-    if (!getLiveTerminal(workspacePath, session.id)) {
-      return await this.getTerminalSession({
-        workspacePath,
-        sessionId: session.id
-      });
-    }
-
-    stopLiveTerminal(workspacePath, session.id);
-    const nextSession: TerminalSessionRecord = {
-      ...session,
-      status: "cancelled",
-      pid: null,
-      endedAt: new Date().toISOString()
-    };
-    await this.store.writeTerminalSession(workspacePath, nextSession);
-
-    return {
-      ...nextSession,
-      shell: nextSession.shell || "shell",
-      cols: nextSession.cols || 120,
-      rows: nextSession.rows || 32,
-      active: false,
-      output: await this.readTerminalTranscript(nextSession)
-    };
-  }
-
-  private async syncRemoteChangedFiles(workspacePath: string, changedFiles: string[]) {
-    const syncedFiles = changedFiles.filter((relativePath) => !relativePath.startsWith(".lithium/"));
-
-    if (!syncedFiles.length) {
-      return;
-    }
-
-    const remoteWorkspace = await this.remoteWorkspaceService.describe(workspacePath);
-
-    if (!remoteWorkspace) {
-      return;
-    }
-
-    await this.remoteWorkspaceService.pushWorkspaceFiles(workspacePath, syncedFiles);
   }
 
   private async prepareReusableStrategistSession(strategistSessionReady?: boolean) {
@@ -3180,8 +2526,7 @@ export class AppService {
   }
 
   private async resolveProjectName(workspacePath: string) {
-    const remoteWorkspace = await this.remoteWorkspaceService.describe(workspacePath);
-    return remoteWorkspace?.profile.name || basename(workspacePath);
+    return basename(workspacePath);
   }
 
   private resolveWorkspacePath(workspacePath?: string) {
@@ -3248,10 +2593,6 @@ export class AppService {
     }
 
     throw new Error("Could not allocate an untitled workspace.");
-  }
-
-  private resolveSyncTeXPath(pdfPath: string) {
-    return pdfPath.replace(/\.pdf$/i, ".synctex.gz");
   }
 
   private async readRunFinalMessage(outputPath: string, stdoutPath: string, stderrPath: string) {
@@ -3349,8 +2690,8 @@ export class AppService {
       await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
         currentStepSummary:
           refreshedRunningSteps.some((step) => step.lane === "strategist")
-            ? "Resuming the in-flight builder and strategist work after Lithium restarted."
-            : "Resuming the in-flight builder step after Lithium restarted."
+            ? "Resuming the in-flight builder and strategist work after the app restarted."
+            : "Resuming the in-flight builder step after the app restarted."
       });
       this.scheduleAutomationLoop(workspacePath, refreshedSession.id);
       return;
@@ -3358,7 +2699,7 @@ export class AppService {
 
     if (refreshedRunningSteps.some((step) => step.lane === "strategist")) {
       await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
-        currentStepSummary: "Resuming the in-flight strategist step after Lithium restarted."
+        currentStepSummary: "Resuming the in-flight strategist step after the app restarted."
       });
       this.scheduleAutomationLoop(workspacePath, refreshedSession.id);
       return;
@@ -3372,14 +2713,14 @@ export class AppService {
 
         await this.completeAutomationStep(workspacePath, refreshedSession, runningStep, {
           status: "failed",
-          summary: `Automation resumed after Lithium restarted while "${runningStep.title}" was still marked in progress.`,
+          summary: `Automation resumed after the app restarted while "${runningStep.title}" was still marked in progress.`,
           changedFiles: [],
           evidence: [runningStep.id]
         });
       }
 
       await this.writeRunningAutomationSession(workspacePath, refreshedSession, {
-        currentStepSummary: "Automation resumed after Lithium restarted."
+        currentStepSummary: "Automation resumed after the app restarted."
       });
       this.scheduleAutomationLoop(workspacePath, refreshedSession.id);
       return;
@@ -3411,7 +2752,7 @@ export class AppService {
       activeCycleId: undefined,
       activeLaneStepIds: [],
       latestCheckpointId: checkpoint.id,
-      currentStepSummary: "Automation was interrupted when Lithium restarted. Waiting for your direction.",
+      currentStepSummary: "Automation was interrupted when the app restarted. Waiting for your direction.",
       stopReason: interruptedSummary,
       endedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -3450,7 +2791,7 @@ export class AppService {
       ? recoveredOutput
       : terminatedDetachedProcess
       ? createSyntheticBuilderFinalMessage(
-          "Lithium terminated a detached builder process after an app restart left it running without an active session.",
+          "The app terminated a detached builder process after restart left it running without an active session.",
           "partial"
         )
       : await this.readRunFinalMessage(run.finalMessagePath, run.stdoutPath, run.stderrPath);
@@ -3567,14 +2908,9 @@ export class AppService {
   ) {
     const normalized = prompt.trim().toLowerCase();
     const hasAttachments = snapshot.activeThreadAttachments.length > 0;
-    const mentionsPaper = /\b(paper|manuscript|latex|tex|pdf)\b|논문|원고/.test(normalized);
 
     if (lane === "builder") {
-      return hasAttachments || mentionsPaper || Boolean(snapshot.latestDecision || snapshot.latestAutomationSession);
-    }
-
-    if (lane === "paper") {
-      return true;
+      return hasAttachments || Boolean(snapshot.latestDecision || snapshot.latestAutomationSession);
     }
 
     return false;
@@ -3607,9 +2943,8 @@ export class AppService {
       inputFiles: input.inputFiles,
       rawOutput: input.rawOutput,
       summary: structured.summary,
-      nextTask: undefined,
       rationale: structured.rationale ?? "Oracle did not return a structured rationale.",
-      handoff: stripLegacyNextTask(structured),
+      handoff: structured,
       model: input.model,
       engine: "browser",
       status,
@@ -3629,7 +2964,6 @@ export class AppService {
       prompt?: string;
       summary?: string;
       strategistContextFingerprint?: string;
-      strategistContextAttachedAt?: string;
     }
   ) {
     const nextTitle = shouldRetitleThread(thread.title) && input.prompt
@@ -3640,102 +2974,18 @@ export class AppService {
       title: nextTitle,
       summary: input.summary ?? thread.summary,
       strategistContextFingerprint:
-        input.strategistContextFingerprint ?? thread.strategistContextFingerprint,
-      strategistLastContextAttachedAt:
-        input.strategistContextAttachedAt ?? thread.strategistLastContextAttachedAt
+        input.strategistContextFingerprint ?? thread.strategistContextFingerprint
     });
   }
 
   private async stopLiveProcessesForThread(workspacePath: string, threadId: string) {
-    const [runs, terminalSessions] = await Promise.all([
-      this.store.listRuns(workspacePath),
-      this.store.listTerminalSessions(workspacePath)
-    ]);
+    const runs = await this.store.listRuns(workspacePath);
 
     for (const run of runs.filter((record) => record.threadId === threadId)) {
       if (getLiveProcess(workspacePath, run.id)) {
         stopLiveProcess(workspacePath, run.id);
       }
     }
-
-    for (const session of terminalSessions.filter((record) => record.threadId === threadId)) {
-      if (getLiveTerminal(workspacePath, session.id)) {
-        stopLiveTerminal(workspacePath, session.id);
-      }
-    }
-  }
-
-  private async stopLiveTerminalSessionsForThread(workspacePath: string, threadId: string) {
-    const terminalSessions = await this.store.listTerminalSessions(workspacePath);
-
-    for (const session of terminalSessions.filter((record) => record.threadId === threadId)) {
-      if (getLiveTerminal(workspacePath, session.id)) {
-        stopLiveTerminal(workspacePath, session.id);
-        await this.store.writeTerminalSession(workspacePath, {
-          ...session,
-          status: "cancelled",
-          pid: null,
-          endedAt: new Date().toISOString()
-        });
-      }
-    }
-  }
-
-  private async findActiveTerminalSession(workspacePath: string, threadId: string) {
-    const terminalSessions = await this.store.listTerminalSessions(workspacePath);
-
-    return (
-      terminalSessions.find(
-        (record) => record.threadId === threadId && Boolean(getLiveTerminal(workspacePath, record.id))
-      ) ?? null
-    );
-  }
-
-  private async handleLiveTerminalEvent(event: TerminalEvent) {
-    const session = await this.store.readTerminalSession(event.workspacePath, event.sessionId);
-
-    if (!session) {
-      return;
-    }
-
-    if (event.type === "cwd") {
-      if (event.cwd === session.cwd) {
-        return;
-      }
-
-      await this.store.writeTerminalSession(event.workspacePath, {
-        ...session,
-        cwd: event.cwd
-      });
-      return;
-    }
-
-    if (event.type === "exit") {
-      await this.store.writeTerminalSession(event.workspacePath, {
-        ...session,
-        status: event.status,
-        exitCode: event.exitCode,
-        pid: null,
-        endedAt: event.endedAt
-      });
-    }
-  }
-
-  private async readTerminalTranscript(session: TerminalSessionRecord) {
-    if (session.transcriptPath) {
-      const output = await readTailText(session.transcriptPath);
-
-      if (output) {
-        return output.trimEnd();
-      }
-    }
-
-    const [stdout, stderr] = await Promise.all([
-      session.stdoutPath ? readTailText(session.stdoutPath) : Promise.resolve(""),
-      session.stderrPath ? readTailText(session.stderrPath) : Promise.resolve("")
-    ]);
-
-    return [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join("\n").trimEnd();
   }
 
   private async requireAutomationSession(workspacePath: string, sessionId: string) {
@@ -4160,7 +3410,7 @@ export class AppService {
 
     if (!/resuming the in-flight builder step/i.test(session.currentStepSummary)) {
       await this.writeRunningAutomationSession(workspacePath, session, {
-        currentStepSummary: "Resuming the in-flight builder step after Lithium restarted."
+        currentStepSummary: "Resuming the in-flight builder step after the app restarted."
       });
     }
 
@@ -4243,7 +3493,7 @@ export class AppService {
 
     if (!/resuming the in-flight strategist step/i.test(session.currentStepSummary)) {
       await this.writeRunningAutomationSession(workspacePath, session, {
-        currentStepSummary: "Resuming the in-flight strategist step after Lithium restarted."
+        currentStepSummary: "Resuming the in-flight strategist step after the app restarted."
       });
     }
 
@@ -4294,7 +3544,7 @@ export class AppService {
     controller.redirectInstruction = recoveryInstruction;
 
     await this.writeRunningAutomationSession(workspacePath, session, {
-      currentStepSummary: "Retrying the interrupted strategist step after Lithium restarted."
+      currentStepSummary: "Retrying the interrupted strategist step after the app restarted."
     });
 
     return {
@@ -4831,13 +4081,6 @@ export class AppService {
       strategistSessionReady: appSettings.strategistSessionReady
     });
 
-    if (started.chromePath) {
-      await this.store.initProject(workspacePath, {
-        name: await this.resolveProjectName(workspacePath),
-        oracleChromePath: started.chromePath
-      });
-    }
-
     const updatedStep: AutomationStepRecord = {
       ...strategistStep,
       resumeCursor: strategistSlug,
@@ -5112,40 +4355,6 @@ export class AppService {
       changedFiles: runChangedFiles,
       evidence: runEvidence
     });
-
-    if (session.paperWriteEnabled && runStatus === "completed") {
-      const paperStep = await this.createAutomationStep(workspacePath, session, {
-        cycleId: cycle?.id ?? builderStep.cycleId,
-        kind: "paper-sync",
-        lane: "writer",
-        workerMode: "sync",
-        title: "Sync manuscript state",
-        prompt: "Update manuscript projections from the latest decision and run."
-      });
-      const manuscriptSnapshot = await this.updateManuscript(workspacePath);
-      let paperSummary = manuscriptSnapshot.manuscript
-        ? "Updated the internal manuscript projection from the latest artifacts."
-        : "No manuscript projection was available to update.";
-
-      if ((latestRun?.changedFiles ?? []).some(isPaperRelatedPath)) {
-        try {
-          await this.compilePaper(workspacePath);
-          paperSummary = `${paperSummary} Recompiled the paper.`;
-        } catch (error) {
-          paperSummary = `${paperSummary} Paper compile failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`;
-        }
-      }
-
-      await this.completeAutomationStep(workspacePath, session, paperStep, {
-        status: "completed",
-        summary: paperSummary,
-        completedSideEffects: manuscriptSnapshot.manuscript ? [`manuscript:${manuscriptSnapshot.manuscript.path}`] : [],
-        changedFiles: manuscriptSnapshot.manuscript ? [manuscriptSnapshot.manuscript.path] : [],
-        evidence: latestRun?.id ? [latestRun.id] : []
-      });
-    }
 
     const nextUsedSteps = session.budget.usedSteps + 1;
     const runFailed = runStatus === "failed" || runStatus === "cancelled";
@@ -5919,8 +5128,8 @@ export class AppService {
           continue;
         }
 
-        const legacyCycle = await this.ensureAutomationCycle(workspacePath, session, {
-          title: "Fallback legacy automation cycle",
+        const fallbackCycle = await this.ensureAutomationCycle(workspacePath, session, {
+          title: "Automation cycle",
           objective: redirectInstruction || session.displayObjective || session.objective,
           plannerPrompt: redirectInstruction || session.displayObjective || session.objective,
           summary: "Continuing with the fallback automation cycle."
@@ -5952,7 +5161,7 @@ export class AppService {
               ? `[Autopilot] ${redirectInstruction}`
               : `[Autopilot] ${session.displayObjective ?? session.objective}`;
           let strategizeStep = await this.createAutomationStep(workspacePath, session, {
-            cycleId: legacyCycle.id,
+            cycleId: fallbackCycle.id,
             kind: "strategize",
             lane: "strategist",
             workerMode: "async",
@@ -5962,7 +5171,7 @@ export class AppService {
           const strategistSessionSlug = buildAutomationStrategistSessionSlug(
             workspacePath,
             session,
-            legacyCycle,
+            fallbackCycle,
             strategizeStep
           );
           strategizeStep = {
@@ -6022,21 +5231,6 @@ export class AppService {
           });
         }
 
-        const nextPaperWriteEnabled =
-          session.paperWriteEnabled || shouldBeginPaperPhase(session, latestDecision);
-
-        if (nextPaperWriteEnabled !== session.paperWriteEnabled) {
-          session = {
-            ...session,
-            paperWriteEnabled: nextPaperWriteEnabled
-          };
-          session = await this.writeRunningAutomationSession(workspacePath, session, {
-            currentStepSummary: nextPaperWriteEnabled
-              ? "Paper phase activated after the latest strategist decision."
-              : session.currentStepSummary
-          });
-        }
-
         const builderDisplayPrompt = redirectInstruction || session.objective;
         const builderPrompt = buildContextDrivenBuilderPrompt(
           builderDisplayPrompt,
@@ -6044,7 +5238,7 @@ export class AppService {
           appSettings.autopilotPromptLanguage
         );
         let builderStep = await this.createAutomationStep(workspacePath, session, {
-          cycleId: legacyCycle.id,
+          cycleId: fallbackCycle.id,
           kind: inferAutomationBuilderStepKind(builderPrompt),
           lane: "builder",
           workerMode: "async",
@@ -6101,7 +5295,7 @@ export class AppService {
 
         const shouldStopLoop = await this.applyAutomationBuilderOutcome(workspacePath, {
           session,
-          cycle: legacyCycle,
+          cycle: fallbackCycle,
           controller,
           builderStep,
           latestDecision,
@@ -7991,11 +7185,6 @@ function localizeAutomationStartReply(prompt: string) {
   return "I’ll start the automation from this goal and continue the status updates here in chat.";
 }
 
-function stripLegacyNextTask(handoff: LithiumHandoff) {
-  const { nextTask: _legacyNextTask, ...rest } = handoff;
-  return rest;
-}
-
 function extractVisibleStrategistReply(rawOutput: string, maxChars = 2400) {
   const stripped = rawOutput
     .replace(/\n*LITHIUM_HANDOFF[\s\S]*$/m, "")
@@ -8087,7 +7276,7 @@ function looksLikeStructuredStrategistOnly(value: string) {
     .filter(Boolean);
 
   return meaningfulLines.every((line) =>
-    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|run_actions|success_criteria|open_questions)\s*:/i.test(
       line
     )
   );
@@ -8182,11 +7371,7 @@ function inferAutomationBuilderStepKind(builderPrompt: string): AutomationStepKi
     return "result-analysis";
   }
 
-  if (/\b(paper|manuscript|latex|tex|write|draft|section|caption)\b/.test(normalized)) {
-    return "paper-sync";
-  }
-
-  if (/\b(literature|paper search|related work|citation|survey|search)\b/.test(normalized)) {
+  if (/\b(literature|literature search|related work|citation|survey|search)\b/.test(normalized)) {
     return "literature-search";
   }
 
@@ -8208,39 +7393,6 @@ function buildAutomationEvidence(run?: RunRecord | null) {
       ].filter(Boolean)
     )
   );
-}
-
-function isPaperRelatedPath(filePath: string) {
-  return /(^|\/)(paper|manuscript)\//i.test(filePath) || /\.(tex|bib|cls|sty|pdf)$/i.test(filePath);
-}
-
-function shouldBeginPaperPhase(
-  session: AutomationSessionRecord,
-  decision: DecisionRecord | null | undefined
-) {
-  if (session.paperWriteEnabled || !decision) {
-    return session.paperWriteEnabled;
-  }
-
-  const combined = [
-    decision.summary,
-    decision.rationale,
-    ...(decision.handoff?.paperActions ?? [])
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  return /\b(paper|manuscript|latex|tex|abstract|results section|discussion section|write-up|draft)\b/.test(
-    combined
-  );
-}
-
-function clampTerminalSize(value: number | undefined, fallback: number, min: number, max: number) {
-  if (!Number.isFinite(value)) {
-    return fallback;
-  }
-
-  return Math.min(Math.max(Math.round(value as number), min), max);
 }
 
 function resolveBuilderModel(candidate: BuilderRequest["model"], fallback?: string): BuilderModel {
@@ -8338,7 +7490,7 @@ function extractProgressTailDetails(...tails: string[]) {
         .filter((line) => !/^(model|reasoning intensity|launching browser mode|objective|budget|latest user direction)\s*:/i.test(line))
         .filter(
           (line) =>
-            !/^(summary|next_task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+            !/^(summary|rationale|files|risks|run_actions|success_criteria|open_questions)\s*:/i.test(
               line
             )
         )
@@ -8436,28 +7588,14 @@ function formatRouterActivityLine(trace: RouterTraceRecord) {
 }
 
 function looksLikeCodexTranscript(value: string) {
-  const legacyMarkers = [
-    /^OpenAI Codex v/im.test(value),
-    /\nuser\s*\nYou are the Lithium builder/i.test(value),
-    /\nCONTEXT_PACK:\n/i.test(value) ||
-      /\nRUNTIME_CONTEXT:\n/i.test(value) ||
-      /\nFULL_ARTIFACT_CONTEXT:\n/i.test(value),
-    /\nexec\s*\n\/bin\/zsh -lc/i.test(value),
-    /\nPlan update\s*\n/i.test(value)
-  ].filter(Boolean);
-
-  if (legacyMarkers.length >= 2) {
-    return true;
-  }
-
-  const jsonEventMarkers = [
+  const transcriptSignals = [
     /(?:^|\s)\{"type":"thread\.(?:started|completed)"/m.test(value),
     /(?:^|\s)\{"type":"turn\.(?:started|completed)"/m.test(value),
     /"type":"item\.(?:started|completed|updated)"/.test(value),
     /"type":"(?:agent_message|command_execution|web_search|todo_list)"/.test(value)
   ].filter(Boolean).length;
 
-  if (jsonEventMarkers >= 3) {
+  if (transcriptSignals >= 3) {
     return true;
   }
 
@@ -8466,7 +7604,7 @@ function looksLikeCodexTranscript(value: string) {
     progress.progressSummary || progress.progressDetails.length > 0 || progress.activeCommand
   );
 
-  if (jsonEventMarkers >= 2 && hasJsonProgressSignal) {
+  if (transcriptSignals >= 2 && hasJsonProgressSignal) {
     return true;
   }
 
@@ -8481,7 +7619,6 @@ function looksLikeBuilderPromptTemplate(handoff: LithiumHandoff) {
     summary.includes("<what changed>") ||
     handoff.files.some((entry) => entry.includes("<relative path>")) ||
     handoff.risks.some((entry) => entry.includes("<risk")) ||
-    handoff.paperActions.some((entry) => entry.includes("<paper")) ||
     handoff.runActions.some((entry) => entry.includes("<run")) ||
     handoff.successCriteria.some((entry) => entry.includes("<verification>")) ||
     handoff.openQuestions.some((entry) => entry.includes("<open question"))
@@ -8566,18 +7703,18 @@ function summarizeInterruptedAutomationSession(
   run: RunRecord | null
 ) {
   if (run?.status === "completed") {
-    return "The latest builder run finished, but automation stopped when Lithium restarted before it could continue.";
+    return "The latest builder run finished, but automation stopped when the app restarted before it could continue.";
   }
 
   if (step?.lane === "strategist") {
-    return "Automation stopped when Lithium restarted during the strategist step.";
+    return "Automation stopped when the app restarted during the strategist step.";
   }
 
   if (step?.lane === "builder") {
-    return "Automation stopped when Lithium restarted during the builder step.";
+    return "Automation stopped when the app restarted during the builder step.";
   }
 
-  return "Automation stopped when Lithium restarted before the latest step finished.";
+  return "Automation stopped when the app restarted before the latest step finished.";
 }
 
 function createSyntheticBuilderFinalMessage(summary: string, result: "success" | "partial" | "failed") {
@@ -8591,7 +7728,6 @@ function createSyntheticBuilderFinalMessage(summary: string, result: "success" |
       result,
       files: [],
       risks: [],
-      paper_actions: [],
       run_actions: [],
       success_criteria: [],
       open_questions: []
@@ -8624,9 +7760,6 @@ function createEmptyProjectSnapshot(): ProjectSnapshot {
     latestTask: null,
     latestRun: null,
     latestRouterTrace: null,
-    terminalSessions: [],
-    latestTerminalSession: null,
-    manuscript: null,
     automationSessions: [],
     automationSteps: [],
     automationCheckpoints: [],

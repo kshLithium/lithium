@@ -109,7 +109,7 @@ export class CodexRunner {
 
     if (language === "ko") {
       return [
-        "당신은 현재 저장소 안에서 작업하는 Lithium builder입니다.",
+        "당신은 현재 저장소 안에서 작업하는 자동화 실행 에이전트입니다.",
         "코드, 파일, 명령 실행이 필요하면 요청된 작업을 직접 수행하세요.",
         "긴 채팅 히스토리 대신 아래 runtime context를 현재 프로젝트 상태로 사용하세요.",
         artifactContext ? "정말 필요할 때만 전체 artifact context를 참고하세요." : null,
@@ -122,7 +122,7 @@ export class CodexRunner {
         "외부 공개 웹 소스를 참고했다면 답변 본문에 명시적인 마크다운 링크나 짧은 Sources 섹션을 포함하세요.",
         "답변 뒤에는 새 줄에 아래 마커를 정확히 추가하세요:",
         "LITHIUM_STATUS",
-        '그다음 유효한 JSON 객체 하나만 출력하세요. 필수: {"machine_summary":"...","result":"success|partial|failed"}. 자연어 본문과 다르게 앱 내부에 넘길 짧은 요약은 "machine_summary"에 넣으세요. 필요하면 "user_message"로 사용자에게 보여줄 짧은 버전을 따로 줄 수 있습니다. 레거시 호환을 위해 "summary"도 허용되지만 새 출력에서는 "machine_summary"를 우선하세요. 필요할 때만 선택 필드: "files", "risks", "paper_actions", "run_actions", "success_criteria", "open_questions", "needs_user_checkpoint".',
+        '그다음 유효한 JSON 객체 하나만 출력하세요. 필수: {"machine_summary":"...","result":"success|partial|failed"}. 자연어 본문과 다르게 앱 내부에 넘길 짧은 요약은 "machine_summary"에 넣으세요. 필요하면 "user_message"로 사용자에게 보여줄 짧은 버전을 따로 줄 수 있습니다. 필요할 때만 선택 필드: "files", "risks", "run_actions", "success_criteria", "open_questions", "needs_user_checkpoint".',
         "JSON 앞뒤에 마크다운 코드 펜스를 쓰지 마세요.",
         "",
         "RUNTIME_CONTEXT:",
@@ -138,7 +138,7 @@ export class CodexRunner {
     }
 
     return [
-      "You are the Lithium builder running inside the active repository.",
+      "You are the automation execution agent working inside the active repository.",
       "Do the requested workspace task directly when code, files, or commands need to change.",
       "Use the runtime context below as the current project state instead of relying on long chat history.",
       artifactContext ? "Use the full artifact context only when it materially helps." : null,
@@ -151,7 +151,7 @@ export class CodexRunner {
       "If you rely on external or public web sources, include explicit markdown links or a short Sources section in the answer body.",
       "After the answer, append this exact marker on a new line:",
       "LITHIUM_STATUS",
-      'Then emit one valid JSON object. Required: {"machine_summary":"...","result":"success|partial|failed"}. Put the compact internal handoff in "machine_summary". You may add "user_message" when a shorter user-facing wording helps. Legacy "summary" is still accepted, but prefer "machine_summary" for new outputs. Optional when useful: "files", "risks", "paper_actions", "run_actions", "success_criteria", "open_questions", "needs_user_checkpoint".',
+      'Then emit one valid JSON object. Required: {"machine_summary":"...","result":"success|partial|failed"}. Put the compact internal handoff in "machine_summary". You may add "user_message" when a shorter user-facing wording helps. Optional when useful: "files", "risks", "run_actions", "success_criteria", "open_questions", "needs_user_checkpoint".',
       "Do not use markdown fences around the JSON.",
       "",
       "RUNTIME_CONTEXT:",

@@ -40,11 +40,6 @@ describe("strategist-context", () => {
         id: "T001",
         updatedAt: "2026-03-21T00:00:00.000Z"
       },
-      latestTerminalSession: {
-        id: "TS001",
-        endedAt: "2026-03-21T00:00:00.000Z",
-        cwd: "/tmp/work"
-      }
     } as unknown as ProjectSnapshot;
     const snapshotB = {
       ...snapshotA,
@@ -84,7 +79,6 @@ describe("strategist-context", () => {
       latestTask: null,
       latestAutomationSession: null,
       latestAutomationCheckpoint: null,
-      latestTerminalSession: null,
       memory: null
     } as unknown as ProjectSnapshot;
 
@@ -104,7 +98,7 @@ describe("strategist-context", () => {
     expect(isSupportedStrategistUploadPath("/tmp/notes.md")).toBe(true);
     expect(isSupportedStrategistUploadPath("/tmp/results.csv")).toBe(true);
     expect(isSupportedStrategistUploadPath("/tmp/train_svm.py")).toBe(true);
-    expect(isSupportedStrategistUploadPath("/tmp/main.tex")).toBe(false);
+    expect(isSupportedStrategistUploadPath("/tmp/archive.zip")).toBe(false);
   });
 
   it("builds a deterministic strategist session slug per workspace and thread", () => {

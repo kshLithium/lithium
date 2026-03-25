@@ -7,17 +7,13 @@ import {
 } from "./protocol";
 
 describe("protocol", () => {
-  it("extracts strategist handoff fields from the legacy tagged format", () => {
-    const result = parseOracleOutput([
-      "SUMMARY: short summary",
-      "NEXT_TASK: do the next thing",
-      "RATIONALE: because it matters"
-    ].join("\n"));
+  it("falls back to the visible strategist text when no structured handoff is present", () => {
+    const result = parseOracleOutput("short summary");
 
     expect(result).toMatchObject({
       role: "strategist",
       summary: "short summary",
-      rationale: "because it matters"
+      rationale: "Oracle did not return a structured rationale."
     });
   });
 
@@ -28,13 +24,11 @@ describe("protocol", () => {
       "LITHIUM_HANDOFF",
       JSON.stringify({
         summary: "tight summary",
-        next_task: "run the next experiment",
         rationale: "it is the highest-value check",
-        files: ["paper/main.tex"],
-        risks: ["compile may fail"],
-        paper_actions: ["update methods"],
+        files: ["notes/plan.md"],
+        risks: ["latest run may fail"],
         run_actions: ["execute svm dry run"],
-        success_criteria: ["paper compiles"],
+        success_criteria: ["notes stay aligned"],
         open_questions: ["is the margin stable?"]
       })
     ].join("\n"));
@@ -46,11 +40,10 @@ describe("protocol", () => {
       machineSummary: "tight summary",
       userMessage: "Operator-facing note.",
       rationale: "it is the highest-value check",
-      files: ["paper/main.tex"],
-      risks: ["compile may fail"],
-      paperActions: ["update methods"],
+      files: ["notes/plan.md"],
+      risks: ["latest run may fail"],
       runActions: ["execute svm dry run"],
-      successCriteria: ["paper compiles"],
+      successCriteria: ["notes stay aligned"],
       openQuestions: ["is the margin stable?"]
     });
   });
@@ -62,7 +55,6 @@ describe("protocol", () => {
       "LITHIUM_HANDOFF",
       JSON.stringify({
         summary: "자연스럽게 정리된 최종 답변.",
-        next_task: "필요하면 초보자용 치트시트로 압축한다.",
         rationale: "The workspace had no local Overwatch notes."
       }),
       "",
@@ -84,11 +76,10 @@ describe("protocol", () => {
       "",
       "LITHIUM_STATUS",
       JSON.stringify({
-        summary: "terminal and protocol cleanup",
+        summary: "automation and protocol cleanup",
         result: "success",
         files: ["src/main/services/app-service.ts", "src/main/services/protocol.ts"],
         risks: ["needs broader product evals"],
-        paper_actions: ["sync results section"],
         run_actions: ["rerun compile"],
         success_criteria: ["tests pass"],
         open_questions: ["should compile auto-run?"],
@@ -100,13 +91,12 @@ describe("protocol", () => {
     expect(result).toEqual({
       schemaVersion: "lithium_handoff_v1",
       role: "builder",
-      summary: "terminal and protocol cleanup",
-      machineSummary: "terminal and protocol cleanup",
+      summary: "automation and protocol cleanup",
+      machineSummary: "automation and protocol cleanup",
       userMessage: "Implemented the fix and verified the build.",
       result: "success",
       files: ["src/main/services/app-service.ts", "src/main/services/protocol.ts"],
       risks: ["needs broader product evals"],
-      paperActions: ["sync results section"],
       runActions: ["rerun compile"],
       successCriteria: ["tests pass"],
       openQuestions: ["should compile auto-run?"],
@@ -140,22 +130,19 @@ describe("protocol", () => {
       "LITHIUM_HANDOFF",
       JSON.stringify({
         summary: "Use the local evidence first.",
-        next_task: "Update the local notes.",
-        files: "paper/main.tex, notes/plan.md",
-        risks: "- compile may fail\n- results may drift",
-        paper_actions: "update methods | update results",
+        files: "notes/plan.md, results/latest.json",
+        risks: "- latest run may fail\n- results may drift",
         run_actions: "rerun baseline",
-        success_criteria: "paper compiles; notes stay in sync",
+        success_criteria: "notes stay in sync; summary stays grounded",
         open_questions: "is the baseline stable?"
       })
     ].join("\n"));
 
     expect(result).toMatchObject({
-      files: ["paper/main.tex", "notes/plan.md"],
-      risks: ["compile may fail", "results may drift"],
-      paperActions: ["update methods", "update results"],
+      files: ["notes/plan.md", "results/latest.json"],
+      risks: ["latest run may fail", "results may drift"],
       runActions: ["rerun baseline"],
-      successCriteria: ["paper compiles", "notes stay in sync"],
+      successCriteria: ["notes stay in sync", "summary stays grounded"],
       openQuestions: ["is the baseline stable?"]
     });
   });
@@ -164,24 +151,22 @@ describe("protocol", () => {
     const result = parseBuilderOutput([
       "LITHIUM_STATUS",
       JSON.stringify({
-        summary: "Adjusted the draft and reran the baseline.",
+        summary: "Adjusted the notes and reran the baseline.",
         result: "partial",
-        files: "paper/main.tex\nresults/latest.json",
-        risks: "compile warnings",
-        paper_actions: "revise abstract",
+        files: "notes/summary.md\nresults/latest.json",
+        risks: "validation warnings",
         run_actions: "rerun compile",
-        success_criteria: "paper compiles",
+        success_criteria: "validation passes",
         open_questions: "should we keep the old chart?"
       })
     ].join("\n"));
 
     expect(result).toMatchObject({
       result: "partial",
-      files: ["paper/main.tex", "results/latest.json"],
-      risks: ["compile warnings"],
-      paperActions: ["revise abstract"],
+      files: ["notes/summary.md", "results/latest.json"],
+      risks: ["validation warnings"],
       runActions: ["rerun compile"],
-      successCriteria: ["paper compiles"],
+      successCriteria: ["validation passes"],
       openQuestions: ["should we keep the old chart?"]
     });
   });
@@ -212,11 +197,11 @@ describe("protocol", () => {
     const result = parseOracleOutput([
       "완료했습니다.",
       "",
-      "실험 산출물과 notes/paper 문장을 다시 맞췄고, 지금 남은 질문은 threshold가 합성 케이스에만 맞춰진 것인지 확인하는 것이다."
+      "실험 산출물과 notes/results 문장을 다시 맞췄고, 지금 남은 질문은 threshold가 합성 케이스에만 맞춰진 것인지 확인하는 것이다."
     ].join("\n"));
 
     expect(result.summary).toBe(
-      "실험 산출물과 notes/paper 문장을 다시 맞췄고, 지금 남은 질문은 threshold가 합성 케이스에만 맞춰진 것인지 확인하는 것이다."
+      "실험 산출물과 notes/results 문장을 다시 맞췄고, 지금 남은 질문은 threshold가 합성 케이스에만 맞춰진 것인지 확인하는 것이다."
     );
   });
 
@@ -232,8 +217,7 @@ describe("protocol", () => {
       describeIncompleteStrategistOutput([
         "LITHIUM_HANDOFF",
         JSON.stringify({
-          summary: "Use the same-thread comparison first.",
-          next_task: "Update notes/experiment-plan.md with the bounded benchmark."
+          summary: "Use the same-thread comparison first."
         })
       ].join("\n"))
     ).toBeNull();
@@ -244,15 +228,15 @@ describe("protocol", () => {
       "LITHIUM_ROUTE",
       JSON.stringify({
         route: "builder",
-        rewritten_prompt: "Update paper/main.tex with the requested abstract revision.",
-        reason_short: "The user asked for a concrete manuscript edit."
+        rewritten_prompt: "Update notes/summary.md with the requested revision.",
+        reason_short: "The user asked for a concrete workspace edit."
       })
     ].join("\n"));
 
     expect(result).toEqual({
       route: "builder",
-      rewrittenPrompt: "Update paper/main.tex with the requested abstract revision.",
-      reasonShort: "The user asked for a concrete manuscript edit."
+      rewrittenPrompt: "Update notes/summary.md with the requested revision.",
+      reasonShort: "The user asked for a concrete workspace edit."
     });
   });
 
@@ -288,12 +272,12 @@ describe("protocol", () => {
     });
   });
 
-  it("ignores legacy next_task fields while keeping the rest of the strategist handoff", () => {
+  it("ignores unrelated strategist JSON fields while keeping the main handoff data", () => {
     const result = parseOracleOutput([
       "LITHIUM_HANDOFF",
       JSON.stringify({
         summary: "Use the same-thread comparison first.",
-        next_task: "Update notes/experiment-plan.md with the bounded benchmark.",
+        debug_note: "temporary extra field",
         rationale: "The summary and rationale should still survive."
       })
     ].join("\n"));
@@ -306,7 +290,6 @@ describe("protocol", () => {
       rationale: "The summary and rationale should still survive.",
       files: [],
       risks: [],
-      paperActions: [],
       runActions: [],
       successCriteria: [],
       openQuestions: []

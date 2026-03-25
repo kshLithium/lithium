@@ -16,7 +16,7 @@ Describe the smallest change that would help.
 
 ## Why It Fits Lithium
 
-Explain how this stays aligned with the app's chat-first, local-first, non-IDE product thesis.
+Explain how this stays aligned with the app's chat-first, local-first research automation thesis.
 
 ## Notes
 

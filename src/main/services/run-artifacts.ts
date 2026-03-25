@@ -1,16 +1,10 @@
 import { spawn } from "node:child_process";
-import { access, constants, open, readFile, realpath, stat } from "node:fs/promises";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import type {
-  RecordStatus,
-  RunRecord,
-  WorkspaceFileDiff,
-  WorkspaceFileDiffStatus
-} from "../../shared/types";
+import type { RecordStatus, RunRecord } from "../../shared/types";
 import { handoffMachineSummary } from "../../shared/handoff-utils";
 import { parseBuilderOutput } from "./protocol";
 import { resolveWorkspaceGitRoot } from "./workspace-execution";
-import { resolveWorkspaceMemberPath } from "./workspace-paths";
 
 const DEFAULT_HUNG_THRESHOLD_MS = 120_000;
 const DEFAULT_ACTIVE_COMMAND_HUNG_THRESHOLD_MS = 20 * 60 * 1_000;
@@ -123,64 +117,6 @@ export async function collectGitChangedFiles(workspacePath: string) {
     .filter(Boolean);
 }
 
-export async function readWorkspaceFileDiff(
-  workspacePath: string,
-  filePath: string,
-  contextLines = 3
-): Promise<WorkspaceFileDiff | null> {
-  const absolutePath = await resolveWorkspaceMemberPath(workspacePath, filePath);
-  const canonicalWorkspacePath = await realpath(workspacePath).catch(() => path.resolve(workspacePath));
-  const canonicalAbsolutePath = await realpath(absolutePath).catch(() => absolutePath);
-  const relativePath = normalizeWorkspaceRelativePath(canonicalWorkspacePath, canonicalAbsolutePath);
-  const gitRoot = await resolveWorkspaceGitRoot(workspacePath);
-
-  if (!gitRoot) {
-    return {
-      path: absolutePath,
-      relativePath,
-      status: "unavailable",
-      diffText: ""
-    };
-  }
-
-  const canonicalGitRoot = await realpath(gitRoot).catch(() => gitRoot);
-  const gitRelativePath = path.relative(canonicalGitRoot, canonicalAbsolutePath);
-
-  if (!gitRelativePath || gitRelativePath.startsWith("..") || path.isAbsolute(gitRelativePath)) {
-    return {
-      path: absolutePath,
-      relativePath,
-      status: "unavailable",
-      diffText: ""
-    };
-  }
-
-  const normalizedGitPath = gitRelativePath.replaceAll(path.sep, "/");
-  const status = await inspectGitFileStatus(gitRoot, normalizedGitPath);
-
-  if (status === "clean") {
-    return {
-      path: absolutePath,
-      relativePath,
-      status,
-      diffText: ""
-    };
-  }
-
-  const diffText =
-    status === "untracked"
-      ? await buildUntrackedFileDiff(absolutePath, normalizedGitPath, contextLines)
-      : await buildTrackedFileDiff(gitRoot, normalizedGitPath, contextLines);
-  const resolvedStatus = diffText.includes("Binary files") ? "binary" : status;
-
-  return {
-    path: absolutePath,
-    relativePath,
-    status: resolvedStatus,
-    diffText
-  };
-}
-
 export function normalizeGitChangedPath(entry: string, workspacePath: string, gitRoot: string) {
   const decodedEntry = decodeGitPath(entry);
   const absolutePath = path.resolve(gitRoot, decodedEntry);
@@ -195,40 +131,6 @@ export function normalizeGitChangedPath(entry: string, workspacePath: string, gi
     .slice(-1)
     .join(" -> ")
     .trim();
-}
-
-async function inspectGitFileStatus(
-  gitRoot: string,
-  relativePath: string
-): Promise<WorkspaceFileDiffStatus> {
-  const { stdout } = await runGitCapture(
-    ["status", "--porcelain", "--untracked-files=all", "--", relativePath],
-    gitRoot
-  );
-  const firstLine = stdout
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .find(Boolean);
-
-  if (!firstLine) {
-    return "clean";
-  }
-
-  const statusCode = firstLine.slice(0, 2);
-
-  if (statusCode === "??") {
-    return "untracked";
-  }
-
-  if (statusCode.includes("D")) {
-    return "deleted";
-  }
-
-  if (statusCode.includes("A")) {
-    return "added";
-  }
-
-  return "modified";
 }
 
 function parseGitStatusEntries(output: string) {
@@ -311,67 +213,6 @@ function decodeGitPath(value: string) {
   }
 
   return Buffer.from(bytes).toString("utf8");
-}
-
-async function buildTrackedFileDiff(gitRoot: string, relativePath: string, contextLines: number) {
-  const headDiff = await runGitCapture(
-    ["diff", "--no-ext-diff", "--no-color", `--unified=${contextLines}`, "HEAD", "--", relativePath],
-    gitRoot
-  );
-
-  if (headDiff.stdout.trim()) {
-    return headDiff.stdout;
-  }
-
-  const workingTreeDiff = await runGitCapture(
-    ["diff", "--no-ext-diff", "--no-color", `--unified=${contextLines}`, "--", relativePath],
-    gitRoot
-  );
-
-  return workingTreeDiff.stdout;
-}
-
-async function buildUntrackedFileDiff(absolutePath: string, relativePath: string, contextLines: number) {
-  const targetExists = await access(absolutePath, constants.F_OK)
-    .then(() => true)
-    .catch(() => false);
-
-  if (!targetExists) {
-    return "";
-  }
-
-  const { stdout } = await runGitCapture(
-    ["diff", "--no-index", "--no-ext-diff", "--no-color", `--unified=${contextLines}`, "--", "/dev/null", absolutePath],
-    path.dirname(absolutePath)
-  );
-
-  return stdout.replaceAll(absolutePath, relativePath);
-}
-
-async function runGitCapture(args: string[], cwd: string) {
-  const child = spawn("git", args, {
-    cwd,
-    stdio: ["ignore", "pipe", "ignore"]
-  });
-  let stdout = "";
-
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-
-  const exitCode = await new Promise<number | null>((resolve) => {
-    child.on("error", () => resolve(null));
-    child.on("close", (code) => resolve(code));
-  });
-
-  return {
-    stdout,
-    exitCode
-  };
-}
-
-function normalizeWorkspaceRelativePath(workspacePath: string, absolutePath: string) {
-  return path.relative(path.resolve(workspacePath), absolutePath).replaceAll(path.sep, "/");
 }
 
 export function mergeChangedFiles(...lists: string[][]) {

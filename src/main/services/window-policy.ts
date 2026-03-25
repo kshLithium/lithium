@@ -1,27 +1,7 @@
 import path from "node:path";
-import type { ThemePreference } from "../../shared/types";
 
-export type InitialSurface = "chat" | "code" | "paper" | "memory" | null;
 export const APP_PROTOCOL = "app";
 export const APP_PROTOCOL_HOST = "lithium";
-
-export function resolveInitialSurface(value: string | undefined): InitialSurface {
-  if (value === "chat" || value === "code" || value === "paper" || value === "memory") {
-    return value;
-  }
-
-  return null;
-}
-
-export function resolveSurfaceUrl(url: string, initialSurface: InitialSurface) {
-  if (!initialSurface || initialSurface === "chat") {
-    return url;
-  }
-
-  const resolvedUrl = new URL(url);
-  resolvedUrl.searchParams.set("surface", initialSurface);
-  return resolvedUrl.toString();
-}
 
 export function isSafeExternalUrl(url: string) {
   try {
@@ -47,18 +27,12 @@ export function isTrustedAppUrl(url: string, devServerUrl?: string) {
   }
 }
 
-export function resolveWindowBackgroundColor(
-  themePreference: ThemePreference,
-  shouldUseDarkColors: boolean
-) {
-  const resolvedTheme =
-    themePreference === "system" ? (shouldUseDarkColors ? "dark" : "light") : themePreference;
-
-  return resolvedTheme === "dark" ? "#10151b" : "#f3f2ee";
+export function resolveRendererUrl(url: string) {
+  return url;
 }
 
-export function resolveAppEntryUrl(initialSurface: InitialSurface) {
-  return resolveSurfaceUrl(`${APP_PROTOCOL}://${APP_PROTOCOL_HOST}/index.html`, initialSurface);
+export function resolveAppEntryUrl() {
+  return `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}/index.html`;
 }
 
 export function resolveBundledAssetPath(url: string, distRoot: string) {

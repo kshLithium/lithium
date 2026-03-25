@@ -395,9 +395,9 @@ describe("OracleRunner", () => {
 
   it("keeps strategist prompts close to the original user request", () => {
     const runner = new OracleRunner();
-    const prompt = (runner as any).normalizePrompt("Summarize the latest paper changes.");
+    const prompt = (runner as any).normalizePrompt("Summarize the latest experiment changes.");
 
-    expect(prompt).toBe("Summarize the latest paper changes.");
+    expect(prompt).toBe("Summarize the latest experiment changes.");
     expect(prompt).not.toContain("LITHIUM_HANDOFF");
     expect(prompt).not.toContain("RUNTIME_CONTEXT:");
   });

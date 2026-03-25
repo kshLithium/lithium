@@ -1,8 +1,8 @@
 import { access, readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { prepareInteractiveShellLaunch } from "./terminal-shell-launch";
+import { prepareInteractiveShellLaunch } from "./interactive-shell-launch";
 
-describe("terminal shell launch", () => {
+describe("interactive shell launch", () => {
   it("starts zsh as a login shell and preserves user startup files", async () => {
     const launch = await prepareInteractiveShellLaunch("/bin/zsh");
 

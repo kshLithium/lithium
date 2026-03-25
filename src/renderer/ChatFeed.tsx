@@ -4,7 +4,6 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { ChatArtifactRef, ChatItem } from "./app-types";
-import { formatTime } from "./app-utils";
 
 const remarkPlugins = [remarkGfm, remarkMath];
 const rehypePlugins = [rehypeKatex];
@@ -93,10 +92,14 @@ export function resolveArtifactLinkTarget(href?: string, workspacePath?: string)
   return path === normalizedWorkspacePath || path.startsWith(`${normalizedWorkspacePath}/`) ? path : null;
 }
 
-function createMarkdownComponents(onOpenArtifact?: (path: string) => void, workspacePath?: string) {
+function createMarkdownComponents(workspacePath?: string) {
   return {
     a({ node: _node, href, onClick, ...props }: MarkdownAnchorProps) {
       const artifactPath = resolveArtifactLinkTarget(href, workspacePath);
+
+      if (artifactPath) {
+        return <span className="chat-file-ref">{props.children}</span>;
+      }
 
       return (
         <a
@@ -104,21 +107,9 @@ function createMarkdownComponents(onOpenArtifact?: (path: string) => void, works
           href={href}
           onClick={(event) => {
             onClick?.(event);
-
-            if (event.defaultPrevented || !artifactPath) {
-              return;
-            }
-
-            if (!onOpenArtifact) {
-              event.preventDefault();
-              return;
-            }
-
-            event.preventDefault();
-            onOpenArtifact(artifactPath);
           }}
-          rel={artifactPath ? undefined : "noreferrer"}
-          target={artifactPath ? undefined : "_blank"}
+          rel="noreferrer"
+          target="_blank"
         />
       );
     }
@@ -126,22 +117,15 @@ function createMarkdownComponents(onOpenArtifact?: (path: string) => void, works
 }
 
 type ChatMessageProps = ChatItem & {
-  compact: boolean;
   markdownComponents: ReturnType<typeof createMarkdownComponents>;
-  onOpenArtifact?: (path: string) => void;
 };
 
 const ChatMessage = memo(
   function ChatMessage({
     body,
-    compact,
     markdownComponents,
-    onOpenArtifact,
     pending,
     role,
-    timestamp,
-    title,
-    variant,
     artifacts
   }: ChatMessageProps) {
     const normalizedBody = useMemo(() => normalizeChatMarkdown(body), [body]);
@@ -149,13 +133,7 @@ const ChatMessage = memo(
     const visibleArtifacts = visualRole === "assistant" ? undefined : artifacts;
 
     return (
-      <article
-        className={`message ${visualRole} ${variant}${pending ? " pending" : ""} ${compact ? "compact" : ""}`}
-      >
-        <div className="message-meta">
-          <span>{title}</span>
-          <span>{formatTime(timestamp)}</span>
-        </div>
+      <article className={`message ${visualRole}${pending ? " pending" : ""}`}>
         {visualRole === "assistant" ? (
           <div className="message-body markdown chat-markdown">
             <ReactMarkdown
@@ -167,75 +145,45 @@ const ChatMessage = memo(
             </ReactMarkdown>
           </div>
         ) : (
-          <div className="message-body plain">{body}</div>
-        )}
-        {visibleArtifacts?.length ? (
-          <div className="message-artifact-list">
-            {visibleArtifacts.map((artifact) =>
-              onOpenArtifact ? (
-                <button
-                  key={artifact.id}
-                  className="message-artifact-pill"
-                  onClick={() => onOpenArtifact(artifact.path)}
-                  type="button"
-                >
-                  <span className="message-artifact-kind">
-                    {artifact.artifactKind ?? artifact.kind}
+          <div className="message-bubble">
+            <div className="message-body plain">{body}</div>
+            {visibleArtifacts?.length ? (
+              <div className="message-artifact-list">
+                {visibleArtifacts.map((artifact) => (
+                  <span key={artifact.id} className="message-artifact-pill">
+                    <span className="message-artifact-kind">{artifact.artifactKind ?? artifact.kind}</span>
+                    <span className="message-artifact-label">{artifact.label}</span>
                   </span>
-                  <span className="message-artifact-label">{artifact.label}</span>
-                </button>
-              ) : (
-                <span key={artifact.id} className="message-artifact-pill">
-                  <span className="message-artifact-kind">
-                    {artifact.artifactKind ?? artifact.kind}
-                  </span>
-                  <span className="message-artifact-label">{artifact.label}</span>
-                </span>
-              )
-            )}
+                ))}
+              </div>
+            ) : null}
           </div>
-        ) : null}
+        )}
       </article>
     );
   },
   (previous, next) =>
     previous.id === next.id &&
     previous.role === next.role &&
-    previous.variant === next.variant &&
-    previous.title === next.title &&
     previous.body === next.body &&
     previous.timestamp === next.timestamp &&
     previous.pending === next.pending &&
-    previous.compact === next.compact &&
     previous.markdownComponents === next.markdownComponents &&
-    previous.onOpenArtifact === next.onOpenArtifact &&
     areArtifactsEqual(previous.artifacts, next.artifacts)
 );
 
 type ChatFeedProps = {
   items: ChatItem[];
-  researchGoal?: string | null;
-  compact?: boolean;
-  onOpenArtifact?: (path: string) => void;
   workspacePath?: string;
 };
 
-export function ChatFeed({ items, compact = false, onOpenArtifact, workspacePath }: ChatFeedProps) {
-  const markdownComponents = useMemo(
-    () => createMarkdownComponents(onOpenArtifact, workspacePath),
-    [onOpenArtifact, workspacePath]
-  );
+export function ChatFeed({ items, workspacePath }: ChatFeedProps) {
+  const markdownComponents = useMemo(() => createMarkdownComponents(workspacePath), [workspacePath]);
 
   return (
-    <div className={compact ? "chat-feed compact" : "chat-feed"}>
+    <div className="chat-feed">
       {items.map((item) => (
-        <ChatMessage
-          key={item.id}
-          {...item}
-          compact={compact}
-          markdownComponents={markdownComponents}
-          onOpenArtifact={onOpenArtifact}
-        />
+        <ChatMessage key={item.id} {...item} markdownComponents={markdownComponents} />
       ))}
     </div>
   );

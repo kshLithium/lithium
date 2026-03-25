@@ -108,7 +108,7 @@ export class ChatgptAuthRunner {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(
-        `Lithium could not reuse the saved ChatGPT Pro session. ${reason} Reset strategist sign-in from Settings and log in again.`
+        `Lithium could not reuse the saved ChatGPT Pro session. ${reason} Start strategist sign-in again from the main chat and log in once more.`
       );
     } finally {
       if (browser) {

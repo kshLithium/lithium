@@ -10,7 +10,8 @@ For reproducible bugs, open a bug report and include:
 
 - your OS version
 - whether you ran the packaged app or `npm run dev`
-- the selected surface (`Chat`, `Code`, `Paper`, or `Context`)
+- whether the issue happened in a fresh workspace or an existing one
+- the active thread title and whether automation was running
 - exact reproduction steps
 - logs, screenshots, or the affected workspace shape if relevant
 

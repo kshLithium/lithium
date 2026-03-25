@@ -9,8 +9,6 @@ describe("ChatFeed", () => {
       {
         id: "assistant-1",
         role: "assistant",
-        variant: "research",
-        title: "Lithium",
         body: [
           "Inline math: \\(x^2 + y^2 = z^2\\)",
           "",
@@ -37,8 +35,6 @@ describe("ChatFeed", () => {
       {
         id: "assistant-2",
         role: "assistant",
-        variant: "research",
-        title: "Lithium",
         body: [
           "여기서 (\\rho_+ \\neq \\rho_-) 는 class-conditional margin입니다.",
           "",
@@ -62,8 +58,6 @@ describe("ChatFeed", () => {
       {
         id: "assistant-3",
         role: "assistant",
-        variant: "research",
-        title: "Lithium",
         body:
           "Updated [init.py]/Users/rubidium/lithium/lithium/cegda/__init__.py#L3. Also changed [torch_impl.py]/Users/rubidium/lithium/lithium/cegda/torch_impl.py#L780에서 metric logging을 조정했다.",
         timestamp: "2026-03-21T10:02:00.000Z",
@@ -84,8 +78,6 @@ describe("ChatFeed", () => {
       {
         id: "assistant-3b",
         role: "assistant",
-        variant: "research",
-        title: "Lithium",
         body:
           "정리 메모와 산출물은 [warm34 quant gap memo](/Users/rubidium/parameter-golf/official/logs/mlx_local_research_update_2026-03-24_warm34_quant_gap.md), [raw eval log](/Users/rubidium/parameter-golf/official/logs/mlx_tiny_0layer_100step_fp16emb_r006_warm34_raw_eval_20260324.txt), [partial warm38 log](/Users/rubidium/parameter-golf/official/logs/mlx_tiny_0layer_100step_fp16emb_r006_warm38_20260324.txt)에 남겼습니다.",
         timestamp: "2026-03-21T10:02:30.000Z",
@@ -115,8 +107,6 @@ describe("ChatFeed", () => {
       {
         id: "user-attachment-1",
         role: "user",
-        variant: "neutral",
-        title: "You",
         body: "README와 첨부 메모를 같이 확인해줘.",
         timestamp: "2026-03-21T10:02:45.000Z",
         order: 3,
@@ -146,8 +136,6 @@ describe("ChatFeed", () => {
       {
         id: "assistant-4",
         role: "assistant",
-        variant: "build",
-        title: "Lithium",
         body: "Updated the recovery loop.",
         timestamp: "2026-03-21T10:03:00.000Z",
         order: 3,
@@ -182,12 +170,9 @@ describe("ChatFeed", () => {
       {
         id: "assistant-5",
         role: "assistant",
-        variant: "neutral",
-        title: "Lithium",
         body: "Automation is still running.",
         timestamp: "2026-03-21T10:04:00.000Z",
-        order: 4,
-        badges: ["Automation", "Running"]
+        order: 4
       }
     ];
 

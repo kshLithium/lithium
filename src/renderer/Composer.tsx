@@ -1,265 +1,38 @@
-import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import type { AttachmentRecord } from "../shared/types";
-import { TERMINAL_FEATURE_ENABLED, WORKBENCH_SURFACES_ENABLED } from "../shared/feature-flags";
+import {
+  buildSlashCommands,
+  deriveSlashQuery,
+  filterSlashCommands,
+  groupSlashCommands,
+  renderSlashIcon,
+  type SlashCommand
+} from "./composer-slash";
 
 type ComposerProps = {
   attachments: AttachmentRecord[];
   allowWhileBusy?: boolean;
-  canCreateThread: boolean;
-  canOpenCode: boolean;
-  canOpenPaper: boolean;
-  canToggleTerminal: boolean;
-  compact?: boolean;
   busy: boolean;
+  canAttachFiles: boolean;
+  canCreateThread: boolean;
+  canOpenWorkspace: boolean;
   placeholder?: string;
   value: string;
   onCreateThread: () => void;
   onDropFiles: (filePaths: string[]) => void;
-  onOpenChatSurface: () => void;
-  onOpenCodeSurface: () => void;
-  onOpenPaperSurface: () => void;
-  onOpenSettings: () => void;
+  onOpenWorkspace: () => void;
+  onPickFiles: () => void;
   onRemoveAttachment: (attachmentId: string) => void;
   onSend: () => void;
-  onToggleTerminal: () => void;
   onValueChange: (value: string) => void;
 };
 
-type SlashCommandAction =
-  | "open-chat"
-  | "open-code"
-  | "open-paper"
-  | "toggle-terminal"
-  | "open-settings"
-  | "new-thread";
-
-type SlashCommandIcon =
-  | "bolt"
-  | "search"
-  | "layers"
-  | "code"
-  | "file"
-  | "chat"
-  | "terminal"
-  | "settings"
-  | "model"
-  | "brain"
-  | "plus";
-
-type SlashCommand = {
-  id: string;
-  section: "Routing" | "Workspace" | "Settings";
-  label: string;
-  description: string;
-  badge?: string;
-  disabled?: boolean;
-  keywords: string[];
-  icon: SlashCommandIcon;
-} & (
-  | {
-      kind: "prompt";
-      value: string;
-    }
-  | {
-      kind: "action";
-      action: SlashCommandAction;
-    }
-);
-
-function deriveSlashQuery(value: string) {
-  const normalized = value.trimStart();
-  const match = normalized.match(/^\/([^\s\r\n]*)$/);
-  return match ? match[1].toLowerCase() : null;
-}
-
-function formatOptionBadge(value: string) {
-  return value
-    .replace(/^gpt/i, "GPT")
-    .replace(/-/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function matchesSlashCommand(command: SlashCommand, query: string) {
-  if (!query) {
-    return true;
-  }
-
-  const haystack = [
-    command.id,
-    command.label,
-    command.description,
-    command.badge ?? "",
-    ...command.keywords
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  return haystack.includes(query);
-}
-
-function renderSlashIcon(icon: SlashCommandIcon) {
-  switch (icon) {
-    case "bolt":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M11.1 2.3 4.9 10h3.6L7.7 17.7 15.1 9.9h-3.7l-.3-7.6Z"
-            fill="currentColor"
-            stroke="currentColor"
-            strokeLinejoin="round"
-            strokeWidth="0.8"
-          />
-        </svg>
-      );
-    case "search":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M8.4 3.7a4.7 4.7 0 1 0 0 9.4 4.7 4.7 0 0 0 0-9.4Zm6.2 10.9-2.5-2.5"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.8"
-          />
-        </svg>
-      );
-    case "layers":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="m10 3.5 5.8 3.3L10 10.1 4.2 6.8 10 3.5Zm-5.8 6.6L10 13.4l5.8-3.3M4.2 13.3 10 16.5l5.8-3.2"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "code":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="m7.1 5.2-4.2 4.7 4.2 4.9m5.8-9.6 4.2 4.7-4.2 4.9M11.4 3.6l-2.8 12.8"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "file":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M6.1 2.9h5.1l3 3v9.2a1.8 1.8 0 0 1-1.8 1.8H6.1a1.8 1.8 0 0 1-1.8-1.8V4.7a1.8 1.8 0 0 1 1.8-1.8Z"
-            stroke="currentColor"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-          <path
-            d="M11.2 2.9v3h3"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "chat":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M4.9 5.1h10.2a2 2 0 0 1 2 2v5.3a2 2 0 0 1-2 2H9l-3.4 2.3.6-2.3H4.9a2 2 0 0 1-2-2V7.1a2 2 0 0 1 2-2Z"
-            stroke="currentColor"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "terminal":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M3.2 4.5h13.6a1.3 1.3 0 0 1 1.3 1.3v8.4a1.3 1.3 0 0 1-1.3 1.3H3.2A1.3 1.3 0 0 1 1.9 14.2V5.8a1.3 1.3 0 0 1 1.3-1.3Z"
-            stroke="currentColor"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-          <path
-            d="m5.5 8 2 2-2 2M10 12h4"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "settings":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M8.4 3.3h3.2l.5 1.7c.2.5.6.9 1.1 1l1.7.5v3.2l-1.7.5c-.5.1-.9.5-1.1 1l-.5 1.7H8.4l-.5-1.7c-.2-.5-.6-.9-1.1-1l-1.7-.5V6.5l1.7-.5c.5-.1.9-.5 1.1-1l.5-1.7Z"
-            stroke="currentColor"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-          <circle cx="10" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.7" />
-        </svg>
-      );
-    case "model":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="m10 2.6 6.1 3.5v7L10 16.6l-6.1-3.5v-7L10 2.6Z"
-            stroke="currentColor"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-          <path
-            d="M3.9 6.1 10 9.6l6.1-3.5M10 9.6v7"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "brain":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M7.4 4.1a2.8 2.8 0 0 0-4 4 2.9 2.9 0 0 0 .5 5.6h3.2m5.5-9.6a2.8 2.8 0 0 1 4 4 2.9 2.9 0 0 1-.5 5.6h-3.2M10 3.5v13M7 7.4c1 0 1.8.8 1.8 1.8S8 11 7 11m6-3.6c-1 0-1.8.8-1.8 1.8S12 11 13 11"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="1.7"
-          />
-        </svg>
-      );
-    case "plus":
-      return (
-        <svg aria-hidden="true" fill="none" viewBox="0 0 20 20">
-          <path
-            d="M10 4.1v11.8M4.1 10h11.8"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeWidth="1.8"
-          />
-        </svg>
-      );
-    default:
-      return null;
-  }
-}
-
 export function Composer(props: ComposerProps) {
-  const { compact = false } = props;
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [highlightedCommandId, setHighlightedCommandId] = useState<string | null>(null);
   const [dismissedSlashQuery, setDismissedSlashQuery] = useState<string | null>(null);
-
   const rawSlashQuery = deriveSlashQuery(props.value);
 
   useEffect(() => {
@@ -270,176 +43,33 @@ export function Composer(props: ComposerProps) {
     setDismissedSlashQuery(null);
   }, [dismissedSlashQuery, rawSlashQuery]);
 
-  useLayoutEffect(() => {
-    const element = textareaRef.current;
-    if (!element) {
-      return;
-    }
-
-    const computedStyles = window.getComputedStyle(element);
-    const minHeight = Number.parseFloat(computedStyles.minHeight) || (compact ? 56 : 60);
-    const maxHeight =
-      Number.parseFloat(computedStyles.maxHeight) || Number.POSITIVE_INFINITY;
-
-    element.style.height = "0px";
-    const nextHeight = Math.min(Math.max(element.scrollHeight, minHeight), maxHeight);
-    element.style.height = `${nextHeight}px`;
-    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, [compact, props.value]);
-
   function extractDroppedPaths(event: DragEvent<HTMLDivElement>) {
     return Array.from(event.dataTransfer.files)
       .map((file) => (file as File & { path?: string }).path?.trim() ?? "")
       .filter(Boolean);
   }
 
+  function handleSubmit() {
+    if (interactionLocked || !props.value.trim() || rawSlashQuery !== null) {
+      return;
+    }
+
+    props.onSend();
+  }
+
   const slashQuery =
     inputFocused && rawSlashQuery !== null && rawSlashQuery !== dismissedSlashQuery ? rawSlashQuery : null;
   const showSlashHeadings = slashQuery !== null && slashQuery.length === 0;
   const interactionLocked = props.busy && !props.allowWhileBusy;
-  const sendDisabled = interactionLocked || !props.value.trim() || rawSlashQuery !== null;
 
-  const slashCommands: SlashCommand[] = [
-    {
-      id: "build",
-      section: "Routing",
-      label: "Build",
-      description: "Send directly to the builder.",
-      badge: "Builder",
-      icon: "bolt",
-      kind: "prompt",
-      value: "/build ",
-      keywords: ["builder", "code", "edit", "files", "workspace"]
-    },
-    {
-      id: "research",
-      section: "Routing",
-      label: "Research",
-      description: "Ask the strategist first.",
-      badge: "Strategist",
-      icon: "search",
-      kind: "prompt",
-      value: "/research ",
-      keywords: ["strategist", "analysis", "research", "planning"]
-    },
-    {
-      id: "mixed",
-      section: "Routing",
-      label: "Mixed",
-      description: "Plan first, then execute.",
-      badge: "Mixed",
-      icon: "layers",
-      kind: "prompt",
-      value: "/mixed ",
-      keywords: ["mixed", "strategist", "builder", "handoff"]
-    },
-    {
-      id: "plan",
-      section: "Routing",
-      label: "Plan",
-      description: "Ask the strategist for a planning-only pass.",
-      badge: "Strategist",
-      icon: "brain",
-      kind: "prompt",
-      value: "/plan ",
-      keywords: ["plan", "planning", "strategy", "next step"]
-    },
-    ...(WORKBENCH_SURFACES_ENABLED
-      ? ([
-          {
-            id: "code-panel",
-            section: "Workspace",
-            label: "Code",
-            description: props.canOpenCode
-              ? "Open the code workbench."
-              : "Open a workspace first.",
-            disabled: !props.canOpenCode,
-            icon: "code",
-            kind: "action",
-            action: "open-code",
-            keywords: ["code", "editor", "canvas", "files", "workbench"]
-          },
-          {
-            id: "paper-panel",
-            section: "Workspace",
-            label: "Paper",
-            description: props.canOpenPaper
-              ? "Open the manuscript workbench."
-              : "No manuscript is ready yet.",
-            disabled: !props.canOpenPaper,
-            icon: "file",
-            kind: "action",
-            action: "open-paper",
-            keywords: ["paper", "latex", "tex", "manuscript", "preview"]
-          }
-        ] satisfies SlashCommand[])
-      : []),
-    {
-      id: "chat-view",
-      section: "Workspace",
-      label: "Chat",
-      description: "Close side surfaces.",
-      icon: "chat",
-      kind: "action",
-      action: "open-chat",
-      keywords: ["chat", "surface", "close panels", "home"]
-    },
-    {
-      id: "new-thread",
-      section: "Workspace",
-      label: "New chat",
-      description: props.canCreateThread
-        ? "Start a fresh chat."
-        : "Open a workspace first.",
-      disabled: !props.canCreateThread,
-      icon: "plus",
-      kind: "action",
-      action: "new-thread",
-      keywords: ["thread", "new chat", "conversation"]
-    },
-    ...(TERMINAL_FEATURE_ENABLED && props.canToggleTerminal
-      ? ([
-          {
-            id: "terminal",
-            section: "Workspace",
-            label: "Terminal",
-            description: "Toggle the shell.",
-            icon: "terminal",
-            kind: "action",
-            action: "toggle-terminal",
-            keywords: ["terminal", "logs", "shell", "panel"]
-          }
-        ] satisfies SlashCommand[])
-      : []),
-    {
-      id: "settings",
-      section: "Settings",
-      label: "Settings",
-      description: "Theme, models, and tools.",
-      icon: "settings",
-      kind: "action",
-      action: "open-settings",
-      keywords: ["settings", "theme", "models", "preferences"]
-    }
-  ];
-
-  const filteredSlashCommands =
-    slashQuery === null ? [] : slashCommands.filter((command) => matchesSlashCommand(command, slashQuery));
-  const slashCommandSections: Array<{ label: SlashCommand["section"]; commands: SlashCommand[] }> = [];
-
-  for (const command of filteredSlashCommands) {
-    const lastSection = slashCommandSections[slashCommandSections.length - 1];
-
-    if (!lastSection || lastSection.label !== command.section) {
-      slashCommandSections.push({
-        label: command.section,
-        commands: [command]
-      });
-      continue;
-    }
-
-    lastSection.commands.push(command);
-  }
+  const slashCommands = buildSlashCommands({
+    canAttachFiles: props.canAttachFiles,
+    canCreateThread: props.canCreateThread,
+    canOpenWorkspace: props.canOpenWorkspace,
+    interactionLocked
+  });
+  const filteredSlashCommands = filterSlashCommands(slashCommands, slashQuery);
+  const slashCommandSections = groupSlashCommands(filteredSlashCommands);
 
   const navigableSlashCommands = filteredSlashCommands.filter((command) => !command.disabled);
   const highlightedPool = navigableSlashCommands.length ? navigableSlashCommands : filteredSlashCommands;
@@ -486,7 +116,7 @@ export function Composer(props: ComposerProps) {
       setDismissedSlashQuery(null);
 
       window.requestAnimationFrame(() => {
-        const element = textareaRef.current;
+        const element = inputRef.current;
 
         if (!element) {
           return;
@@ -502,20 +132,11 @@ export function Composer(props: ComposerProps) {
     setDismissedSlashQuery(null);
 
     switch (command.action) {
-      case "open-chat":
-        props.onOpenChatSurface();
+      case "open-workspace":
+        props.onOpenWorkspace();
         return;
-      case "open-code":
-        props.onOpenCodeSurface();
-        return;
-      case "open-paper":
-        props.onOpenPaperSurface();
-        return;
-      case "toggle-terminal":
-        props.onToggleTerminal();
-        return;
-      case "open-settings":
-        props.onOpenSettings();
+      case "pick-files":
+        props.onPickFiles();
         return;
       case "new-thread":
         props.onCreateThread();
@@ -526,7 +147,7 @@ export function Composer(props: ComposerProps) {
   }
 
   return (
-    <div className={`composer-shell${compact ? " compact" : ""}`}>
+    <div className="composer-shell">
       {slashQuery !== null ? (
         <div
           className={showSlashHeadings ? "composer-slash-menu" : "composer-slash-menu filtered"}
@@ -604,24 +225,25 @@ export function Composer(props: ComposerProps) {
         }}
         onDrop={(event) => {
           event.preventDefault();
-          const filePaths = extractDroppedPaths(event);
+          const paths = extractDroppedPaths(event);
           setDragActive(false);
 
-          if (!filePaths.length || interactionLocked) {
+          if (!paths.length || interactionLocked) {
             return;
           }
 
-          props.onDropFiles(filePaths);
+          props.onDropFiles(paths);
         }}
       >
-        <textarea
+        <input
           aria-activedescendant={activeSlashCommandId ? `composer-slash-command-${activeSlashCommandId}` : undefined}
           aria-controls={slashQuery !== null ? "composer-slash-menu" : undefined}
           aria-expanded={slashQuery !== null}
+          aria-label="Chat prompt"
           className="composer-input"
           disabled={interactionLocked}
-          onChange={(event) => props.onValueChange(event.target.value)}
           onBlur={() => setInputFocused(false)}
+          onChange={(event) => props.onValueChange(event.target.value)}
           onFocus={() => setInputFocused(true)}
           onKeyDown={(event) => {
             const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean };
@@ -641,7 +263,9 @@ export function Composer(props: ComposerProps) {
 
               if (event.key === "Enter" || event.key === "Tab") {
                 const nextCommand =
-                  highlightedPool.find((command) => command.id === activeSlashCommandId) ?? highlightedPool[0] ?? null;
+                  highlightedPool.find((command) => command.id === activeSlashCommandId) ??
+                  highlightedPool[0] ??
+                  null;
 
                 if (!nextCommand) {
                   return;
@@ -664,27 +288,24 @@ export function Composer(props: ComposerProps) {
             }
 
             event.preventDefault();
-
-            if (sendDisabled) {
-              return;
-            }
-
-            props.onSend();
+            handleSubmit();
           }}
-          ref={textareaRef}
-          rows={1}
           placeholder={props.placeholder ?? "Ask, steer, or inspect."}
+          ref={inputRef}
+          type="text"
           value={props.value}
         />
 
-        {props.attachments.length ? (
-          <div className="composer-attachments">
-            {props.attachments.map((attachment) => (
+          {props.attachments.length ? (
+            <div className="composer-attachments">
+              {props.attachments.map((attachment) => (
               <div key={attachment.id} className="composer-attachment-chip">
                 <span className="composer-attachment-kind">{attachment.kind}</span>
-                <span className="composer-attachment-name">{attachment.name}</span>
+                <span className="composer-attachment-name" title={attachment.relativePath}>
+                  {attachment.relativePath}
+                </span>
                 <button
-                  aria-label={`Remove ${attachment.name}`}
+                  aria-label={`Remove ${attachment.relativePath}`}
                   className="composer-attachment-remove"
                   disabled={interactionLocked}
                   onClick={() => props.onRemoveAttachment(attachment.id)}

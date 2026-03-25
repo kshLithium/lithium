@@ -4,21 +4,12 @@ import {
   resolveBundledAssetPath,
   isSafeExternalUrl,
   isTrustedAppUrl,
-  resolveInitialSurface,
-  resolveSurfaceUrl,
-  resolveWindowBackgroundColor
+  resolveRendererUrl
 } from "./window-policy";
 
 describe("window policy", () => {
-  it("accepts only supported initial surfaces", () => {
-    expect(resolveInitialSurface("chat")).toBe("chat");
-    expect(resolveInitialSurface("paper")).toBe("paper");
-    expect(resolveInitialSurface("terminal")).toBeNull();
-  });
-
-  it("embeds the initial surface in dev URLs", () => {
-    expect(resolveSurfaceUrl("http://127.0.0.1:5173", "paper")).toBe("http://127.0.0.1:5173/?surface=paper");
-    expect(resolveSurfaceUrl("http://127.0.0.1:5173", "chat")).toBe("http://127.0.0.1:5173");
+  it("passes through the renderer development URL", () => {
+    expect(resolveRendererUrl("http://127.0.0.1:5173")).toBe("http://127.0.0.1:5173");
   });
 
   it("limits external links to https and mailto", () => {
@@ -34,15 +25,8 @@ describe("window policy", () => {
     expect(isTrustedAppUrl("app://lithium/index.html")).toBe(true);
   });
 
-  it("maps theme preference to window background colors", () => {
-    expect(resolveWindowBackgroundColor("light", false)).toBe("#f3f2ee");
-    expect(resolveWindowBackgroundColor("dark", false)).toBe("#10151b");
-    expect(resolveWindowBackgroundColor("system", true)).toBe("#10151b");
-  });
-
   it("resolves the packaged renderer entry URL", () => {
-    expect(resolveAppEntryUrl("chat")).toBe("app://lithium/index.html");
-    expect(resolveAppEntryUrl("paper")).toBe("app://lithium/index.html?surface=paper");
+    expect(resolveAppEntryUrl()).toBe("app://lithium/index.html");
   });
 
   it("locks packaged asset resolution to the trusted app origin", () => {

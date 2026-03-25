@@ -190,8 +190,7 @@ function summarizeAssistantPreview(raw, promptEchoMatcher) {
     if (!cleaned || promptEchoMatcher?.isEcho(cleaned)) {
         return '';
     }
-    const withoutFooter = cleaned.replace(/\\n*\\s*NEXT_TASK:\\s*[\\s\\S]*$/i, '').trim();
-    const candidate = withoutFooter || cleaned;
+    const candidate = cleaned.trim();
     if (!candidate || /^answer:\\s*$/i.test(candidate)) {
         return '';
     }

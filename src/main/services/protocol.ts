@@ -15,20 +15,21 @@ export function parseOracleOutput(rawOutput: string): LithiumHandoff {
     return normalizeStrategistHandoff(parsed, rawOutput);
   }
 
+  const summary = extractFallbackStrategistSummary(rawOutput);
+  const userMessage = extractVisibleStrategistMessage(rawOutput) || undefined;
+
   return {
     schemaVersion: "lithium_handoff_v1",
     role: "strategist",
-    summary: extractTaggedLine(rawOutput, "SUMMARY") || extractFallbackStrategistSummary(rawOutput),
-    machineSummary: extractTaggedLine(rawOutput, "MACHINE_SUMMARY") || extractTaggedLine(rawOutput, "SUMMARY") || extractFallbackStrategistSummary(rawOutput),
-    userMessage: extractTaggedLine(rawOutput, "USER_MESSAGE") || extractVisibleStrategistMessage(rawOutput) || undefined,
-    rationale:
-      extractTaggedLine(rawOutput, "RATIONALE") || "Oracle did not return a structured rationale.",
-    files: parseTaggedList(rawOutput, "FILES"),
-    risks: parseTaggedList(rawOutput, "RISKS"),
-    paperActions: parseTaggedList(rawOutput, "PAPER_ACTIONS"),
-    runActions: parseTaggedList(rawOutput, "RUN_ACTIONS"),
-    successCriteria: parseTaggedList(rawOutput, "SUCCESS_CRITERIA"),
-    openQuestions: parseTaggedList(rawOutput, "OPEN_QUESTIONS")
+    summary,
+    machineSummary: summary,
+    userMessage,
+    rationale: "Oracle did not return a structured rationale.",
+    files: [],
+    risks: [],
+    runActions: [],
+    successCriteria: [],
+    openQuestions: []
   };
 }
 
@@ -39,24 +40,21 @@ export function parseBuilderOutput(finalMessage: string): LithiumHandoff {
     return normalizeBuilderHandoff(parsed, finalMessage);
   }
 
+  const visibleMessage = extractVisibleBuilderMessage(finalMessage) || undefined;
+  const summary = stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180);
+
   return {
     schemaVersion: "lithium_handoff_v1",
     role: "builder",
-    summary:
-      extractTaggedLine(finalMessage, "SUMMARY") ||
-      stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180),
-    machineSummary:
-      extractTaggedLine(finalMessage, "MACHINE_SUMMARY") ||
-      extractTaggedLine(finalMessage, "SUMMARY") ||
-      stripMarkedBlock(finalMessage, BUILDER_MARKER).replace(/\s+/g, " ").trim().slice(0, 180),
-    userMessage: extractTaggedLine(finalMessage, "USER_MESSAGE") || extractVisibleBuilderMessage(finalMessage) || undefined,
-    result: normalizeResultTag(extractTaggedLine(finalMessage, "RESULT")),
-    files: parseTaggedList(finalMessage, "FILES"),
-    risks: parseTaggedList(finalMessage, "RISKS"),
-    paperActions: parseTaggedList(finalMessage, "PAPER_ACTIONS"),
-    runActions: parseTaggedList(finalMessage, "RUN_ACTIONS"),
-    successCriteria: parseTaggedList(finalMessage, "SUCCESS_CRITERIA"),
-    openQuestions: parseTaggedList(finalMessage, "OPEN_QUESTIONS")
+    summary,
+    machineSummary: summary,
+    userMessage: visibleMessage,
+    result: undefined,
+    files: [],
+    risks: [],
+    runActions: [],
+    successCriteria: [],
+    openQuestions: []
   };
 }
 
@@ -89,9 +87,7 @@ export function describeIncompleteStrategistOutput(rawOutput: string) {
   }
 
   if (
-    trimmed.includes(STRATEGIST_MARKER) ||
-    /^SUMMARY:\s*/im.test(trimmed) ||
-    /^NEXT_TASK:\s*/im.test(trimmed)
+    trimmed.includes(STRATEGIST_MARKER)
   ) {
     return null;
   }
@@ -138,7 +134,6 @@ function normalizeStrategistHandoff(value: unknown, rawOutput: string): LithiumH
       readString(candidate.rationale) || "Oracle did not return a structured rationale.",
     files: readStringList(candidate.files),
     risks: readStringList(candidate.risks),
-    paperActions: readStringList(candidate.paper_actions, candidate.paperActions),
     runActions: readStringList(candidate.run_actions, candidate.runActions),
     successCriteria: readStringList(candidate.success_criteria, candidate.successCriteria),
     openQuestions: readStringList(candidate.open_questions, candidate.openQuestions),
@@ -166,7 +161,6 @@ function normalizeBuilderHandoff(value: unknown, finalMessage: string): LithiumH
     result: normalizeResultTag(readString(candidate.result)),
     files: readStringList(candidate.files),
     risks: readStringList(candidate.risks),
-    paperActions: readStringList(candidate.paper_actions, candidate.paperActions),
     runActions: readStringList(candidate.run_actions, candidate.runActions),
     successCriteria: readStringList(candidate.success_criteria, candidate.successCriteria),
     openQuestions: readStringList(candidate.open_questions, candidate.openQuestions),
@@ -293,57 +287,6 @@ function extractJsonObjectBlock(value: string) {
   return "";
 }
 
-function extractTaggedLine(rawOutput: string, tag: string) {
-  const match = rawOutput.match(new RegExp(`^${tag}:\\s*(.+)$`, "imu"));
-  return match?.[1]?.trim() ?? "";
-}
-
-function parseTaggedList(rawOutput: string, tag: string) {
-  const lines = rawOutput.split(/\r?\n/);
-  let lineIndex = -1;
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (new RegExp(`^${tag}:\\s*`, "i").test(lines[index])) {
-      lineIndex = index;
-      break;
-    }
-  }
-
-  if (lineIndex < 0) {
-    return [];
-  }
-
-  const valueLines = [lines[lineIndex].replace(new RegExp(`^${tag}:\\s*`, "i"), "").trim()];
-
-  for (let index = lineIndex + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-
-    if (!trimmed) {
-      valueLines.push("");
-      continue;
-    }
-
-    if (/^[A-Z][A-Z0-9 _-]{2,}:\s*/.test(trimmed) || trimmed === STRATEGIST_MARKER || trimmed === BUILDER_MARKER) {
-      break;
-    }
-
-    valueLines.push(trimmed);
-  }
-
-  const rawValue = valueLines.join("\n").trim();
-
-  if (!rawValue || /^(none|n\/a|na)$/i.test(rawValue)) {
-    return [];
-  }
-
-  return rawValue
-    .split(/[\n,;|]/)
-    .map((entry) => entry.replace(/^[-*]\s*/, "").trim())
-    .filter(Boolean)
-    .filter((entry) => !/^(none|n\/a|na)$/i.test(entry));
-}
-
 function looksLikeStructuredStrategistOnly(value: string) {
   const trimmed = value.trim();
 
@@ -361,7 +304,7 @@ function looksLikeStructuredStrategistOnly(value: string) {
     .filter(Boolean);
 
   return meaningfulLines.every((line) =>
-    /^(summary|machine_summary|user_message|next[_ ]task|rationale|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+    /^(summary|machine_summary|user_message|rationale|files|risks|run_actions|success_criteria|open_questions)\s*:/i.test(
       line
     )
   );
@@ -384,7 +327,7 @@ function looksLikeStructuredBuilderOnly(value: string) {
     .filter(Boolean);
 
   return meaningfulLines.every((line) =>
-    /^(summary|machine_summary|user_message|result|files|risks|paper_actions|run_actions|success_criteria|open_questions)\s*:/i.test(
+    /^(summary|machine_summary|user_message|result|files|risks|run_actions|success_criteria|open_questions)\s*:/i.test(
       line
     )
   );

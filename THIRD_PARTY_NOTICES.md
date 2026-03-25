@@ -6,16 +6,19 @@ This project itself is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Core Runtime Dependencies
 
+- `@steipete/oracle` — MIT
 - React — MIT
 - React DOM — MIT
 - Electron — MIT
-- CodeMirror — MIT
-- xterm.js — MIT
 - node-pty — MIT
-- pdf.js (`pdfjs-dist`) — Apache-2.0
+- Playwright Core — Apache-2.0
+- React Markdown — MIT
+- `remark-gfm` — MIT
+- `remark-math` — MIT
+- `rehype-katex` — MIT
+- KaTeX — MIT
 
 ## Notes
 
-- `pdfjs-dist` is distributed under Apache-2.0 and may require preserving upstream notices in redistributed builds.
 - Additional transitive dependencies are included through the normal npm dependency graph.
 - Before distributing signed builds, review the final packaged dependency list and ship any required notices alongside the application bundle.

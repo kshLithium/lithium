@@ -1,6 +1,5 @@
 node_modules
 dist
-dist-mobile
 dist-electron
 release
 .lithium
@@ -12,12 +11,6 @@ release
 .playwright-cli
 test-results
 *.log
-*.aux
-*.bbl
-*.blg
-*.out
-*.xdv
-*.synctex.gz
 playgrounds/
 scratch/
 output/

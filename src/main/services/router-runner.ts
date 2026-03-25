@@ -103,9 +103,9 @@ export class RouterRunner {
       .join("\n");
 
     return [
-      "You are the Lithium chat router.",
+      "You are the chat router for this research workspace.",
       "Only choose a lane and rewrite the request. Do not answer the user.",
-      "Choose `builder` for concrete workspace work: code edits, debugging, experiments, commands, file creation, paper edits, or local artifact updates.",
+      "Choose `builder` for concrete workspace work: code edits, debugging, experiments, commands, file creation, or local artifact updates.",
       "Choose `strategist` for research thinking: planning, comparison, literature analysis, idea evaluation, or deciding what to do next.",
       "Choose `mixed` only when the user explicitly wants both a strategic judgment and a concrete workspace change that depends on that judgment.",
       "If analysis is only part of doing the edit, choose `builder`.",

@@ -48,18 +48,6 @@ export default defineConfig({
             return;
           }
 
-          if (id.includes("@codemirror/lang-") || id.includes("@codemirror/legacy-modes")) {
-            return "vendor-editor-langs";
-          }
-
-          if (id.includes("codemirror") || id.includes("@codemirror")) {
-            return "vendor-editor";
-          }
-
-          if (id.includes("pdfjs-dist")) {
-            return "vendor-pdf";
-          }
-
           if (
             id.includes("react-markdown") ||
             id.includes("remark-gfm") ||
@@ -70,19 +58,12 @@ export default defineConfig({
             return "vendor-markdown";
           }
 
-          if (id.includes("@xterm") || id.includes("xterm")) {
-            return "vendor-terminal";
-          }
-
           if (id.includes("react")) {
             return "vendor-react";
           }
         }
       }
     }
-  },
-  optimizeDeps: {
-    exclude: ["pdfjs-dist", "pdfjs-dist/build/pdf.worker.min.mjs"]
   },
   server: {
     host: "127.0.0.1",

@@ -9,26 +9,25 @@ import {
   inferFinalRunStatus,
   inferRunStatus,
   normalizeGitChangedPath,
-  parseChangedFilesFromFinalMessage,
-  readWorkspaceFileDiff
+  parseChangedFilesFromFinalMessage
 } from "./run-artifacts";
 
 describe("run-artifacts", () => {
-  it("extracts changed files from a multi-line footer", () => {
+  it("extracts changed files from the JSON status footer", () => {
     const finalMessage = [
       "Work complete.",
       "",
       "LITHIUM_STATUS",
-      "SUMMARY: Done",
-      "FILES:",
-      "- paper/main.tex",
-      "- paper/results.tex -> paper/results.tex",
-      "RESULT: success"
+      JSON.stringify({
+        machine_summary: "Done",
+        result: "success",
+        files: ["notes/summary.md", "results/latest.json -> results/latest.json"]
+      })
     ].join("\n");
 
     expect(parseChangedFilesFromFinalMessage(finalMessage)).toEqual([
-      "paper/main.tex",
-      "paper/results.tex"
+      "notes/summary.md",
+      "results/latest.json"
     ]);
   });
 
@@ -46,7 +45,6 @@ describe("run-artifacts", () => {
         result: "success",
         files: ["src/main/services/project-store.ts", "src/main/services/app-service.ts"],
         risks: [],
-        paper_actions: ["sync results section"],
         run_actions: ["rerun smoke test"],
         success_criteria: ["npm test"],
         open_questions: []
@@ -162,28 +160,7 @@ describe("run-artifacts", () => {
     expect(normalizeGitChangedPath('"caf\\303\\251.txt"', "/repo", "/repo")).toBe("café.txt");
   });
 
-  it("reads a tracked file diff relative to the workspace", async () => {
-    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-diff-"));
-    const filePath = path.join(workspacePath, "notes.md");
-
-    execFileSync("git", ["init"], { cwd: workspacePath });
-    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: workspacePath });
-    execFileSync("git", ["config", "user.name", "Lithium Test"], { cwd: workspacePath });
-    await writeFile(filePath, "hello\n", "utf8");
-    execFileSync("git", ["add", "notes.md"], { cwd: workspacePath });
-    execFileSync("git", ["commit", "-m", "init"], { cwd: workspacePath });
-
-    await writeFile(filePath, "hello\nworld\n", "utf8");
-
-    const diff = await readWorkspaceFileDiff(workspacePath, filePath);
-
-    expect(diff?.relativePath).toBe("notes.md");
-    expect(diff?.status).toBe("modified");
-    expect(diff?.diffText).toContain("diff --git");
-    expect(diff?.diffText).toContain("+world");
-  });
-
-  it("reads git status and diffs from a single nested repository", async () => {
+  it("reads git status from a single nested repository", async () => {
     const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-nested-diff-"));
     const repoPath = path.join(workspacePath, "official");
     const filePath = path.join(repoPath, "notes.md");
@@ -200,12 +177,7 @@ describe("run-artifacts", () => {
     await writeFile(filePath, "hello\nnested\n", "utf8");
 
     const changedFiles = await collectGitChangedFiles(workspacePath);
-    const diff = await readWorkspaceFileDiff(workspacePath, filePath);
-
     expect(changedFiles).toContain("official/notes.md");
-    expect(diff?.relativePath).toBe("official/notes.md");
-    expect(diff?.status).toBe("modified");
-    expect(diff?.diffText).toContain("+nested");
   });
 
   it("collects untracked files with spaces from porcelain output", async () => {
