@@ -162,6 +162,9 @@ type AutomationDelegatedWorkerResult =
   | AutomationDelegatedBuilderResult
   | AutomationDelegatedStrategistResult;
 
+const ASYNC_STRATEGIST_POLL_INTERVAL_MS = 5_000;
+const ASYNC_STRATEGIST_STALL_MS = 10 * 60 * 1000;
+
 export class AppService {
   private selectedWorkspacePath: string;
   private readonly terminatingRunIds = new Set<string>();
@@ -3232,7 +3235,7 @@ export class AppService {
             : delegation.executionMode === "sync"
             ? "sync"
             : "async"
-          : "async",
+          : resolveStrategistWorkerMode(delegation.workerMode),
       summary:
         delegation.lane === "builder"
           ? "Waiting for the next builder branch to start."
@@ -3394,6 +3397,167 @@ export class AppService {
     );
   }
 
+  private async hasRunningBackgroundStrategistStep(
+    workspacePath: string,
+    sessionId: string,
+    excludeStepId?: string
+  ) {
+    const runningStrategistSteps = await this.listRunningAutomationSteps(workspacePath, sessionId, "strategist");
+
+    return runningStrategistSteps.some(
+      (step) =>
+        step.id !== excludeStepId &&
+        step.workerMode === "async"
+    );
+  }
+
+  private resolveStrategistDecisionArtifacts(
+    workspacePath: string,
+    strategistStep: AutomationStepRecord,
+    oracleProcess?: ActiveOracleProcess | null
+  ) {
+    if (oracleProcess) {
+      return deriveDecisionArtifactsFromOutputPath(oracleProcess.outputPath);
+    }
+
+    const decisionId = (strategistStep.startedSideEffects ?? [])
+      .find((entry) => entry.startsWith("decision-artifacts:"))
+      ?.slice("decision-artifacts:".length)
+      .trim();
+
+    if (!decisionId) {
+      return null;
+    }
+
+    const decisionsDir = this.store.buildPaths(workspacePath).decisionsDir;
+
+    return {
+      id: decisionId,
+      outputPath: path.join(decisionsDir, `${decisionId}.output.txt`),
+      stdoutPath: path.join(decisionsDir, `${decisionId}.stdout.log`),
+      stderrPath: path.join(decisionsDir, `${decisionId}.stderr.log`)
+    };
+  }
+
+  private async recoverStrategistDecisionIfReady(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    strategistStep: AutomationStepRecord,
+    strategistSlug: string,
+    artifacts: ReturnType<AppService["resolveStrategistDecisionArtifacts"]>,
+    oracleProcess?: ActiveOracleProcess | null
+  ) {
+    if (!artifacts) {
+      return null;
+    }
+
+    const strategistOutput = await readTextFile(artifacts.outputPath).catch(() => "");
+    const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
+
+    if (!strategistOutput.trim() || strategistOutputIssue) {
+      return null;
+    }
+
+    const existingDecision = await this.store.readDecision(workspacePath, artifacts.id).catch(() => null);
+
+    if (existingDecision) {
+      return existingDecision;
+    }
+
+    const snapshot = await this.store.getSnapshot(workspacePath);
+    const activeThread =
+      snapshot.threads.find((thread) => thread.id === session.threadId) ?? snapshot.activeThread;
+
+    if (!activeThread) {
+      throw new Error("No active thread is available.");
+    }
+
+    const strategistModel = oracleProcess?.model ?? snapshot.project?.oracleModel ?? "gpt-5.4";
+    const decision = this.buildDecisionRecord({
+      id: artifacts.id,
+      threadId: session.threadId,
+      prompt: strategistStep.prompt,
+      displayPrompt: `[Autopilot] ${session.displayObjective ?? session.objective}`,
+      inputFiles: oracleProcess?.files ?? [],
+      model: strategistModel,
+      rawOutput: strategistOutput,
+      command:
+        oracleProcess?.command ?? {
+          command: "oracle",
+          args: ["--slug", strategistSlug],
+          cwd: workspacePath
+        },
+      stdoutPath: artifacts.stdoutPath,
+      stderrPath: artifacts.stderrPath,
+      outputPath: artifacts.outputPath,
+      contextPackPath: undefined,
+      startedAt: strategistStep.createdAt,
+      exitCode: 0
+    });
+
+    await this.store.writeDecision(workspacePath, decision);
+    await this.store.appendPromptLog(workspacePath, {
+      kind: "strategist.response",
+      threadId: session.threadId,
+      decisionId: decision.id,
+      model: strategistModel,
+      oracleSessionSlug: strategistSlug,
+      summary: decision.summary,
+      rationale: decision.rationale,
+      rawOutput: decision.rawOutput
+    });
+    await this.syncThreadFromArtifacts(workspacePath, activeThread, {
+      prompt: session.displayObjective ?? session.objective,
+      summary: handoffUserMessage(decision.handoff) || decision.summary
+    });
+    await this.store.appendActivity(workspacePath, `${decision.id} saved as research context`);
+    await this.store.updateSessionSummary(workspacePath);
+    return decision;
+  }
+
+  private async isAsyncStrategistStalled(
+    workspacePath: string,
+    strategistStep: AutomationStepRecord,
+    artifacts: NonNullable<ReturnType<AppService["resolveStrategistDecisionArtifacts"]>>
+  ) {
+    const fileStats = await Promise.all(
+      [artifacts.outputPath, artifacts.stdoutPath, artifacts.stderrPath].map((filePath) =>
+        stat(filePath).catch(() => null)
+      )
+    );
+    const latestActivityMs = Math.max(
+      Date.parse(strategistStep.updatedAt || strategistStep.createdAt) || 0,
+      ...fileStats.map((entry) => entry?.mtimeMs ?? 0)
+    );
+
+    if (!Number.isFinite(latestActivityMs) || latestActivityMs <= 0) {
+      return false;
+    }
+
+    return Date.now() - latestActivityMs >= ASYNC_STRATEGIST_STALL_MS;
+  }
+
+  private clearStrategistChatProgress(
+    workspacePath: string,
+    threadId: string,
+    artifacts: ReturnType<AppService["resolveStrategistDecisionArtifacts"]> | null
+  ) {
+    this.clearChatProgressIfCurrentMatches(
+      workspacePath,
+      threadId,
+      "automation-strategist",
+      artifacts?.stdoutPath,
+      artifacts?.stderrPath
+    );
+    this.clearChatProgressIfCurrentMatches(
+      workspacePath,
+      threadId,
+      "strategist",
+      artifacts?.stdoutPath,
+      artifacts?.stderrPath
+    );
+  }
+
   private async resumeInFlightAutomationBuilderStep(
     workspacePath: string,
     session: AutomationSessionRecord,
@@ -3501,6 +3665,95 @@ export class AppService {
     const strategistSlug =
       strategistStep.resumeCursor?.trim() ||
       buildAutomationStrategistSessionSlug(workspacePath, session, null, strategistStep);
+    const activeOracleProcess = await inspectActiveOracleProcessBySlug(strategistSlug);
+    const strategistArtifacts = this.resolveStrategistDecisionArtifacts(
+      workspacePath,
+      strategistStep,
+      activeOracleProcess
+    );
+    const recoveredDecision = await this.recoverStrategistDecisionIfReady(
+      workspacePath,
+      session,
+      strategistStep,
+      strategistSlug,
+      strategistArtifacts,
+      activeOracleProcess
+    );
+
+    if (recoveredDecision) {
+      await this.oracleRunner.terminateSession?.(strategistSlug).catch(() => undefined);
+      this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
+      this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
+      await this.completeAutomationStep(workspacePath, session, strategistStep, {
+        status: "completed",
+        summary: recoveredDecision.summary || "Recovered the interrupted strategist step.",
+        decisionId: recoveredDecision.id,
+        changedFiles: [],
+        evidence: recoveredDecision.summary ? [recoveredDecision.summary] : []
+      });
+
+      return {
+        handled: true,
+        shouldStopLoop: false
+      };
+    }
+
+    if (strategistStep.workerMode === "async") {
+      if (activeOracleProcess) {
+        this.registerActiveAutomationStrategistSession(controller, strategistStep.id, strategistSlug);
+
+        if (
+          strategistArtifacts &&
+          (await this.isAsyncStrategistStalled(workspacePath, strategistStep, strategistArtifacts))
+        ) {
+          await this.oracleRunner.terminateSession?.(strategistSlug).catch(() => undefined);
+          this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
+          this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
+          await this.completeAutomationStep(workspacePath, session, strategistStep, {
+            status: "failed",
+            summary: "Background strategist research stalled without producing a usable answer.",
+            changedFiles: [],
+            evidence: []
+          });
+          await this.writeRunningAutomationSession(workspacePath, session, {
+            currentStepSummary: "Background strategist research stalled. Continuing with the latest saved state."
+          });
+
+          return {
+            handled: true,
+            shouldStopLoop: false
+          };
+        }
+
+        if (!/background strategist research is still running/i.test(session.currentStepSummary)) {
+          await this.writeRunningAutomationSession(workspacePath, session, {
+            currentStepSummary: "Background strategist research is still running while automation continues."
+          });
+        }
+
+        return {
+          handled: false,
+          shouldStopLoop: false
+        };
+      }
+
+      this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
+      this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
+      await this.completeAutomationStep(workspacePath, session, strategistStep, {
+        status: "failed",
+        summary: "Background strategist research ended without producing a usable answer.",
+        changedFiles: [],
+        evidence: []
+      });
+      await this.writeRunningAutomationSession(workspacePath, session, {
+        currentStepSummary: "Background strategist research ended early. Continuing with the latest saved state."
+      });
+
+      return {
+        handled: true,
+        shouldStopLoop: false
+      };
+    }
 
     if (!/resuming the in-flight strategist step/i.test(session.currentStepSummary)) {
       await this.writeRunningAutomationSession(workspacePath, session, {
@@ -3508,13 +3761,11 @@ export class AppService {
       });
     }
 
-    const activeOracleProcess = await inspectActiveOracleProcessBySlug(strategistSlug);
-
     if (activeOracleProcess) {
       this.registerActiveAutomationStrategistSession(controller, strategistStep.id, strategistSlug);
 
       try {
-        const recoveredDecision = await this.waitForRecoveredStrategistDecision(
+        const waitedDecision = await this.waitForRecoveredStrategistDecision(
           workspacePath,
           session,
           strategistStep,
@@ -3523,13 +3774,14 @@ export class AppService {
           activeOracleProcess
         );
 
-        if (recoveredDecision) {
+        if (waitedDecision) {
+          this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
           await this.completeAutomationStep(workspacePath, session, strategistStep, {
             status: "completed",
-            summary: recoveredDecision.summary || "Recovered the interrupted strategist step.",
-            decisionId: recoveredDecision.id,
+            summary: waitedDecision.summary || "Recovered the interrupted strategist step.",
+            decisionId: waitedDecision.id,
             changedFiles: [],
-            evidence: recoveredDecision.summary ? [recoveredDecision.summary] : []
+            evidence: waitedDecision.summary ? [waitedDecision.summary] : []
           });
 
           return {
@@ -3542,6 +3794,7 @@ export class AppService {
       }
     }
 
+    this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
     await this.completeAutomationStep(workspacePath, session, strategistStep, {
       status: "cancelled",
       summary: "Step started.",
@@ -3669,10 +3922,23 @@ export class AppService {
       (delegation): delegation is Extract<OrchestratorDelegationDirective, { lane: "automation" }> =>
         delegation.lane === "automation"
     );
-    const workerDelegations = delegations.filter(
+    const plannedWorkerDelegations = delegations.filter(
       (delegation): delegation is AutomationWorkerDelegation =>
         delegation.lane === "builder" || delegation.lane === "strategist"
     );
+    const hasRunningBackgroundStrategist = await this.hasRunningBackgroundStrategistStep(
+      workspacePath,
+      session.id
+    );
+    const workerDelegations = hasRunningBackgroundStrategist
+      ? plannedWorkerDelegations.filter(
+          (delegation) =>
+            delegation.lane !== "strategist" ||
+            resolveStrategistWorkerMode(delegation.workerMode) !== "async"
+        )
+      : plannedWorkerDelegations;
+    const skippedDuplicateBackgroundStrategist =
+      hasRunningBackgroundStrategist && workerDelegations.length !== plannedWorkerDelegations.length;
 
     const plannerSummary =
       planningReply ||
@@ -3680,7 +3946,10 @@ export class AppService {
       "The automation planner did not launch a concrete worker step.";
 
     await this.completeAutomationStep(workspacePath, activeSession, planningStep, {
-      status: automationDelegation || workerDelegations.length ? "completed" : "failed",
+      status:
+        automationDelegation || workerDelegations.length || skippedDuplicateBackgroundStrategist
+          ? "completed"
+          : "failed",
       summary: plannerSummary,
       changedFiles: [],
       evidence: planningReply ? [planningReply] : []
@@ -3689,7 +3958,7 @@ export class AppService {
       plannerReply: planningReply || undefined,
       plannerSessionId: activeSession.plannerSessionId,
       summary: plannerSummary,
-      phase: workerDelegations.length ? "workers" : "planning",
+      phase: workerDelegations.length || skippedDuplicateBackgroundStrategist ? "workers" : "planning",
       laneStates: this.buildCycleLaneStatesFromDelegations(workerDelegations)
     });
 
@@ -3741,6 +4010,17 @@ export class AppService {
       return {
         handled: true,
         shouldStopLoop: true
+      };
+    }
+
+    if (!workerDelegations.length && skippedDuplicateBackgroundStrategist) {
+      await this.writeRunningAutomationSession(workspacePath, activeSession, {
+        currentStepSummary: "A background strategist branch is still running. Waiting for fresh research before replanning."
+      });
+      await sleep(ASYNC_STRATEGIST_POLL_INTERVAL_MS);
+      return {
+        handled: true,
+        shouldStopLoop: false
       };
     }
 
@@ -3834,7 +4114,9 @@ export class AppService {
     const followupReply =
       sanitizeConversationBody(followupTurn.finalMessage) ||
       summarizeWorkerSnapshotsForConversation(workerDelegations, refreshedSnapshot);
-    const relatedDecisionId = workerTurn.results.some((result) => result.lane === "strategist")
+    const relatedDecisionId = workerTurn.results.some(
+      (result) => result.lane === "strategist" && !result.pending
+    )
       ? refreshedSnapshot.latestDecision?.id
       : undefined;
     const relatedRunId = workerTurn.results.some((result) => result.lane === "builder")
@@ -3882,6 +4164,21 @@ export class AppService {
       return {
         handled: true,
         shouldStopLoop
+      };
+    }
+
+    const backgroundStrategistResult = workerTurn.results.find(
+      (result): result is AutomationDelegatedStrategistResult => result.lane === "strategist" && Boolean(result.pending)
+    );
+
+    if (backgroundStrategistResult) {
+      await this.writeRunningAutomationSession(workspacePath, activeSession, {
+        currentStepSummary: "Background strategist research is still running while the automation loop continues."
+      });
+      await sleep(ASYNC_STRATEGIST_POLL_INTERVAL_MS);
+      return {
+        handled: true,
+        shouldStopLoop: false
       };
     }
 
@@ -4138,16 +4435,44 @@ export class AppService {
     const progressOperationId = `automation-${delegation.lane}`;
 
     if (delegation.lane === "strategist") {
+      const strategistWorkerMode = resolveStrategistWorkerMode(delegation.workerMode);
       let strategistStep = await this.createAutomationStep(workspacePath, session, {
         cycleId: cycle.id,
         kind: "literature-search",
         lane: "strategist",
-        workerMode: "async",
+        workerMode: strategistWorkerMode,
         title: "Run the next strategist research branch",
         prompt: delegation.prompt
       });
       const strategistDisplayPrompt = `[Autopilot] ${displayPrompt}`;
       const strategistSlug = buildAutomationStrategistSessionSlug(workspacePath, session, cycle, strategistStep);
+
+      if (strategistWorkerMode === "async") {
+        const startedStrategist = await this.startAutomationStrategistLane(
+          workspacePath,
+          session,
+          cycle,
+          strategistStep,
+          delegation,
+          displayPrompt,
+          appSettings,
+          progressOperationId
+        );
+        this.registerActiveAutomationStrategistSession(
+          controller,
+          startedStrategist.step.id,
+          startedStrategist.strategistSlug
+        );
+
+        return {
+          lane: delegation.lane,
+          delegation,
+          step: startedStrategist.step,
+          decision: null,
+          pending: true
+        };
+      }
+
       let strategistSnapshot: ProjectSnapshot;
 
       strategistStep = {
@@ -4776,7 +5101,7 @@ export class AppService {
     strategistSlug: string,
     oracleProcess: ActiveOracleProcess
   ) {
-    const artifacts = deriveDecisionArtifactsFromOutputPath(oracleProcess.outputPath);
+    const artifacts = this.resolveStrategistDecisionArtifacts(workspacePath, strategistStep, oracleProcess);
 
     if (!artifacts) {
       return null;
@@ -4788,60 +5113,17 @@ export class AppService {
         return null;
       }
 
-      const strategistOutput = await readTextFile(artifacts.outputPath).catch(() => "");
-      const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
+      const recoveredDecision = await this.recoverStrategistDecisionIfReady(
+        workspacePath,
+        session,
+        strategistStep,
+        strategistSlug,
+        artifacts,
+        oracleProcess
+      );
 
-      if (strategistOutput.trim() && !strategistOutputIssue) {
-        const existingDecision = await this.store.readDecision(workspacePath, artifacts.id).catch(() => null);
-
-        if (existingDecision) {
-          return existingDecision;
-        }
-
-        const snapshot = await this.store.getSnapshot(workspacePath);
-        const activeThread =
-          snapshot.threads.find((thread) => thread.id === session.threadId) ?? snapshot.activeThread;
-
-        if (!activeThread) {
-          throw new Error("No active thread is available.");
-        }
-
-        const strategistModel = oracleProcess.model ?? snapshot.project?.oracleModel ?? "gpt-5.4";
-        const decision = this.buildDecisionRecord({
-          id: artifacts.id,
-          threadId: session.threadId,
-          prompt: strategistStep.prompt,
-          displayPrompt: `[Autopilot] ${session.displayObjective ?? session.objective}`,
-          inputFiles: oracleProcess.files,
-          model: strategistModel,
-          rawOutput: strategistOutput,
-          command: oracleProcess.command,
-          stdoutPath: artifacts.stdoutPath,
-          stderrPath: artifacts.stderrPath,
-          outputPath: artifacts.outputPath,
-          contextPackPath: undefined,
-          startedAt: strategistStep.createdAt,
-          exitCode: 0
-        });
-
-        await this.store.writeDecision(workspacePath, decision);
-        await this.store.appendPromptLog(workspacePath, {
-          kind: "strategist.response",
-          threadId: session.threadId,
-          decisionId: decision.id,
-          model: strategistModel,
-          oracleSessionSlug: strategistSlug,
-          summary: decision.summary,
-          rationale: decision.rationale,
-          rawOutput: decision.rawOutput
-        });
-        await this.syncThreadFromArtifacts(workspacePath, activeThread, {
-          prompt: session.displayObjective ?? session.objective,
-          summary: handoffUserMessage(decision.handoff) || decision.summary
-        });
-        await this.store.appendActivity(workspacePath, `${decision.id} saved as research context`);
-        await this.store.updateSessionSummary(workspacePath);
-        return decision;
+      if (recoveredDecision) {
+        return recoveredDecision;
       }
 
       if (!(await isProcessAlive(oracleProcess.pid))) {
@@ -4851,62 +5133,14 @@ export class AppService {
       await sleep(900);
     }
 
-    const strategistOutput = await readTextFile(artifacts.outputPath).catch(() => "");
-    const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
-
-    if (!strategistOutput.trim() || strategistOutputIssue) {
-      return null;
-    }
-
-    const existingDecision = await this.store.readDecision(workspacePath, artifacts.id).catch(() => null);
-    if (existingDecision) {
-      return existingDecision;
-    }
-
-    const snapshot = await this.store.getSnapshot(workspacePath);
-    const activeThread =
-      snapshot.threads.find((thread) => thread.id === session.threadId) ?? snapshot.activeThread;
-
-    if (!activeThread) {
-      throw new Error("No active thread is available.");
-    }
-
-    const strategistModel = oracleProcess.model ?? snapshot.project?.oracleModel ?? "gpt-5.4";
-    const decision = this.buildDecisionRecord({
-      id: artifacts.id,
-      threadId: session.threadId,
-      prompt: strategistStep.prompt,
-      displayPrompt: `[Autopilot] ${session.displayObjective ?? session.objective}`,
-      inputFiles: oracleProcess.files,
-      model: strategistModel,
-      rawOutput: strategistOutput,
-      command: oracleProcess.command,
-      stdoutPath: artifacts.stdoutPath,
-      stderrPath: artifacts.stderrPath,
-      outputPath: artifacts.outputPath,
-      contextPackPath: undefined,
-      startedAt: strategistStep.createdAt,
-      exitCode: 0
-    });
-
-    await this.store.writeDecision(workspacePath, decision);
-    await this.store.appendPromptLog(workspacePath, {
-      kind: "strategist.response",
-      threadId: session.threadId,
-      decisionId: decision.id,
-      model: strategistModel,
-      oracleSessionSlug: strategistSlug,
-      summary: decision.summary,
-      rationale: decision.rationale,
-      rawOutput: decision.rawOutput
-    });
-    await this.syncThreadFromArtifacts(workspacePath, activeThread, {
-      prompt: session.displayObjective ?? session.objective,
-      summary: handoffUserMessage(decision.handoff) || decision.summary
-    });
-    await this.store.appendActivity(workspacePath, `${decision.id} saved as research context`);
-    await this.store.updateSessionSummary(workspacePath);
-    return decision;
+    return await this.recoverStrategistDecisionIfReady(
+      workspacePath,
+      session,
+      strategistStep,
+      strategistSlug,
+      artifacts,
+      oracleProcess
+    );
   }
 
   private async runAutomationLoop(workspacePath: string, sessionId: string) {
@@ -7197,6 +7431,10 @@ function describeDelegationSetForActivity(
     .filter((lane, index, values) => values.indexOf(lane) === index)
     .sort()
     .join("+");
+}
+
+function resolveStrategistWorkerMode(workerMode?: AutomationWorkerMode) {
+  return workerMode === "sync" ? "sync" : "async";
 }
 
 function summarizeLiveWorkerStartForConversation(

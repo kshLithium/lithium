@@ -102,6 +102,21 @@ describe("ProjectStore", () => {
     expect(canonicalAfter).toContain("Lane: strategist");
   });
 
+  it("allocates unique automation step ids under concurrent requests", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+
+    await store.initProject(workspace);
+
+    const allocations = await Promise.all(
+      Array.from({ length: 6 }, () => store.allocateAutomationStep(workspace))
+    );
+    const ids = allocations.map((allocation) => allocation.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(["AS001", "AS002", "AS003", "AS004", "AS005", "AS006"]);
+  });
+
   it("builds a thin runtime context without the heavy artifact sections", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
