@@ -37,10 +37,7 @@ const LOCAL_ORACLE_BIN_CANDIDATES = [
   path.resolve(electronResourcesPath, "node_modules", ".bin", "oracle")
 ];
 
-export type OracleEngine = "api" | "browser";
-
 export type OracleLaunchOptions = {
-  engine: OracleEngine;
   browserVisible: boolean;
   browserHeadless: boolean;
   keepBrowser: boolean;
@@ -87,15 +84,9 @@ export class OracleRunner {
       strategistSessionReady: options.strategistSessionReady
     });
     const allowConversationReuse = shouldReuseSavedChatgptConversation(process.env);
-    const shouldPreemptReusableBrowser =
-      initialLaunch.engine === "browser" &&
-      initialLaunch.manualLogin &&
-      initialLaunch.strategistSessionReady;
+    const shouldPreemptReusableBrowser = initialLaunch.manualLogin && initialLaunch.strategistSessionReady;
     const reusableChatgptUrl =
-      initialLaunch.engine === "browser" &&
-      initialLaunch.strategistSessionReady &&
-      allowConversationReuse &&
-      !initialLaunch.chatgptUrl
+      initialLaunch.strategistSessionReady && allowConversationReuse && !initialLaunch.chatgptUrl
         ? await resolveReusableChatgptConversationUrl(sessionId)
         : undefined;
     const launch =
@@ -105,11 +96,10 @@ export class OracleRunner {
             chatgptUrl: reusableChatgptUrl
           }
         : initialLaunch;
-    const browserThinkingTime =
-      launch.engine === "browser" && (await supportsOracleBrowserThinkingTime())
-        ? options.browserThinkingTime
-        : undefined;
-    const chromePath = launch.engine === "browser" ? await detectChromePath() : undefined;
+    const browserThinkingTime = (await supportsOracleBrowserThinkingTime())
+      ? options.browserThinkingTime
+      : undefined;
+    const chromePath = await detectChromePath();
 
     if (shouldPreemptReusableBrowser) {
       await this.resetInteractiveReuseState(chromePath);
@@ -117,15 +107,14 @@ export class OracleRunner {
 
     const oracleCommand = await resolveLocalOracleCommand();
     const inlineCookiesPath =
-      launch.engine === "browser" && (await pathExists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
+      await pathExists(ORACLE_BROWSER_INLINE_COOKIES_PATH)
         ? ORACLE_BROWSER_INLINE_COOKIES_PATH
         : undefined;
-    const commandEnv =
-      launch.engine === "browser" && launch.manualLogin
-        ? {
-            ORACLE_BROWSER_PROFILE_DIR: ORACLE_BROWSER_PROFILE_PATH
-          }
-        : undefined;
+    const commandEnv = launch.manualLogin
+      ? {
+          ORACLE_BROWSER_PROFILE_DIR: ORACLE_BROWSER_PROFILE_PATH
+        }
+      : undefined;
     const command = this.buildCommand({
       workspacePath: options.workspacePath,
       prompt: this.normalizePrompt(options.prompt),
@@ -154,7 +143,7 @@ export class OracleRunner {
       command,
       chromePath,
       sessionId,
-      sessionLogPath: launch.engine === "browser" ? await resolveOracleSessionLogPath(sessionId) : undefined,
+      sessionLogPath: await resolveOracleSessionLogPath(sessionId),
       startedAt: session.startedAt,
       pid: session.pid,
       slug: options.slug,
@@ -172,15 +161,9 @@ export class OracleRunner {
       strategistSessionReady: options.strategistSessionReady
     });
     const allowConversationReuse = shouldReuseSavedChatgptConversation(process.env);
-    const shouldPreemptReusableBrowser =
-      initialLaunch.engine === "browser" &&
-      initialLaunch.manualLogin &&
-      initialLaunch.strategistSessionReady;
+    const shouldPreemptReusableBrowser = initialLaunch.manualLogin && initialLaunch.strategistSessionReady;
     const reusableChatgptUrl =
-      initialLaunch.engine === "browser" &&
-      initialLaunch.strategistSessionReady &&
-      allowConversationReuse &&
-      !initialLaunch.chatgptUrl
+      initialLaunch.strategistSessionReady && allowConversationReuse && !initialLaunch.chatgptUrl
         ? await resolveReusableChatgptConversationUrl(sessionId)
         : undefined;
     const launch =
@@ -190,11 +173,10 @@ export class OracleRunner {
             chatgptUrl: reusableChatgptUrl
           }
         : initialLaunch;
-    const browserThinkingTime =
-      launch.engine === "browser" && (await supportsOracleBrowserThinkingTime())
-        ? options.browserThinkingTime
-        : undefined;
-    const chromePath = launch.engine === "browser" ? await detectChromePath() : undefined;
+    const browserThinkingTime = (await supportsOracleBrowserThinkingTime())
+      ? options.browserThinkingTime
+      : undefined;
+    const chromePath = await detectChromePath();
 
     if (shouldPreemptReusableBrowser) {
       await this.resetInteractiveReuseState(chromePath);
@@ -202,15 +184,14 @@ export class OracleRunner {
 
     const oracleCommand = await resolveLocalOracleCommand();
     const inlineCookiesPath =
-      launch.engine === "browser" && (await pathExists(ORACLE_BROWSER_INLINE_COOKIES_PATH))
+      await pathExists(ORACLE_BROWSER_INLINE_COOKIES_PATH)
         ? ORACLE_BROWSER_INLINE_COOKIES_PATH
         : undefined;
-    const commandEnv =
-      launch.engine === "browser" && launch.manualLogin
-        ? {
-            ORACLE_BROWSER_PROFILE_DIR: ORACLE_BROWSER_PROFILE_PATH
-          }
-        : undefined;
+    const commandEnv = launch.manualLogin
+      ? {
+          ORACLE_BROWSER_PROFILE_DIR: ORACLE_BROWSER_PROFILE_PATH
+        }
+      : undefined;
     const primaryCommand = this.buildCommand({
       workspacePath: options.workspacePath,
       prompt: this.normalizePrompt(options.prompt),
@@ -231,13 +212,11 @@ export class OracleRunner {
 
     if (primaryAttempt.result.exitCode === 0 && primaryAttempt.outputText.trim() && !primaryOutputIssue) {
       await this.cleanupLingeringBrowser(chromePath, launch);
-      const sessionLogPath =
-        launch.engine === "browser" ? await resolveOracleSessionLogPath(sessionId) : undefined;
       return {
         command: primaryCommand,
         chromePath,
         sessionId,
-        sessionLogPath,
+        sessionLogPath: await resolveOracleSessionLogPath(sessionId),
         outputText: primaryAttempt.outputText,
         ...primaryAttempt.result
       };
@@ -262,10 +241,7 @@ export class OracleRunner {
         strategistSessionReady: recoveryMode === "cookies" ? false : launch.strategistSessionReady
       });
       const recoveryLaunch =
-        recoveryMode !== "fresh-chat" &&
-        reusableChatgptUrl &&
-        recoveryInitialLaunch.engine === "browser" &&
-        !recoveryInitialLaunch.chatgptUrl
+        recoveryMode !== "fresh-chat" && reusableChatgptUrl && !recoveryInitialLaunch.chatgptUrl
           ? {
               ...recoveryInitialLaunch,
               chatgptUrl: reusableChatgptUrl
@@ -293,13 +269,11 @@ export class OracleRunner {
         !recoveryOutputIssue
       ) {
         await this.cleanupLingeringBrowser(chromePath, recoveryLaunch);
-        const sessionLogPath =
-          recoveryLaunch.engine === "browser" ? await resolveOracleSessionLogPath(sessionId) : undefined;
         return {
           command: recoveryCommand,
           chromePath,
           sessionId,
-          sessionLogPath,
+          sessionLogPath: await resolveOracleSessionLogPath(sessionId),
           outputText: recoveryAttempt.outputText,
           ...recoveryAttempt.result
         };
@@ -336,58 +310,54 @@ export class OracleRunner {
     files: string[];
   }) {
     const args = input.oracleCommand
-      ? ["--engine", input.launch.engine, "--model", input.model]
-      : ["-y", "@steipete/oracle", "--engine", input.launch.engine, "--model", input.model];
+      ? ["--engine", "browser", "--model", input.model]
+      : ["-y", "@steipete/oracle", "--engine", "browser", "--model", input.model];
 
-    if (input.launch.engine === "api") {
-      args.push("--wait");
-    } else {
-      args.push(
-        "--browser-model-strategy",
-        "current",
-        "--browser-auto-reattach-delay",
-        "5s",
-        "--browser-auto-reattach-interval",
-        "3s"
-      );
+    args.push(
+      "--browser-model-strategy",
+      "current",
+      "--browser-auto-reattach-delay",
+      "5s",
+      "--browser-auto-reattach-interval",
+      "3s"
+    );
 
-      if (input.files.length > 0) {
-        args.push("--browser-attachments", "always");
+    if (input.files.length > 0) {
+      args.push("--browser-attachments", "always");
+    }
+
+    if (input.browserThinkingTime) {
+      args.push("--browser-thinking-time", input.browserThinkingTime);
+    }
+
+    if (input.launch.manualLogin) {
+      args.push("--browser-manual-login");
+    }
+
+    if (input.launch.browserHeadless) {
+      args.push("--browser-headless");
+    } else if (!input.launch.browserVisible) {
+      args.push("--browser-hide-window");
+    }
+
+    if (input.launch.keepBrowser) {
+      args.push("--browser-keep-browser");
+    }
+
+    if (input.launch.chatgptUrl) {
+      args.push("--chatgpt-url", input.launch.chatgptUrl);
+    }
+
+    if (!input.launch.manualLogin) {
+      if (input.inlineCookiesPath) {
+        args.push("--browser-inline-cookies-file", input.inlineCookiesPath);
+      } else {
+        args.push("--browser-cookie-path", ORACLE_BROWSER_COOKIE_DB_PATH);
       }
+    }
 
-      if (input.browserThinkingTime) {
-        args.push("--browser-thinking-time", input.browserThinkingTime);
-      }
-
-      if (input.launch.manualLogin) {
-        args.push("--browser-manual-login");
-      }
-
-      if (input.launch.browserHeadless) {
-        args.push("--browser-headless");
-      } else if (!input.launch.browserVisible) {
-        args.push("--browser-hide-window");
-      }
-
-      if (input.launch.keepBrowser) {
-        args.push("--browser-keep-browser");
-      }
-
-      if (input.launch.chatgptUrl) {
-        args.push("--chatgpt-url", input.launch.chatgptUrl);
-      }
-
-      if (!input.launch.manualLogin) {
-        if (input.inlineCookiesPath) {
-          args.push("--browser-inline-cookies-file", input.inlineCookiesPath);
-        } else {
-          args.push("--browser-cookie-path", ORACLE_BROWSER_COOKIE_DB_PATH);
-        }
-      }
-
-      if (input.chromePath) {
-        args.push("--browser-chrome-path", input.chromePath);
-      }
+    if (input.chromePath) {
+      args.push("--browser-chrome-path", input.chromePath);
     }
 
     args.push(
@@ -511,8 +481,8 @@ export class OracleRunner {
   }
 
   private appendBrowserVisibilityHint(reason: string, launch: OracleLaunchOptions) {
-    if (launch.engine !== "browser" || launch.browserVisible) {
-      if (launch.engine === "browser" && launch.strategistSessionReady) {
+    if (launch.browserVisible) {
+      if (launch.strategistSessionReady) {
         return `${reason}\nIf the saved ChatGPT session expired, reset strategist sign-in from Settings and try again.`;
       }
       return reason;
@@ -855,7 +825,6 @@ export function shouldCleanupOracleBrowserAfterSuccess(
   env: NodeJS.ProcessEnv = process.env
 ) {
   return (
-    launch.engine === "browser" &&
     launch.manualLogin &&
     launch.keepBrowser &&
     !toBoolean(env.LITHIUM_ORACLE_KEEP_BROWSER)
@@ -866,7 +835,7 @@ export function shouldAutoRecoverInteractiveSession(
   launch: OracleLaunchOptions,
   env: NodeJS.ProcessEnv = process.env
 ) {
-  if (launch.engine !== "browser" || !launch.strategistSessionReady) {
+  if (!launch.strategistSessionReady) {
     return false;
   }
 
@@ -928,29 +897,18 @@ export function resolveOracleLaunchOptions(
     strategistSessionReady?: boolean;
   } = {}
 ): OracleLaunchOptions {
-  const requestedEngine = env.LITHIUM_ORACLE_ENGINE?.trim().toLowerCase();
-  const engine: OracleEngine =
-    requestedEngine === "api" || requestedEngine === "browser"
-      ? requestedEngine
-      : env.OPENAI_API_KEY
-      ? "api"
-        : "browser";
   const strategistSessionReady = Boolean(input.strategistSessionReady);
   const forcedVisible = toBoolean(env.LITHIUM_ORACLE_VISIBLE);
   const forcedHeadless = toBoolean(env.LITHIUM_ORACLE_HEADLESS);
-  const browserVisible = engine === "browser" && (forcedVisible || !strategistSessionReady);
-  const manualLogin = engine === "browser";
-  const browserHeadless =
-    engine === "browser" && strategistSessionReady && forcedHeadless;
+  const browserVisible = forcedVisible || !strategistSessionReady;
+  const manualLogin = true;
+  const browserHeadless = strategistSessionReady && forcedHeadless;
 
   return {
-    engine,
     browserVisible,
     browserHeadless,
     keepBrowser:
-      engine === "browser" &&
-      browserVisible &&
-      (toBoolean(env.LITHIUM_ORACLE_KEEP_BROWSER) || !strategistSessionReady),
+      browserVisible && (toBoolean(env.LITHIUM_ORACLE_KEEP_BROWSER) || !strategistSessionReady),
     manualLogin,
     strategistSessionReady,
     chatgptUrl: env.LITHIUM_ORACLE_CHATGPT_URL?.trim() || undefined
@@ -969,7 +927,7 @@ export function classifyInteractiveSessionRecovery(
   reason: string,
   launch: OracleLaunchOptions
 ): InteractiveRecoveryMode {
-  if (launch.engine !== "browser" || !launch.strategistSessionReady) {
+  if (!launch.strategistSessionReady) {
     return null;
   }
 

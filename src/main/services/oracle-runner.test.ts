@@ -25,25 +25,8 @@ const LOCAL_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google
 const DEFAULT_CHROME_PROFILE = "/tmp/lithium-fixtures/google-chrome-default";
 
 describe("OracleRunner", () => {
-  it("prefers API mode when an OpenAI key is available", () => {
-    expect(
-      resolveOracleLaunchOptions({
-        OPENAI_API_KEY: "test-key"
-      })
-    ).toEqual({
-      engine: "api",
-      browserVisible: false,
-      browserHeadless: false,
-      keepBrowser: false,
-      manualLogin: false,
-      strategistSessionReady: false,
-      chatgptUrl: undefined
-    });
-  });
-
   it("opens the first browser run visibly so the user can sign in once", () => {
     expect(resolveOracleLaunchOptions({}, { strategistSessionReady: false })).toEqual({
-      engine: "browser",
       browserVisible: true,
       browserHeadless: false,
       keepBrowser: true,
@@ -55,7 +38,6 @@ describe("OracleRunner", () => {
 
   it("runs later browser calls headlessly once the strategist session is ready", () => {
     expect(resolveOracleLaunchOptions({}, { strategistSessionReady: true })).toEqual({
-      engine: "browser",
       browserVisible: false,
       browserHeadless: false,
       keepBrowser: false,
@@ -196,7 +178,6 @@ describe("OracleRunner", () => {
         { strategistSessionReady: true }
       )
     ).toEqual({
-      engine: "browser",
       browserVisible: false,
       browserHeadless: true,
       keepBrowser: false,
@@ -231,48 +212,18 @@ describe("OracleRunner", () => {
     }
   });
 
-  it("builds an API command without browser flags", () => {
-    const runner = new OracleRunner();
-    const command = (runner as any).buildCommand({
-      workspacePath: "/tmp/research",
-      prompt: "Plan the next experiment.",
-      model: "gpt-5.4",
-      browserThinkingTime: "heavy",
-      outputPath: "/tmp/out.txt",
-      slug: "lithium-strategist-d001",
-      launch: {
-        engine: "api",
-        browserVisible: false,
-        browserHeadless: false,
-        keepBrowser: false,
-        manualLogin: false,
-        strategistSessionReady: false
-      },
-      files: ["/tmp/context.md"]
-    });
-
-    expect(command.args).toContain("--wait");
-    expect(command.args).toContain("--model");
-    expect(command.args).toContain("gpt-5.4");
-    expect(command.args).not.toContain("--browser-hide-window");
-    expect(command.args).not.toContain("--browser-manual-login");
-    expect(command.args).not.toContain("--browser-thinking-time");
-    expect(command.args).toContain("--file");
-  });
-
   it("builds a hidden-window browser command for later reused sessions", () => {
     const runner = new OracleRunner();
     const command = (runner as any).buildCommand({
       workspacePath: "/tmp/research",
       prompt: "Plan the next experiment.",
-      model: "gpt-5.4",
-      browserThinkingTime: "heavy",
+      model: "gpt-5.4-pro",
+      browserThinkingTime: "extended",
       outputPath: "/tmp/out.txt",
       slug: "lithium-strategist-d001",
       chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       inlineCookiesPath: "/tmp/lithium-inline-cookies.json",
       launch: {
-        engine: "browser",
         browserVisible: false,
         browserHeadless: false,
         keepBrowser: false,
@@ -293,7 +244,7 @@ describe("OracleRunner", () => {
     expect(command.args).toContain("--browser-model-strategy");
     expect(command.args).toContain("current");
     expect(command.args).toContain("--browser-thinking-time");
-    expect(command.args).toContain("heavy");
+    expect(command.args).toContain("extended");
     expect(command.args).toContain("--chatgpt-url");
     expect(command.args).not.toContain("--browser-cookie-path");
     expect(command.args).not.toContain("--browser-inline-cookies-file");
@@ -312,7 +263,6 @@ describe("OracleRunner", () => {
       chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       inlineCookiesPath: "/tmp/lithium-inline-cookies.json",
       launch: {
-        engine: "browser",
         browserVisible: false,
         browserHeadless: true,
         keepBrowser: false,
@@ -337,14 +287,13 @@ describe("OracleRunner", () => {
     const command = (runner as any).buildCommand({
       workspacePath: "/tmp/research",
       prompt: "Plan the next experiment.",
-      model: "gpt-5.4",
-      browserThinkingTime: "heavy",
+      model: "gpt-5.4-pro",
+      browserThinkingTime: "extended",
       outputPath: "/tmp/out.txt",
       slug: "lithium-strategist-d001",
       chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       inlineCookiesPath: undefined,
       launch: {
-        engine: "browser",
         browserVisible: true,
         browserHeadless: false,
         keepBrowser: true,
@@ -365,22 +314,21 @@ describe("OracleRunner", () => {
     expect(command.args).not.toContain("--browser-inline-files");
   });
 
-  it("uses the local oracle binary directly when one is available", () => {
+  it("uses the local oracle binary directly for browser runs when one is available", () => {
     const runner = new OracleRunner();
     const command = (runner as any).buildCommand({
       workspacePath: "/tmp/research",
       prompt: "Plan the next experiment.",
-      model: "gpt-5.4",
-      browserThinkingTime: "heavy",
+      model: "gpt-5.4-pro",
+      browserThinkingTime: "extended",
       outputPath: "/tmp/out.txt",
       slug: "lithium-strategist-d001",
       oracleCommand: "/tmp/node_modules/.bin/oracle",
       launch: {
-        engine: "api",
-        browserVisible: false,
+        browserVisible: true,
         browserHeadless: false,
-        keepBrowser: false,
-        manualLogin: false,
+        keepBrowser: true,
+        manualLogin: true,
         strategistSessionReady: false,
         chatgptUrl: undefined
       },
@@ -388,7 +336,7 @@ describe("OracleRunner", () => {
     });
 
     expect(command.command).toBe("/tmp/node_modules/.bin/oracle");
-    expect(command.args.slice(0, 4)).toEqual(["--engine", "api", "--model", "gpt-5.4"]);
+    expect(command.args.slice(0, 4)).toEqual(["--engine", "browser", "--model", "gpt-5.4-pro"]);
     expect(command.args).not.toContain("@steipete/oracle");
     expect(command.args).not.toContain("-y");
   });
@@ -407,7 +355,6 @@ describe("OracleRunner", () => {
       shouldRetryInteractiveSessionRecovery(
         "No ChatGPT cookies were applied from your Chrome profile; cannot proceed in browser mode.",
         {
-          engine: "browser",
           browserVisible: false,
           browserHeadless: false,
           keepBrowser: false,
@@ -422,7 +369,6 @@ describe("OracleRunner", () => {
       shouldRetryInteractiveSessionRecovery(
         "No ChatGPT cookies were applied from your Chrome profile; cannot proceed in browser mode.",
         {
-          engine: "browser",
           browserVisible: true,
           browserHeadless: false,
           keepBrowser: true,
@@ -437,7 +383,6 @@ describe("OracleRunner", () => {
   it("classifies stale strategist browser failures for fresh headless recovery", () => {
     expect(
       classifyInteractiveSessionRecovery("connect ECONNREFUSED 127.0.0.1:55510", {
-        engine: "browser",
         browserVisible: false,
         browserHeadless: true,
         keepBrowser: false,
@@ -449,7 +394,6 @@ describe("OracleRunner", () => {
 
     expect(
       classifyInteractiveSessionRecovery("Prompt textarea did not appear before timeout", {
-        engine: "browser",
         browserVisible: false,
         browserHeadless: true,
         keepBrowser: false,
@@ -463,7 +407,6 @@ describe("OracleRunner", () => {
   it("classifies truncated strategist outputs for a fresh chat recovery", () => {
     expect(
       classifyInteractiveSessionRecovery("Oracle strategist output looked truncated or non-final: I’m", {
-        engine: "browser",
         browserVisible: false,
         browserHeadless: true,
         keepBrowser: false,
@@ -478,7 +421,6 @@ describe("OracleRunner", () => {
     expect(
       shouldCleanupOracleBrowserAfterSuccess(
         {
-          engine: "browser",
           browserVisible: true,
           browserHeadless: false,
           keepBrowser: true,
@@ -493,7 +435,6 @@ describe("OracleRunner", () => {
     expect(
       shouldCleanupOracleBrowserAfterSuccess(
         {
-          engine: "browser",
           browserVisible: true,
           browserHeadless: false,
           keepBrowser: true,
@@ -510,7 +451,6 @@ describe("OracleRunner", () => {
     expect(
       shouldCleanupOracleBrowserAfterSuccess(
         {
-          engine: "browser",
           browserVisible: false,
           browserHeadless: false,
           keepBrowser: false,
@@ -548,7 +488,6 @@ describe("OracleRunner", () => {
 
   it("auto-recovers strategist browser reuse by default unless explicitly disabled", () => {
     const launch = {
-      engine: "browser" as const,
       browserVisible: false,
       browserHeadless: false,
       keepBrowser: false,

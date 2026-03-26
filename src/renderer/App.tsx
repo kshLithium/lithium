@@ -19,7 +19,6 @@ import { Composer } from "./Composer";
 import {
   buildAppStateRevision,
   buildSnapshotRevision,
-  describeBusyAction,
   isPendingChatVisible,
   summarizeWorkspacePath,
   UNASSIGNED_PENDING_THREAD_ID
@@ -71,7 +70,7 @@ export default function App() {
       mergeTransientChatItems(chatItems, visiblePendingChatItems, {
         activeThreadId,
         busyAction,
-        busyBody: busyAction ? formatLiveProgressBody(chatProgress) || describeBusyAction(busyAction) : "",
+        busyBody: busyAction ? formatLiveProgressBody(chatProgress) : "",
         chatProgress,
         workspacePath
       }),

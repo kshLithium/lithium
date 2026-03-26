@@ -213,7 +213,7 @@ function stripMarkedBlock(rawText: string, marker: string) {
   return rawText.replace(new RegExp(`\\n*${escapeRegExp(marker)}(?:\\s*\\n|\\s+)?[\\s\\S]*$`, "i"), "").trim();
 }
 
-function extractVisibleStrategistMessage(rawOutput: string) {
+export function extractVisibleStrategistMessage(rawOutput: string) {
   const stripped = stripMarkedBlock(rawOutput, STRATEGIST_MARKER).trim();
 
   if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
@@ -223,7 +223,7 @@ function extractVisibleStrategistMessage(rawOutput: string) {
   return stripped;
 }
 
-function extractVisibleBuilderMessage(finalMessage: string) {
+export function extractVisibleBuilderMessage(finalMessage: string) {
   const stripped = stripMarkedBlock(finalMessage, BUILDER_MARKER).trim();
 
   if (!stripped || looksLikeStructuredBuilderOnly(stripped) || isOperationalAutomationMessage(stripped)) {

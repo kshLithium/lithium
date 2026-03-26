@@ -12,7 +12,7 @@ export function stabilizeChatProgress(
     current.threadId === next.threadId &&
     current.lane === next.lane &&
     hasMeaningfulChatProgress(current) &&
-    isGenericChatProgress(next)
+    !hasMeaningfulChatProgress(next)
   ) {
     return current;
   }
@@ -38,29 +38,5 @@ function hasMeaningfulChatProgress(progress: ChatProgressInspection) {
     .map((detail) => detail.trim())
     .filter(Boolean);
 
-  if (!summary && !details.length) {
-    return false;
-  }
-
-  return !isGenericChatProgress(progress);
-}
-
-function isGenericChatProgress(progress: ChatProgressInspection) {
-  const summary = progress.progressSummary.trim();
-  const details = progress.progressDetails
-    .map((detail) => detail.trim())
-    .filter(Boolean);
-
-  if (!summary) {
-    return details.length === 0;
-  }
-
-  if (summary !== "Thinking…") {
-    return false;
-  }
-
-  return (
-    details.length === 0 ||
-    details.every((detail) => detail === "Reviewing the latest thread state and choosing the next move.")
-  );
+  return Boolean(summary || details.length);
 }

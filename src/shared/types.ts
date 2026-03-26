@@ -36,8 +36,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   autopilotPromptLanguage: "auto",
   strategistSessionReady: false,
   lastWorkspacePath: "",
-  strategistModel: "gpt-5.4",
-  strategistReasoningIntensity: "heavy",
+  strategistModel: "gpt-5.4-pro",
+  strategistReasoningIntensity: "extended",
   builderModel: "gpt-5.4",
   builderReasoningEffort: "xhigh"
 };

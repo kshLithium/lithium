@@ -78,6 +78,8 @@ export function buildChatItems(
       .map((trace) => trace.downstreamRunId as string)
   );
   const hasConversationEntries = conversationEntries.length > 0;
+  const hasAutomationTimeline = automationSessions.length > 0 || automationSteps.length > 0 || automationCheckpoints.length > 0;
+  const shouldRenderStandaloneWorkerArtifacts = !hasConversationEntries && !hasAutomationTimeline;
 
   if (hasConversationEntries) {
     for (const entry of conversationEntries) {
@@ -96,7 +98,7 @@ export function buildChatItems(
     }
   }
 
-  for (const decision of hasConversationEntries ? [] : decisions) {
+  for (const decision of shouldRenderStandaloneWorkerArtifacts ? decisions : []) {
     const visiblePrompt = resolveVisibleDecisionPrompt(decision);
 
     if (visiblePrompt) {
@@ -129,7 +131,7 @@ export function buildChatItems(
     });
   }
 
-  for (const run of hasConversationEntries ? [] : runs) {
+  for (const run of shouldRenderStandaloneWorkerArtifacts ? runs : []) {
     if (shouldSuppressAutomationRun(run, latestAutomationTimelineTimestamp)) {
       continue;
     }
@@ -263,12 +265,13 @@ export function mergeTransientChatItems(
   );
   const transientThreadKey =
     input.chatProgress?.threadId || input.activeThreadId || input.workspacePath || pendingChatItems[0]?.id || "chat";
+  const transientBusyBody = input.busyBody?.trim() || liveProgressBody;
 
-  if (input.busyAction && pendingChatItems.length) {
+  if (input.busyAction && pendingChatItems.length && transientBusyBody) {
     items.push({
       id: `busy:${transientThreadKey}:${input.busyAction}`,
       role: "assistant",
-      body: input.busyBody?.trim() || liveProgressBody || "Working…",
+      body: transientBusyBody,
       timestamp: transientAssistantTimestamp || new Date().toISOString(),
       order,
       pending: true
@@ -461,57 +464,18 @@ function describeAutomationCheckpoint(
   checkpoint: AutomationCheckpointRecord,
   session?: AutomationSessionRecord
 ) {
-  if (
-    /^automation interrupted$/i.test(checkpoint.title) &&
-    checkpoint.status === "approved" &&
-    session?.status === "idle"
-  ) {
-    return "자동 연구를 멈췄습니다. 다시 시작하려면 새 메시지를 보내 주세요.";
-  }
-
-  if (/^automation stopped$/i.test(checkpoint.title)) {
-    return "자동 연구를 멈췄습니다. 다시 시작하려면 새 메시지를 보내 주세요.";
-  }
-
-  const tone = resolveAutomationCheckpointTone(checkpoint, session);
   const summary = simplifyAutomationCheckpointSummary(checkpoint.summary, session);
+  const approvedResponse = checkpoint.userResponse?.trim() || "";
 
-  if (tone === "running") {
-    return summary || "현재 단계 작업을 계속 진행하고 있습니다.";
+  if (summary) {
+    return summary;
   }
 
-  if (tone === "recorded") {
-    return "";
+  if (approvedResponse && approvedResponse !== checkpoint.summary.trim()) {
+    return approvedResponse;
   }
 
-  if (tone === "approved") {
-    return summary || "방금 보낸 지시를 기록했고, 현재 단계를 마치면 이어서 반영합니다.";
-  }
-
-  if (tone === "blocked") {
-    return isStrategistBrowserBlockedCheckpoint(checkpoint, session)
-      ? "브라우저 인증이 필요한 단계에서 막혔습니다. 다시 시도할지, 방향을 바꿀지 알려주세요."
-      : "현재 단계가 막혔습니다. 같은 경로를 다시 시도할지, 방향을 바꿀지 알려주세요.";
-  }
-
-  if (tone === "failed") {
-    return "직전 단계가 깔끔하게 끝나지 않았습니다. 같은 경로를 계속 복구할지, 방향을 바꿀지 알려주세요.";
-  }
-
-  if (/^checkpoint ready$/i.test(checkpoint.title)) {
-    return summary
-      ? `한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다. 마지막 결과는 ${summary}`
-      : "한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다. 다음 방향을 정하면 바로 이어서 진행할 수 있습니다.";
-  }
-
-  if (
-    /^automation interrupted$/i.test(checkpoint.title) &&
-    (!summary || summary === checkpoint.userResponse?.trim() || summary === checkpoint.summary.trim())
-  ) {
-    return "잠시 멈춘 상태입니다. 이어서 어떻게 진행할지 알려주세요.";
-  }
-
-  return summary || "잠시 멈춘 상태입니다. 다음에 무엇을 할지 알려주세요.";
+  return "";
 }
 
 function simplifyAutomationCheckpointSummary(
@@ -525,7 +489,7 @@ function simplifyAutomationCheckpointSummary(
   }
 
   if (/^Automation is still running\./i.test(trimmed)) {
-    return humanizeAutomationStepSummary(session?.currentStepSummary?.trim() ?? "");
+    return session?.currentStepSummary?.trim() ?? "";
   }
 
   if (looksLikeInternalAutomationSummary(trimmed)) {
@@ -554,68 +518,8 @@ function humanizeAutomationStepSummary(value: string) {
     return "";
   }
 
-  if (/let codex choose and execute the next bounded step/i.test(trimmed)) {
-    return "다음으로 검증할 실험이나 구현 단계를 고르고 있습니다.";
-  }
-
-  if (/plan the next bounded research step/i.test(trimmed)) {
-    return "다음 연구 단계를 작게 쪼개서 정리하고 있습니다.";
-  }
-
-  if (/automation is ready to begin/i.test(trimmed)) {
-    return "자동 연구를 시작할 준비를 마쳤습니다.";
-  }
-
-  if (/automation started\. planning the next bounded step/i.test(trimmed)) {
-    return "자동 연구를 시작했고, 바로 다음 단계를 정리하고 있습니다.";
-  }
-
-  if (/pause requested\. finishing the current bounded step before stopping/i.test(trimmed)) {
-    return "지금 단계까지만 마무리한 뒤 멈출 예정입니다.";
-  }
-
-  if (/automation resumed/i.test(trimmed)) {
-    return "이전 상태에서 자동 연구를 다시 이어가고 있습니다.";
-  }
-
-  if (/checkpoint approved\. continuing automation/i.test(trimmed)) {
-    return "방금 방향을 반영했고 자동 연구를 이어가고 있습니다.";
-  }
-
-  if (/continuing the current step\. the latest instruction will be applied next/i.test(trimmed)) {
-    return "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다.";
-  }
-
-  if (/automation was interrupted when lithium restarted/i.test(trimmed)) {
-    return "앱이 다시 켜지면서 자동 연구가 잠시 멈췄습니다. 이어서 어떻게 할지 알려주세요.";
-  }
-
-  if (/runtime budget reached/i.test(trimmed)) {
-    return "실행 시간 한도에 도달해서 잠시 멈췄습니다. 이어갈지 결정해 주세요.";
-  }
-
-  if (/step budget reached/i.test(trimmed)) {
-    return "단계 수 한도에 도달해서 잠시 멈췄습니다. 이어갈지 결정해 주세요.";
-  }
-
-  if (/blocked on the strategist run/i.test(trimmed)) {
-    return "브라우저 연구 단계에서 막혀 있습니다. 같은 경로로 다시 시도할지 알려주세요.";
-  }
-
-  if (/automation stopped with an issue/i.test(trimmed)) {
-    return "문제가 생겨 잠시 멈췄습니다. 복구를 이어갈지 알려주세요.";
-  }
-
-  if (/phase activated after the latest strategist decision/i.test(trimmed)) {
-    return "최신 판단을 바탕으로 다음 자동화 단계를 진행하고 있습니다.";
-  }
-
-  if (/^recovering after\b/i.test(trimmed)) {
-    return "직전 단계 이후 복구 경로를 진행하고 있습니다.";
-  }
-
-  if (/^continuing after\b/i.test(trimmed)) {
-    return "방금 끝난 단계에 이어 다음 작업을 진행하고 있습니다.";
+  if (looksLikeInternalAutomationSummary(trimmed)) {
+    return "";
   }
 
   return trimmed;
@@ -819,10 +723,31 @@ function collapseDuplicateUserTaskItems(items: ChatItem[]) {
   const filtered: ChatItem[] = [];
   let lastVisibleUserPrompt = "";
   let lastVisibleUserTimestamp = "";
+  let lastVisibleNonUserBody = "";
+  let lastVisibleNonUserRole: ChatItem["role"] | "" = "";
+  let lastVisibleNonUserTimestamp = "";
 
   for (const item of items) {
     if (item.role !== "user") {
+      const normalizedBody = normalizePromptForComparison(item.body);
+      const isDuplicateNonUser =
+        normalizedBody &&
+        item.role === lastVisibleNonUserRole &&
+        normalizedBody === lastVisibleNonUserBody &&
+        isNearDuplicateTimestamp(item.timestamp, lastVisibleNonUserTimestamp);
+
+      if (isDuplicateNonUser) {
+        continue;
+      }
+
       filtered.push(item);
+
+      if (normalizedBody) {
+        lastVisibleNonUserBody = normalizedBody;
+        lastVisibleNonUserRole = item.role;
+        lastVisibleNonUserTimestamp = item.timestamp;
+      }
+
       continue;
     }
 
@@ -1061,6 +986,10 @@ function extractVisibleStrategistReply(rawOutput: string) {
 }
 
 function simplifyStrategistDisplayText(value: string) {
+  if (/^oracle did not return a structured rationale\.?$/i.test(value.trim())) {
+    return "";
+  }
+
   return inlineReferenceLinks(value)
     .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
     .replace(/\n{3,}/g, "\n\n")
@@ -1223,24 +1152,18 @@ export function formatLiveProgressBody(
   const summary = stripProgressControlFooters(progress.progressSummary).trim();
   const lines: string[] = [];
 
+  if (summary) {
+    lines.push(summary);
+  }
+
   if (progress.progressDetails.length) {
     for (const detail of progress.progressDetails) {
       const sanitizedDetail = stripProgressControlFooters(detail).trim();
 
-      if (sanitizedDetail) {
+      if (sanitizedDetail && !lines.includes(sanitizedDetail)) {
         lines.push(sanitizedDetail);
       }
     }
-  }
-
-  if (summary && !lines.includes(summary)) {
-    lines.push(summary);
-  }
-
-  const command = progress.activeCommand?.trim() || "";
-
-  if (command && (!summary || isGenericLiveProgressSummary(summary)) && !lines.some((line) => line.includes(command))) {
-    lines.push(`Command: \`${truncateText(command, 160)}\``);
   }
 
   if (!lines.length) {
@@ -1248,12 +1171,6 @@ export function formatLiveProgressBody(
   }
 
   return lines.join("\n\n");
-}
-
-function isGenericLiveProgressSummary(value: string) {
-  return /^(thinking|thinking…|working|working…|starting|starting…|researching|researching…|finishing|finishing…|routing your message\.?)$/i.test(
-    value.trim()
-  );
 }
 
 function extractCompactBuilderSummary(value: string) {

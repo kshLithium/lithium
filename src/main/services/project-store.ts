@@ -37,6 +37,7 @@ const LITHIUM_DIR = ".lithium";
 const PROJECT_FILE = "project.json";
 const ACTIVITY_LOG = "activity.log";
 const PROMPT_LOG = "prompt-log.jsonl";
+const WORKER_HISTORY_LOG = "worker-history.jsonl";
 const RECORD_READ_BATCH_SIZE = 32;
 const DOCUMENT_ATTACHMENT_EXCERPT =
   "Document attachment. Reference the file path directly when asking the model to inspect it.";
@@ -73,6 +74,7 @@ type ProjectPaths = {
   projectFile: string;
   activityLog: string;
   promptLog: string;
+  workerHistoryLog: string;
   contextBundle: string;
   projectMemoryFile: string;
   memoryBriefFile: string;
@@ -130,6 +132,7 @@ export class ProjectStore {
       projectFile: path.join(root, PROJECT_FILE),
       activityLog: path.join(root, ACTIVITY_LOG),
       promptLog: path.join(root, PROMPT_LOG),
+      workerHistoryLog: path.join(root, WORKER_HISTORY_LOG),
       contextBundle: path.join(root, "context", "current-context.md"),
       projectMemoryFile: path.join(root, "memory", "project-memory.json"),
       memoryBriefFile: path.join(root, "memory", "brief.md"),
@@ -170,7 +173,7 @@ export class ProjectStore {
       id: `project-${randomUUID()}`,
       name: path.basename(workspacePath),
       workspacePath,
-      oracleModel: "gpt-5.4",
+      oracleModel: "gpt-5.4-pro",
       codexModel: "gpt-5.4",
       defaultThreadId: "",
       activeThreadId: "",
@@ -796,6 +799,16 @@ export class ProjectStore {
       ...entry
     });
     await appendFile(paths.promptLog, `${line}\n`, "utf8");
+  }
+
+  async appendWorkerHistory(workspacePath: string, entry: Record<string, unknown>) {
+    const paths = this.buildPaths(workspacePath);
+    await mkdir(paths.root, { recursive: true });
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      ...entry
+    });
+    await appendFile(paths.workerHistoryLog, `${line}\n`, "utf8");
   }
 
   async buildRuntimeContext(
@@ -2283,10 +2296,6 @@ function humanizeAutomationContextSummary(value: string, language: "ko" | "en") 
 
   if (/automation started\. planning the next bounded step/i.test(trimmed)) {
     return "자동 연구를 시작했고 바로 다음 단계를 정리하고 있습니다.";
-  }
-
-  if (/continuing the current step\. the latest instruction will be applied next/i.test(trimmed)) {
-    return "현재 단계는 마저 끝내고, 방금 보낸 지시는 다음 단계부터 반영합니다.";
   }
 
   if (/automation resumed/i.test(trimmed)) {

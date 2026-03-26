@@ -17,28 +17,6 @@ export function isPendingChatVisible(
   return Boolean(activeThreadId && pendingThreadId === activeThreadId);
 }
 
-export function describeBusyAction(value: string) {
-  const normalized = value.trim().toLowerCase();
-
-  if (normalized.includes("sign-in")) {
-    return "Preparing the research browser session…";
-  }
-
-  if (normalized.includes("automation")) {
-    return "Updating the automation loop…";
-  }
-
-  if (normalized.includes("attachment")) {
-    return "Updating thread attachments…";
-  }
-
-  if (normalized.includes("thread")) {
-    return "Updating the current thread…";
-  }
-
-  return "Working…";
-}
-
 export function summarizeWorkspacePath(workspacePath: string) {
   const normalized = workspacePath.trim().replace(/[\\/]+$/, "");
 

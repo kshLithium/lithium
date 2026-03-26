@@ -4,7 +4,8 @@ import {
   coerceStrategistThinkingTime,
   isBuilderModel,
   isBuilderReasoningEffort,
-  isOracleModel
+  normalizeStrategistModel,
+  normalizeStrategistThinkingTime
 } from "../../shared/model-config";
 import {
   DEFAULT_APP_SETTINGS,
@@ -89,14 +90,16 @@ export function sanitizeAutomationPromptLanguage(value: unknown): AutomationProm
 }
 
 export function sanitizeOracleModel(value: unknown): OracleModel {
-  return isOracleModel(value) ? value : DEFAULT_APP_SETTINGS.strategistModel;
+  return normalizeStrategistModel(value);
 }
 
 export function sanitizeOracleThinkingTime(
   value: unknown,
   model: OracleModel = DEFAULT_APP_SETTINGS.strategistModel
 ): OracleThinkingTime {
-  return coerceStrategistThinkingTime(model, value);
+  return model === "gpt-5.4-pro"
+    ? normalizeStrategistThinkingTime(value)
+    : coerceStrategistThinkingTime(model, value);
 }
 
 export function sanitizeBuilderModel(value: unknown): BuilderModel {

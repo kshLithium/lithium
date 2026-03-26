@@ -143,7 +143,7 @@ export class OrchestratorRunner {
       "Create at most one request file per lane in a turn.",
       "Do not mix automation requests with builder/strategist requests in the same turn.",
       "Supported builder headers: Execution: live|sync, Model: gpt-5.4|gpt-5.3-codex, Reasoning: low|medium|high|xhigh.",
-      "Supported strategist headers: Execution: sync|async, Model: gpt-5.4|gpt-5.4-pro, Intensity: light|standard|extended|heavy, Attach explicit files: yes|no.",
+      "Supported strategist headers: Execution: sync|async, Model: gpt-5.4-pro, Intensity: extended, Attach explicit files: yes|no.",
       "Supported automation headers: Mode: continuous|checkpoint, Max steps: N, Max runtime minutes: N, Max retries: N.",
       "After any optional headers, leave a blank line and then write the worker task in natural language.",
       "If you can answer directly, create no request files.",

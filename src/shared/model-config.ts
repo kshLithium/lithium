@@ -9,10 +9,11 @@ export const ORACLE_MODELS = ["gpt-5.4", "gpt-5.4-pro"] as const;
 export const ORACLE_THINKING_TIMES = ["light", "standard", "extended", "heavy"] as const;
 export const BUILDER_MODELS = ["gpt-5.4", "gpt-5.3-codex"] as const;
 export const BUILDER_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+export const PREFERRED_STRATEGIST_MODEL: OracleModel = "gpt-5.4-pro";
+export const PREFERRED_STRATEGIST_THINKING_TIME: OracleThinkingTime = "extended";
 
 export const STRATEGIST_MODEL_OPTIONS: ReadonlyArray<{ value: OracleModel; label: string }> = [
-  { value: "gpt-5.4-pro", label: "GPT-5.4 Pro" },
-  { value: "gpt-5.4", label: "Thinking 5.4" }
+  { value: "gpt-5.4-pro", label: "GPT-5.4 Pro" }
 ];
 
 export const BUILDER_MODEL_OPTIONS: ReadonlyArray<{ value: BuilderModel; label: string }> = [
@@ -42,7 +43,7 @@ const STRATEGIST_THINKING_TIME_OPTIONS: ReadonlyArray<{
 
 const STRATEGIST_THINKING_TIME_VALUES_BY_MODEL: Record<OracleModel, readonly OracleThinkingTime[]> = {
   "gpt-5.4": ORACLE_THINKING_TIMES,
-  "gpt-5.4-pro": ["standard", "extended"]
+  "gpt-5.4-pro": ["extended"]
 };
 
 export function isOracleModel(value: unknown): value is OracleModel {
@@ -61,6 +62,14 @@ export function isBuilderReasoningEffort(value: unknown): value is BuilderReason
   return typeof value === "string" && (BUILDER_REASONING_EFFORTS as readonly string[]).includes(value);
 }
 
+export function normalizeStrategistModel(_value?: unknown): OracleModel {
+  return PREFERRED_STRATEGIST_MODEL;
+}
+
+export function normalizeStrategistThinkingTime(_value?: unknown): OracleThinkingTime {
+  return PREFERRED_STRATEGIST_THINKING_TIME;
+}
+
 export function getStrategistThinkingTimeValues(model: OracleModel): readonly OracleThinkingTime[] {
   return STRATEGIST_THINKING_TIME_VALUES_BY_MODEL[model];
 }
@@ -71,7 +80,7 @@ export function getStrategistThinkingOptions(model: OracleModel) {
 }
 
 export function getDefaultStrategistThinkingTime(model: OracleModel): OracleThinkingTime {
-  return model === "gpt-5.4-pro" ? "standard" : "heavy";
+  return model === "gpt-5.4-pro" ? PREFERRED_STRATEGIST_THINKING_TIME : "heavy";
 }
 
 export function coerceStrategistThinkingTime(
