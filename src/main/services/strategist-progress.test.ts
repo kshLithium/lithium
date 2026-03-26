@@ -4,7 +4,7 @@ import { extractOracleSessionProgress, mergeStrategistLiveProgress } from "./str
 describe("strategist-progress", () => {
   it("surfaces assistant preview history from oracle logs and strips markup noise", () => {
     const parsed = extractOracleSessionProgress([
-      "Launching browser mode (gpt-5.4) with ~955 tokens.",
+      "Launching browser mode (gpt-5.4-pro) with ~955 tokens.",
       "[assistant-preview] <p data-start=\"0\">기존 맥락을 먼저 붙잡고, 바로 최신 SVM 관련 연구 축을 확인해서 실제로 밀 만한 새 알고리즘 가설까지 이어보겠습니다.</p>",
       "[assistant-preview] <p data-start=\"0\">기존 맥락을 먼저 붙잡고, 바로 최신 SVM 관련 연구 축을 확인해서 실제로 밀 만한 새 알고리즘 가설까지 이어보겠습니다.</p>",
       "[assistant-preview] <p data-start=\"90\">이어서 현재 프로젝트 문맥에 맞는 다음 연구 산출물 형태로 정리할게요.</p>",

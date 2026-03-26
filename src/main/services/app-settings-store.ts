@@ -1,7 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
-  coerceStrategistThinkingTime,
   isBuilderModel,
   isBuilderReasoningEffort,
   normalizeStrategistModel,
@@ -97,9 +96,7 @@ export function sanitizeOracleThinkingTime(
   value: unknown,
   model: OracleModel = DEFAULT_APP_SETTINGS.strategistModel
 ): OracleThinkingTime {
-  return model === "gpt-5.4-pro"
-    ? normalizeStrategistThinkingTime(value)
-    : coerceStrategistThinkingTime(model, value);
+  return normalizeStrategistThinkingTime(value);
 }
 
 export function sanitizeBuilderModel(value: unknown): BuilderModel {

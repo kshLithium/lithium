@@ -1,9 +1,6 @@
 import {
-  coerceStrategistThinkingTime,
   isBuilderModel,
   isBuilderReasoningEffort,
-  isOracleModel,
-  isOracleThinkingTime,
   normalizeStrategistModel,
   normalizeStrategistThinkingTime
 } from "../../shared/model-config";
@@ -237,24 +234,16 @@ function parseBuilderReasoning(value: string | undefined): BuilderReasoningEffor
 
 function parseOracleModel(value: string | undefined): OracleModel | undefined {
   const trimmed = value?.trim();
-  return isOracleModel(trimmed) ? normalizeStrategistModel(trimmed) : undefined;
+  return trimmed ? normalizeStrategistModel(trimmed) : undefined;
 }
 
 function parseStrategistIntensity(
   value: string | undefined,
-  model: OracleModel | undefined
+  _model: OracleModel | undefined
 ): OracleThinkingTime | undefined {
   const trimmed = value?.trim();
 
-  if (!trimmed || !isOracleThinkingTime(trimmed)) {
-    return undefined;
-  }
-
-  return model === "gpt-5.4-pro"
-    ? normalizeStrategistThinkingTime(trimmed)
-    : model
-    ? coerceStrategistThinkingTime(model, trimmed)
-    : trimmed;
+  return trimmed ? normalizeStrategistThinkingTime(trimmed) : undefined;
 }
 
 function parseAutomationMode(value: string | undefined): AutomationMode | undefined {

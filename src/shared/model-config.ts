@@ -5,8 +5,8 @@ import type {
   OracleThinkingTime
 } from "./types";
 
-export const ORACLE_MODELS = ["gpt-5.4", "gpt-5.4-pro"] as const;
-export const ORACLE_THINKING_TIMES = ["light", "standard", "extended", "heavy"] as const;
+export const ORACLE_MODELS = ["gpt-5.4-pro"] as const;
+export const ORACLE_THINKING_TIMES = ["extended"] as const;
 export const BUILDER_MODELS = ["gpt-5.4", "gpt-5.3-codex"] as const;
 export const BUILDER_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 export const PREFERRED_STRATEGIST_MODEL: OracleModel = "gpt-5.4-pro";
@@ -35,14 +35,10 @@ const STRATEGIST_THINKING_TIME_OPTIONS: ReadonlyArray<{
   value: OracleThinkingTime;
   label: string;
 }> = [
-  { value: "light", label: "Light" },
-  { value: "standard", label: "Standard" },
-  { value: "extended", label: "Extended" },
-  { value: "heavy", label: "Heavy" }
+  { value: "extended", label: "Extended" }
 ];
 
 const STRATEGIST_THINKING_TIME_VALUES_BY_MODEL: Record<OracleModel, readonly OracleThinkingTime[]> = {
-  "gpt-5.4": ORACLE_THINKING_TIMES,
   "gpt-5.4-pro": ["extended"]
 };
 
@@ -80,7 +76,7 @@ export function getStrategistThinkingOptions(model: OracleModel) {
 }
 
 export function getDefaultStrategistThinkingTime(model: OracleModel): OracleThinkingTime {
-  return model === "gpt-5.4-pro" ? PREFERRED_STRATEGIST_THINKING_TIME : "heavy";
+  return PREFERRED_STRATEGIST_THINKING_TIME;
 }
 
 export function coerceStrategistThinkingTime(

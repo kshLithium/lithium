@@ -37,8 +37,8 @@ describe("AppSettingsStore sanitizers", () => {
   it("normalizes legacy strategist settings to GPT-5.4 Pro extended", () => {
     expect(
       sanitizeAppSettings({
-        strategistModel: "gpt-5.4",
-        strategistReasoningIntensity: "heavy"
+        strategistModel: "legacy-model",
+        strategistReasoningIntensity: "legacy-intensity"
       })
     ).toMatchObject({
       strategistModel: "gpt-5.4-pro",

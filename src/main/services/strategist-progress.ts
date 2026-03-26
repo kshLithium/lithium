@@ -185,7 +185,7 @@ function isGenericStrategistProgressSummary(value: string) {
     return true;
   }
 
-  return /^(thinking|thinking…|reading documents?|reading document|heavy thinking|searching|browsing|analyzing|processing|생각 중|문서를 읽는 중)$/i.test(
+  return /^(thinking|thinking…|reading documents?|reading document|searching|browsing|analyzing|processing|생각 중|문서를 읽는 중)$/i.test(
     normalized
   );
 }

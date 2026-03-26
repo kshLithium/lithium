@@ -14,8 +14,8 @@ export type RuntimeAppState = {
 };
 
 export type AutomationPromptLanguage = "auto" | "ko" | "en";
-export type OracleModel = "gpt-5.4" | "gpt-5.4-pro";
-export type OracleThinkingTime = "light" | "standard" | "extended" | "heavy";
+export type OracleModel = "gpt-5.4-pro";
+export type OracleThinkingTime = "extended";
 export type BuilderModel = "gpt-5.4" | "gpt-5.3-codex";
 export type BuilderReasoningEffort = "low" | "medium" | "high" | "xhigh";
 export type AppSettings = {

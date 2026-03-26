@@ -4,7 +4,6 @@ import { access, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import {
-  coerceStrategistThinkingTime,
   isBuilderModel,
   isBuilderReasoningEffort,
   normalizeStrategistModel,
@@ -1928,13 +1927,9 @@ export class AppService {
       ).filter((filePath) => isSupportedStrategistUploadPath(filePath));
       const strategistOraclePrompt = request.prompt;
       const strategistModel = configuredStrategistModel ?? project.oracleModel;
-      const strategistReasoningIntensity =
-        strategistModel === "gpt-5.4-pro"
-          ? normalizeStrategistThinkingTime(request.reasoningIntensity ?? appSettings.strategistReasoningIntensity)
-          : coerceStrategistThinkingTime(
-              strategistModel,
-              request.reasoningIntensity ?? appSettings.strategistReasoningIntensity
-            );
+      const strategistReasoningIntensity = normalizeStrategistThinkingTime(
+        request.reasoningIntensity ?? appSettings.strategistReasoningIntensity
+      );
 
       await this.store.appendPromptLog(workspacePath, {
         kind: "strategist.request",
@@ -4686,13 +4681,9 @@ export class AppService {
       ].filter((value): value is string => Boolean(value)))
     ).filter((filePath) => isSupportedStrategistUploadPath(filePath));
     const strategistModel = configuredStrategistModel ?? project.oracleModel;
-    const strategistReasoningIntensity =
-      strategistModel === "gpt-5.4-pro"
-        ? normalizeStrategistThinkingTime(delegation.reasoningIntensity ?? appSettings.strategistReasoningIntensity)
-        : coerceStrategistThinkingTime(
-            strategistModel,
-            delegation.reasoningIntensity ?? appSettings.strategistReasoningIntensity
-          );
+    const strategistReasoningIntensity = normalizeStrategistThinkingTime(
+      delegation.reasoningIntensity ?? appSettings.strategistReasoningIntensity
+    );
 
     await this.store.appendPromptLog(workspacePath, {
       kind: "strategist.request",
@@ -7730,7 +7721,7 @@ function buildAutomationStrategistSessionSlug(
 }
 
 function isOracleModelValue(value: string | undefined): value is AppSettings["strategistModel"] {
-  return value === "gpt-5.4" || value === "gpt-5.4-pro";
+  return value === "gpt-5.4-pro";
 }
 
 function execFileText(command: string, args: string[]) {
