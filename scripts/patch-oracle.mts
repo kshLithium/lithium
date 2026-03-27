@@ -76,6 +76,39 @@ async function waitForDevToolsReady(host, port, logger, timeoutMs = 15_000) {
     replace: "      ok: !onAuthPage && status === 200,"
   },
   {
+    relativePath: "node_modules/@steipete/oracle/dist/src/browser/constants.js",
+    search: "export const DEFAULT_MODEL_TARGET = 'GPT-5.4 Pro';",
+    replace: "export const DEFAULT_MODEL_TARGET = 'Pro';"
+  },
+  {
+    relativePath: "node_modules/@steipete/oracle/dist/src/cli/browserConfig.js",
+    search:
+      "const BROWSER_MODEL_LABELS = [\n    // Most specific first (e.g., \"gpt-5.2-thinking\" before \"gpt-5.2\")\n    ['gpt-5.4-pro', 'GPT-5.4 Pro'],\n    ['gpt-5.2-thinking', 'GPT-5.2 Thinking'],\n    ['gpt-5.2-instant', 'GPT-5.2 Instant'],\n    ['gpt-5.2-pro', 'GPT-5.4 Pro'],\n    ['gpt-5.1-pro', 'GPT-5.4 Pro'],\n    ['gpt-5-pro', 'GPT-5.4 Pro'],\n    // Base models last (least specific)\n    ['gpt-5.4', 'Thinking 5.4'],\n    ['gpt-5.2', 'GPT-5.2'], // Selects \"Auto\" in ChatGPT UI\n    ['gpt-5.1', 'GPT-5.2'], // Legacy alias → Auto\n    ['gemini-3-pro', 'Gemini 3 Pro'],\n    ['gemini-3-pro-deep-think', 'gemini-3-deep-think'],\n];",
+    replace:
+      "const BROWSER_MODEL_LABELS = [\n    // Current ChatGPT web surfaces model families in the top picker.\n    // Detailed thinking effort is selected separately from the composer pill.\n    ['gpt-5.4-pro', 'Pro'],\n    ['gpt-5.2-thinking', 'Thinking'],\n    ['gpt-5.2-instant', 'Auto'],\n    ['gpt-5.2-pro', 'Pro'],\n    ['gpt-5.1-pro', 'Pro'],\n    ['gpt-5-pro', 'Pro'],\n    ['gpt-5.4', 'Thinking'],\n    ['gpt-5.2', 'Auto'],\n    ['gpt-5.1', 'Auto'],\n    ['gemini-3-pro', 'Gemini 3 Pro'],\n    ['gemini-3-pro-deep-think', 'gemini-3-deep-think'],\n];"
+  },
+  {
+    relativePath: "node_modules/@steipete/oracle/dist/src/browser/actions/modelSelection.js",
+    search:
+      "            const available = (result.hint?.availableOptions ?? []).filter(Boolean);\n            const availableHint = available.length > 0 ? ` Available: ${available.join(', ')}.` : '';\n            const tempHint = isTemporary && /\\bpro\\b/i.test(desiredModel)\n                ? ' You are in Temporary Chat mode; Pro models are not available there. Remove \"temporary-chat=true\" from --chatgpt-url or use a non-Pro model (e.g. gpt-5.2).'\n                : '';\n            throw new Error(`Unable to find model option matching \"${desiredModel}\" in the model switcher.${availableHint}${tempHint}`);",
+    replace:
+      "            const available = (result.hint?.availableOptions ?? []).filter(Boolean);\n            const visibleMenus = (result.hint?.visibleMenus ?? []).filter(Boolean);\n            const buttonLabel = (result.hint?.buttonLabel ?? '').trim();\n            const selectorHint = result.hint?.selectorFound === false ? ' Model selector button was not found.' : '';\n            const buttonHint = buttonLabel ? ` Current button: ${buttonLabel}.` : '';\n            const menuHint = visibleMenus.length > 0 ? ` Visible menu text: ${visibleMenus.join(' | ')}.` : '';\n            const availableHint = available.length > 0 ? ` Visible options: ${available.join(', ')}.` : '';\n            const tempHint = isTemporary && /\\bpro\\b/i.test(desiredModel)\n                ? ' You are in Temporary Chat mode; Pro models are not available there. Remove \"temporary-chat=true\" from --chatgpt-url or use a non-Pro model (e.g. gpt-5.2).'\n                : '';\n            throw new Error(`Unable to find model option matching \"${desiredModel}\" in the model switcher.${selectorHint}${buttonHint}${menuHint}${availableHint}${tempHint}`);"
+  },
+  {
+    relativePath: "node_modules/@steipete/oracle/dist/src/browser/actions/modelSelection.js",
+    search:
+      "      const collectAvailableOptions = () => {\n        const menuRoots = Array.from(document.querySelectorAll(${menuContainerLiteral}));\n        const nodes = menuRoots.length > 0\n          ? menuRoots.flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})))\n          : Array.from(document.querySelectorAll(${menuItemLiteral}));\n        const labels = nodes\n          .map((node) => (node?.textContent ?? '').trim())\n          .filter(Boolean)\n          .filter((label, index, arr) => arr.indexOf(label) === index);\n        return labels.slice(0, 12);\n      };\n      const ensureMenuOpen = () => {",
+    replace:
+      "      const isVisibleNode = (node) => {\n        if (!(node instanceof HTMLElement) || typeof node.getBoundingClientRect !== 'function') {\n          return false;\n        }\n        const rect = node.getBoundingClientRect();\n        return rect.width > 0 && rect.height > 0;\n      };\n      const collectVisibleMenuText = () => {\n        return Array.from(document.querySelectorAll(${menuContainerLiteral}))\n          .filter((node) => isVisibleNode(node))\n          .map((node) => (node?.textContent ?? '').trim())\n          .filter(Boolean)\n          .slice(0, 4);\n      };\n      const collectAvailableOptions = () => {\n        const menuRoots = Array.from(document.querySelectorAll(${menuContainerLiteral})).filter((node) => isVisibleNode(node));\n        if (menuRoots.length === 0) {\n          return [];\n        }\n        const labels = menuRoots\n          .flatMap((root) => Array.from(root.querySelectorAll(${menuItemLiteral})))\n          .filter((node) => isVisibleNode(node))\n          .map((node) => (node?.textContent ?? '').trim())\n          .filter(Boolean)\n          .filter((label, index, arr) => arr.indexOf(label) === index);\n        return labels.slice(0, 12);\n      };\n      const ensureMenuOpen = () => {"
+  },
+  {
+    relativePath: "node_modules/@steipete/oracle/dist/src/browser/actions/modelSelection.js",
+    search:
+      "          resolve({\n            status: 'option-not-found',\n            hint: { temporaryChat: detectTemporaryChat(), availableOptions: collectAvailableOptions() },\n          });",
+    replace:
+      "          resolve({\n            status: 'option-not-found',\n            hint: {\n              temporaryChat: detectTemporaryChat(),\n              availableOptions: collectAvailableOptions(),\n              visibleMenus: collectVisibleMenuText(),\n              buttonLabel: getButtonLabel(),\n              selectorFound: Boolean(button),\n            },\n          });"
+  },
+  {
     relativePath: "node_modules/@steipete/oracle/dist/src/browser/index.js",
     search: "      valid: !onAuthPage && !hasLoginCta && hasTextarea,",
     replace: "      valid: !onAuthPage && hasTextarea,"
@@ -336,12 +369,18 @@ async function main() {
     const source = await readFile(filePath, "utf8");
     const isPromptComposerPatch =
       replacement.relativePath === "node_modules/@steipete/oracle/dist/src/browser/actions/promptComposer.js";
+    const isModelSelectionPatch =
+      replacement.relativePath === "node_modules/@steipete/oracle/dist/src/browser/actions/modelSelection.js";
     const promptComposerAlreadyPatched =
       isPromptComposerPatch &&
       (source.includes("prompt-not-in-composer") || source.includes("normalizePromptText"));
+    const modelSelectionAlreadyPatched =
+      isModelSelectionPatch &&
+      source.includes("const collectComposerModeLabels = () => {") &&
+      source.includes("const currentUiMatchesTarget = () => buttonMatchesTarget() || composerReflectsTarget();");
 
     if (replacement.replaceAll) {
-      if (promptComposerAlreadyPatched) {
+      if (promptComposerAlreadyPatched || modelSelectionAlreadyPatched) {
         continue;
       }
       if (!source.includes(replacement.search)) {
@@ -361,7 +400,7 @@ async function main() {
       continue;
     }
 
-    if (promptComposerAlreadyPatched) {
+    if (promptComposerAlreadyPatched || modelSelectionAlreadyPatched) {
       continue;
     }
 
@@ -385,10 +424,57 @@ async function main() {
       /(?:\n\s*stopAssistantPreviewMonitor = startAssistantPreviewMonitor\(Runtime, logger, promptText, baselineTurns \?\? undefined\);){2,}/g,
       "\n        stopAssistantPreviewMonitor = startAssistantPreviewMonitor(Runtime, logger, promptText, baselineTurns ?? undefined);"
     )
-    .replace(/(?:\n\s*stopAssistantPreviewMonitor\?\.\(\);){2,}/g, "\n        stopAssistantPreviewMonitor?.();");
+    .replace(/(?:\n\s*stopAssistantPreviewMonitor\?\.\(\);){2,}/g, "\n        stopAssistantPreviewMonitor?.();")
+    .replace(
+      /(function startAssistantPreviewMonitor\(Runtime, logger, promptText, minTurnIndex\) \{[\s\S]*?function summarizeAssistantPreview\(raw, promptEchoMatcher\) \{[\s\S]*?\n\}\n)(function startAssistantPreviewMonitor\(Runtime, logger, promptText, minTurnIndex\) \{[\s\S]*?function summarizeAssistantPreview\(raw, promptEchoMatcher\) \{[\s\S]*?\n\}\n)(?=async function readThinkingStatus)/,
+      "$1"
+    );
 
   if (normalizedBrowserIndex !== browserIndexSource) {
     await writeFile(browserIndexPath, normalizedBrowserIndex, "utf8");
+  }
+
+  const modelSelectionPath = path.join(
+    process.cwd(),
+    "node_modules/@steipete/oracle/dist/src/browser/actions/modelSelection.js"
+  );
+  const modelSelectionSource = await readFile(modelSelectionPath, "utf8");
+  const normalizedModelSelection = modelSelectionSource
+    .replace(
+      "    const button = document.querySelector(BUTTON_SELECTOR);\n    if (!button) {\n      return { status: 'button-missing' };\n    }\n\n    const closeMenu = () => {",
+      "    const button = document.querySelector(BUTTON_SELECTOR);\n    if (!button) {\n      return { status: 'button-missing' };\n    }\n\n    const isVisibleNode = (node) => {\n      if (!(node instanceof HTMLElement) || typeof node.getBoundingClientRect !== 'function') {\n        return false;\n      }\n      const rect = node.getBoundingClientRect();\n      return rect.width > 0 && rect.height > 0;\n    };\n    const hasVisibleMenu = () => Array.from(document.querySelectorAll(${menuContainerLiteral})).some((node) => isVisibleNode(node));\n    const collectComposerModeLabels = () => {\n      const selectors = [\n        '[data-testid=\"composer-footer-actions\"] button.__composer-pill[aria-haspopup=\"menu\"]',\n        '[data-testid=\"composer-footer-actions\"] .__composer-pill-composite button[aria-haspopup=\"menu\"]',\n        'button.__composer-pill[aria-haspopup=\"menu\"]',\n      ];\n      return selectors\n        .flatMap((selector) => Array.from(document.querySelectorAll(selector)))\n        .filter((node, index, arr) => arr.indexOf(node) === index)\n        .filter((node) => isVisibleNode(node))\n        .map((node) => (node?.textContent ?? '').trim())\n        .filter(Boolean);\n    };\n    const normalizeFamily = (value) => {\n      const normalized = normalizeText(value);\n      if (!normalized) {\n        return null;\n      }\n      if (normalized.includes('pro')) {\n        return 'pro';\n      }\n      if (normalized.includes('thinking')) {\n        return 'thinking';\n      }\n      if (normalized.includes('auto') || normalized.includes('instant')) {\n        return 'auto';\n      }\n      return null;\n    };\n    const desiredFamily = wantsPro ? 'pro' : wantsThinking ? 'thinking' : wantsInstant ? 'auto' : null;\n\n    const closeMenu = () => {\n      const menuExpanded = button.getAttribute?.('aria-expanded') === 'true';\n      if (!menuExpanded && !hasVisibleMenu()) {\n        return;\n      }"
+    )
+    .replace(
+      "    const getButtonLabel = () => (button.textContent ?? '').trim();\n    if (MODEL_STRATEGY === 'current') {\n      return { status: 'already-selected', label: getButtonLabel() };\n    }",
+      "    const getButtonLabel = () => (button.textContent ?? '').trim();\n    const composerReflectsTarget = () => {\n      if (!desiredFamily) {\n        return false;\n      }\n      return collectComposerModeLabels().some((label) => normalizeFamily(label) === desiredFamily);\n    };\n    const currentUiMatchesTarget = () => buttonMatchesTarget() || composerReflectsTarget();\n    const describeCurrentSelection = () => {\n      if (buttonMatchesTarget()) {\n        return getButtonLabel();\n      }\n      const composerLabel = collectComposerModeLabels().find((label) => normalizeFamily(label) === desiredFamily);\n      return composerLabel ?? getButtonLabel() ?? PRIMARY_LABEL;\n    };\n    if (MODEL_STRATEGY === 'current') {\n      return { status: 'already-selected', label: getButtonLabel() };\n    }"
+    )
+    .replace(
+      "    if (buttonMatchesTarget()) {\n      return { status: 'already-selected', label: getButtonLabel() };\n    }",
+      "    if (currentUiMatchesTarget()) {\n      return { status: 'already-selected', label: describeCurrentSelection() };\n    }"
+    )
+    .replace(
+      "      const menus = Array.from(document.querySelectorAll(${menuContainerLiteral}));\n      for (const menu of menus) {\n        const buttons = Array.from(menu.querySelectorAll(${menuItemLiteral}));",
+      "      const menus = Array.from(document.querySelectorAll(${menuContainerLiteral})).filter((node) => isVisibleNode(node));\n      for (const menu of menus) {\n        const buttons = Array.from(menu.querySelectorAll(${menuItemLiteral})).filter((node) => isVisibleNode(node));"
+    )
+    .replace(
+      "      const isVisibleNode = (node) => {\n        if (!(node instanceof HTMLElement) || typeof node.getBoundingClientRect !== 'function') {\n          return false;\n        }\n        const rect = node.getBoundingClientRect();\n        return rect.width > 0 && rect.height > 0;\n      };\n      const collectVisibleMenuText = () => {",
+      "      const collectVisibleMenuText = () => {"
+    )
+    .replace(
+      "      const ensureMenuOpen = () => {\n        const menuOpen = document.querySelector('[role=\"menu\"], [data-radix-collection-root]');\n        if (!menuOpen && performance.now() - lastPointerClick > REOPEN_INTERVAL_MS) {",
+      "      const ensureMenuOpen = () => {\n        const menuOpen = hasVisibleMenu() || button.getAttribute?.('aria-expanded') === 'true';\n        if (!menuOpen && performance.now() - lastPointerClick > REOPEN_INTERVAL_MS) {"
+    )
+    .replace(
+      "          if (optionIsSelected(match.node)) {\n            closeMenu();\n            resolve({ status: 'already-selected', label: getButtonLabel() || match.label });\n            return;\n          }",
+      "          if (optionIsSelected(match.node)) {\n            closeMenu();\n            resolve({ status: 'already-selected', label: describeCurrentSelection() || match.label });\n            return;\n          }"
+    )
+    .replace(
+      "          // Wait for the top bar label to reflect the requested model; otherwise keep scanning.\n          setTimeout(() => {\n            if (buttonMatchesTarget()) {\n              closeMenu();\n              resolve({ status: 'switched', label: getButtonLabel() || match.label });\n              return;\n            }\n            attempt();\n          }, Math.max(120, INITIAL_WAIT_MS));",
+      "          // Wait for the current UI to reflect the requested model family; otherwise keep scanning.\n          setTimeout(() => {\n            if (currentUiMatchesTarget()) {\n              closeMenu();\n              resolve({ status: 'switched', label: describeCurrentSelection() || match.label });\n              return;\n            }\n            const selectedMatch = findBestOption();\n            if (selectedMatch && optionIsSelected(selectedMatch.node)) {\n              closeMenu();\n              resolve({ status: 'switched', label: selectedMatch.label || match.label });\n              return;\n            }\n            attempt();\n          }, Math.max(120, INITIAL_WAIT_MS));"
+    );
+
+  if (normalizedModelSelection !== modelSelectionSource) {
+    await writeFile(modelSelectionPath, normalizedModelSelection, "utf8");
   }
 
   const promptComposerPath = path.join(

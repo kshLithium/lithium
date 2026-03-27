@@ -167,7 +167,7 @@ describe("strategist-context", () => {
     expect(resolved).toContain("/tmp/ws/reports/metrics.csv");
   });
 
-  it("does not treat explicitly mentioned zip workspace files as direct uploads", () => {
+  it("keeps explicitly mentioned zip workspace files as reference candidates for digesting", () => {
     const resolved = resolveRelevantStrategistWorkspaceFiles({
       prompt: "Inspect artifacts/context.zip before deciding the next step.",
       workspacePath: "/tmp/ws",
@@ -191,7 +191,7 @@ describe("strategist-context", () => {
       contextHints: []
     });
 
-    expect(resolved).not.toContain("/tmp/ws/artifacts/context.zip");
+    expect(resolved).toContain("/tmp/ws/artifacts/context.zip");
   });
 
   it("prefers active attachments over older consumed ones for strategist uploads", () => {

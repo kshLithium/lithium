@@ -12,8 +12,12 @@ export const BUILDER_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as c
 export const PREFERRED_STRATEGIST_MODEL: OracleModel = "gpt-5.4-pro";
 export const PREFERRED_STRATEGIST_THINKING_TIME: OracleThinkingTime = "extended";
 
+const STRATEGIST_MODEL_DISPLAY_LABELS: Record<OracleModel, string> = {
+  "gpt-5.4-pro": "Pro"
+};
+
 export const STRATEGIST_MODEL_OPTIONS: ReadonlyArray<{ value: OracleModel; label: string }> = [
-  { value: "gpt-5.4-pro", label: "GPT-5.4 Pro" }
+  { value: "gpt-5.4-pro", label: getStrategistModelDisplayLabel("gpt-5.4-pro") }
 ];
 
 export const BUILDER_MODEL_OPTIONS: ReadonlyArray<{ value: BuilderModel; label: string }> = [
@@ -64,6 +68,14 @@ export function normalizeStrategistModel(_value?: unknown): OracleModel {
 
 export function normalizeStrategistThinkingTime(_value?: unknown): OracleThinkingTime {
   return PREFERRED_STRATEGIST_THINKING_TIME;
+}
+
+export function getStrategistModelDisplayLabel(model: OracleModel): string {
+  return STRATEGIST_MODEL_DISPLAY_LABELS[model];
+}
+
+export function getStrategistPerspectiveLabel(model: OracleModel): string {
+  return `${getStrategistModelDisplayLabel(model)} strategist`;
 }
 
 export function getStrategistThinkingTimeValues(model: OracleModel): readonly OracleThinkingTime[] {

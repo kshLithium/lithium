@@ -647,8 +647,10 @@ describe("AppService automation loop", () => {
         }
       );
 
-      const consultInput = oracleRunner.consult.mock.calls.at(-1)?.[0];
-      expect(consultInput.files).toContain(path.join(workspacePath, "attachments", threadId, "chart.png"));
+      const consultInput = oracleRunner.consult.mock.calls.at(-1)?.[0]!;
+      expect(consultInput.files).toContain(
+        path.join(workspacePath, "attachments", threadId!, "chart.png")
+      );
       expect(consultInput.files.join("\n")).not.toContain("bundle.zip");
       expect(consultInput.prompt).toContain("직접 업로드");
       expect(consultInput.prompt).toContain("bundle.zip");
@@ -1591,6 +1593,7 @@ describe("AppService automation loop", () => {
     expect(prompt).not.toMatch(
       /^Research more diverse approaches and keep the strategist actively advising\./
     );
+    expect(prompt).toContain("Pro strategist perspective");
     expect(prompt).toContain("Do not begin by repeating that goal wording verbatim;");
   });
 

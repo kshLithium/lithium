@@ -5,6 +5,7 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 import yauzl from "yauzl";
 import {
+  getStrategistPerspectiveLabel,
   isBuilderModel,
   isBuilderReasoningEffort,
   normalizeStrategistModel,
@@ -7517,6 +7518,7 @@ export function buildAutomationContinuationAdvisorPrompt(input: {
     input.runSummary.trim() ||
     extractRunSummary(input.latestRun?.finalMessage || "");
   const latestCheckpointSummary = input.latestCheckpoint?.summary?.trim() || "";
+  const strategistPerspective = getStrategistPerspectiveLabel("gpt-5.4-pro");
   const promptLanguage = resolveAutomationPromptLanguage(input.languagePreference, [
     latestInstruction,
     latestDecisionSummary,
@@ -7556,7 +7558,7 @@ export function buildAutomationContinuationAdvisorPrompt(input: {
       input.runRisks.length ? formatPromptList("Failure risks", input.runRisks) : "",
       input.runActions.length ? formatPromptList("Suggested next actions", input.runActions) : "",
       "이 자동 연구는 continuous 모드이며, 웬만하면 여기서 멈추지 말고 계속 진행해야 합니다.",
-      "지금 상황을 큰 분기로 보고 gpt-5.4-pro 관점에서 다음 방향을 하나 정하세요.",
+      `지금 상황을 큰 분기로 보고 ${strategistPerspective} 관점에서 다음 방향을 하나 정하세요.`,
       "답변 첫 문장을 위 목표 문구의 반복으로 시작하지 말고, 현재 상태 변화와 판단으로 바로 들어가세요.",
       "응답의 맨 앞에는 사용자가 읽을 짧은 진행 보고를 같은 언어로 자연스럽게 적고, 그 뒤에는 왜 그 방향이 맞는지와 바로 실행할 다음 bounded step을 정리하세요.",
       "외부 의존성이나 실제 사용자 선호가 없으면 진행 자체가 불가능한 경우에만 다시 물어보세요. 그때만 needs_user_checkpoint=true 또는 automation_mode=checkpoint/blocked를 쓰세요.",
@@ -7575,7 +7577,7 @@ export function buildAutomationContinuationAdvisorPrompt(input: {
     input.runRisks.length ? formatPromptList("Failure risks", input.runRisks) : "",
     input.runActions.length ? formatPromptList("Suggested next actions", input.runActions) : "",
     "This automation is in continuous mode, so it should keep moving unless there is a truly blocking reason to stop.",
-    "Treat the current situation as a major branch and decide the next direction from a gpt-5.4-pro research perspective.",
+    `Treat the current situation as a major branch and decide the next direction from a ${strategistPerspective} perspective.`,
     "Do not begin by repeating that goal wording verbatim; translate it into the current state change and judgment immediately.",
     "Start your answer with a brief user-facing progress update in the same language as the recent chat, then explain why that direction is right and name the next bounded step that should run immediately.",
     "Only ask the user again if an external dependency or a real preference choice makes progress impossible. Only in that case should you use needs_user_checkpoint=true or automation_mode=checkpoint/blocked.",

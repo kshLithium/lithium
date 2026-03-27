@@ -25,7 +25,7 @@ describe("AppSettingsStore sanitizers", () => {
     ).toBe("auto");
   });
 
-  it("defaults strategist settings to GPT-5.4 Pro extended", () => {
+  it("defaults strategist settings to Pro extended", () => {
     expect(DEFAULT_APP_SETTINGS.strategistModel).toBe("gpt-5.4-pro");
     expect(DEFAULT_APP_SETTINGS.strategistReasoningIntensity).toBe("extended");
     expect(sanitizeAppSettings({})).toMatchObject({
@@ -34,7 +34,7 @@ describe("AppSettingsStore sanitizers", () => {
     });
   });
 
-  it("normalizes legacy strategist settings to GPT-5.4 Pro extended", () => {
+  it("normalizes legacy strategist settings to Pro extended", () => {
     expect(
       sanitizeAppSettings({
         strategistModel: "legacy-model",
