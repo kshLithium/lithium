@@ -204,6 +204,47 @@ describe("ProjectStore", () => {
     expect(runtimeContext.content).not.toContain("Key Files:");
   });
 
+  it("does not duplicate the live user request inside runtime context conversation scaffolding", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+
+    const project = await store.initProject(workspace);
+    const firstEntry = await store.allocateConversationEntry(workspace);
+    await store.writeConversationEntry(workspace, {
+      id: firstEntry.id,
+      threadId: project.activeThreadId,
+      role: "user",
+      source: "user",
+      body: "Research more diverse approaches and keep the strategist actively advising.",
+      createdAt: "2026-03-28T00:00:00.000Z"
+    });
+    const secondEntry = await store.allocateConversationEntry(workspace);
+    await store.writeConversationEntry(workspace, {
+      id: secondEntry.id,
+      threadId: project.activeThreadId,
+      role: "assistant",
+      source: "orchestrator",
+      body: "The latest bounded run finished and I am deciding what to do next.",
+      createdAt: "2026-03-28T00:00:01.000Z"
+    });
+
+    const runtimeContext = await store.buildRuntimeContext(
+      workspace,
+      "Research more diverse approaches and keep the strategist actively advising.",
+      { lane: "builder" }
+    );
+
+    expect(runtimeContext.content).toContain(
+      "Guidance: use this request directly, but do not begin by repeating it verbatim."
+    );
+    expect(runtimeContext.content).toContain(
+      "The latest bounded run finished and I am deciding what to do next."
+    );
+    expect(runtimeContext.content).not.toContain(
+      "- User: Research more diverse approaches and keep the strategist actively advising."
+    );
+  });
+
   it("prefers the latest meaningful research run over a newer operational failure in runtime context and session summary", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
@@ -383,6 +424,36 @@ describe("ProjectStore", () => {
     expect(bundle).toContain("metrics.csv");
     expect(bundle).toContain("report.pdf");
     expect(bundle).toContain("Document attachment. Reference the file path directly when asking the model to inspect it.");
+  });
+
+  it("keeps recently consumed thread attachments in strategist runtime and context packs", async () => {
+    const workspace = await createWorkspace();
+    const sourceDir = await createTempDir("lithium-consumed-attachment-source-");
+    const store = new ProjectStore();
+
+    await store.initProject(workspace);
+    const snapshot = await store.getSnapshot(workspace);
+    const notesPath = path.join(sourceDir, "handoff-notes.md");
+
+    await writeFile(notesPath, "Keep this file visible even after the first strategist turn.\n", "utf8");
+
+    const [imported] = await store.importAttachments(workspace, snapshot.activeThreadId!, [notesPath]);
+    await store.consumeAttachments(workspace, [imported.id], {
+      conversationEntryId: undefined,
+      decisionId: "D001",
+      runId: undefined
+    });
+
+    const runtimeContext = await store.buildRuntimeContext(workspace, "Use the prior evidence again.", {
+      lane: "strategist"
+    });
+    const [bundlePath] = await store.buildContextBundle(workspace, "Use the prior evidence again.");
+    const bundle = await readFile(bundlePath, "utf8");
+
+    expect(runtimeContext.content).toContain("attachments/TH001/handoff-notes.md");
+    expect(runtimeContext.content).toContain("[text, consumed]");
+    expect(bundle).toContain("attachments/TH001/handoff-notes.md");
+    expect(bundle).toContain("Status: consumed");
   });
 
   it("skips malformed record files instead of failing the snapshot", async () => {

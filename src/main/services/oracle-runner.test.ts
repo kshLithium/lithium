@@ -242,7 +242,7 @@ describe("OracleRunner", () => {
     expect(command.args).toContain("always");
     expect(command.args).not.toContain("--browser-inline-files");
     expect(command.args).toContain("--browser-model-strategy");
-    expect(command.args).toContain("current");
+    expect(command.args).toContain("select");
     expect(command.args).toContain("--browser-thinking-time");
     expect(command.args).toContain("extended");
     expect(command.args).toContain("--chatgpt-url");

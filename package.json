@@ -41,12 +41,14 @@
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "yauzl": "^2.10.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
+    "@types/yauzl": "^2.10.3",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
     "cross-env": "^10.0.0",

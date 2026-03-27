@@ -68,4 +68,28 @@ describe("RouterRunner", () => {
       reasonShort: "Router output was malformed, so the message fell back to strategist."
     });
   });
+
+  it("tells the router to preserve concrete constraints in rewritten prompts", () => {
+    const runner = new RouterRunner();
+    const prompt = (runner as any).normalizePrompt({
+      prompt: "Compare metrics.csv with baseline.csv and keep the 0.75 threshold.",
+      activeThreadSummary: "",
+      threadMemory: "",
+      latestDecisionSummary: "",
+      latestTaskPrompt: "",
+      latestRunSummary: "",
+      latestRunStatus: "",
+      automationStatus: "",
+      automationStepSummary: "",
+      automationCheckpointSummary: "",
+      stdoutPath: "",
+      stderrPath: "",
+      outputPath: "",
+      attachments: []
+    });
+
+    expect(prompt).toContain("Preserve concrete constraints and evidence in `rewritten_prompt`");
+    expect(prompt).toContain("filenames");
+    expect(prompt).toContain("user-imposed limits");
+  });
 });

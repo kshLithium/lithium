@@ -111,6 +111,7 @@ export class RouterRunner {
       "If analysis is only part of doing the edit, choose `builder`.",
       "For short follow-ups like `continue`, `go ahead`, or `do it`, choose `builder` only when the latest context already contains an executable builder task or unfinished builder run. Otherwise choose `strategist`.",
       "Keep `rewritten_prompt` faithful to the user intent but make it clearer for the chosen lane.",
+      "Preserve concrete constraints and evidence in `rewritten_prompt`: filenames, datasets, error strings, metrics, comparison targets, quoted text, and user-imposed limits should not be compressed away.",
       "Return exactly this marker and one JSON object:",
       "LITHIUM_ROUTE",
       '{"route":"strategist|builder|mixed","rewritten_prompt":"...","reason_short":"..."}',

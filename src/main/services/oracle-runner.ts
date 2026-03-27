@@ -315,7 +315,7 @@ export class OracleRunner {
 
     args.push(
       "--browser-model-strategy",
-      "current",
+      "select",
       "--browser-auto-reattach-delay",
       "5s",
       "--browser-auto-reattach-interval",

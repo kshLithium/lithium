@@ -105,6 +105,8 @@ type ContextPackOptions = {
 type RuntimeContextOptions = {
   lane?: ContextPackLane | "router";
   artifactId?: string;
+  strategistSelectedUploadLines?: string[];
+  strategistSkippedUploadLines?: string[];
 };
 
 export class ProjectStore {
@@ -827,7 +829,15 @@ export class ProjectStore {
     const workspaceFiles =
       lane === "strategist" ? await this.listWorkspaceFiles(workspacePath) : [];
     const memory = snapshot.memory;
+    const normalizedPrompt = normalizeContextComparable(prompt);
     const recentConversation = (snapshot.conversationEntries ?? [])
+      .filter((entry) => {
+        if (entry.role !== "user") {
+          return true;
+        }
+
+        return normalizeContextComparable(entry.body) !== normalizedPrompt;
+      })
       .slice(-6)
       .map((entry) => {
         const speaker =
@@ -835,6 +845,10 @@ export class ProjectStore {
         return `- ${speaker}: ${truncateInline(entry.body, 220)}`;
       })
       .join("\n") || "- none";
+    const recentUserSteering = summarizeRecentRuntimeUserMessages(
+      snapshot.conversationEntries ?? [],
+      normalizedPrompt
+    );
     const contextLanguage = resolveContextLanguage([
       prompt,
       recentConversation,
@@ -852,8 +866,11 @@ export class ProjectStore {
     const latestOperationalRun =
       snapshot.latestRun && snapshot.latestRun.id !== latestContextRun?.id ? snapshot.latestRun : null;
     const latestCycle = snapshot.latestAutomationCycle ?? null;
-    const attachmentLines = snapshot.activeThreadAttachments.length
-      ? snapshot.activeThreadAttachments
+    const threadAttachments = snapshot.attachments
+      .filter((record) => record.threadId === snapshot.activeThreadId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const attachmentLines = threadAttachments.length
+      ? threadAttachments
           .slice(0, 8)
           .map((record) => formatRuntimeAttachment(record))
           .join("\n")
@@ -892,8 +909,7 @@ export class ProjectStore {
           ].filter((line): line is string => Boolean(line));
     const keyFiles =
       lane === "strategist"
-        ? workspaceFiles
-            .filter((file) => !file.relativePath.startsWith(".lithium/"))
+        ? prioritizeContextKeyFiles(workspaceFiles, latestRunChangedFiles)
             .slice(0, 12)
             .map((file) => `- ${file.relativePath} (${file.kind})`)
             .join("\n") || "- none"
@@ -911,6 +927,20 @@ export class ProjectStore {
             900
           ) || "none"
         : "none";
+    const strategistSubmissionSummary =
+      lane === "strategist" &&
+      (options.strategistSelectedUploadLines?.length || options.strategistSkippedUploadLines?.length)
+        ? [
+            options.strategistSelectedUploadLines?.length
+              ? ["Direct uploads for this turn:", ...options.strategistSelectedUploadLines].join("\n")
+              : "",
+            options.strategistSkippedUploadLines?.length
+              ? ["Skipped direct uploads for this turn:", ...options.strategistSkippedUploadLines].join("\n")
+              : ""
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        : "";
     const note = [
       "# Runtime Context",
       `Lane: ${lane}`,
@@ -919,6 +949,7 @@ export class ProjectStore {
       "",
       "## User Request",
       prompt.trim() || "none",
+      prompt.trim() ? "Guidance: use this request directly, but do not begin by repeating it verbatim." : "",
       "",
       "## Project Memory",
       memory
@@ -950,6 +981,9 @@ export class ProjectStore {
           ].join("\n")
         : "No active thread yet.",
       "",
+      "## Recent User Steering",
+      recentUserSteering,
+      "",
       "## Recent Conversation",
       recentConversation,
       "",
@@ -961,6 +995,9 @@ export class ProjectStore {
       lane === "strategist" ? "" : "",
       lane === "strategist" ? "## README Excerpt" : "",
       lane === "strategist" ? readmeExcerpt : "",
+      strategistSubmissionSummary ? "" : "",
+      strategistSubmissionSummary ? "## Strategist Submission" : "",
+      strategistSubmissionSummary,
       "",
       "## Active Attachments",
       attachmentLines
@@ -987,18 +1024,21 @@ export class ProjectStore {
     const packPath = options.artifactId
       ? path.join(paths.contextDir, `${options.artifactId}.${lane}.md`)
       : paths.contextBundle;
-    const keyFiles = workspaceFiles
-      .filter((file) => !file.relativePath.startsWith(".lithium/"))
+    const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
+    const latestRunChangedFiles = latestContextRun?.changedFiles ?? [];
+    const prioritizedKeyFiles = prioritizeContextKeyFiles(workspaceFiles, latestRunChangedFiles);
+    const keyFiles = prioritizedKeyFiles
       .slice(0, 16)
       .map((file) => `- ${file.relativePath} (${file.kind})`)
       .join("\n");
+    const threadAttachments = snapshot.attachments
+      .filter((record) => record.threadId === snapshot.activeThreadId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const otherThreads = snapshot.threads.filter((thread) => thread.id !== snapshot.activeThreadId);
     const latestDecisionHandoff = deriveDecisionHandoff(snapshot.latestDecision);
     const latestDecisionSummary = snapshot.latestDecision?.summary?.trim() || "";
     const latestDecisionReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 500);
-    const latestContextRun = resolveLatestMeaningfulBuilderRun(snapshot.runs);
     const latestRunHandoff = deriveRunHandoff(latestContextRun);
-    const latestRunChangedFiles = latestContextRun?.changedFiles ?? [];
     const latestCycle = snapshot.latestAutomationCycle ?? null;
     const contextLanguage = resolveContextLanguage([
       prompt,
@@ -1015,8 +1055,8 @@ export class ProjectStore {
       latestCycle
         ? `Latest automation cycle: ${latestCycle.id} (${latestCycle.phase}) — ${latestCycle.summary || "none"}`
         : "Latest automation cycle: none",
-      snapshot.activeThreadAttachments.length
-        ? `Attachments: ${snapshot.activeThreadAttachments.map((record) => record.relativePath).join(", ")}`
+      threadAttachments.length
+        ? `Attachments: ${threadAttachments.slice(0, 8).map((record) => record.relativePath).join(", ")}`
         : "Attachments: none"
     ].join("\n");
 
@@ -1069,8 +1109,8 @@ export class ProjectStore {
       },
       {
         title: "## Thread Attachments",
-        body: snapshot.activeThreadAttachments.length
-          ? snapshot.activeThreadAttachments
+        body: threadAttachments.length
+          ? threadAttachments
               .slice(0, 8)
               .map((record) => formatAttachment(record))
               .join("\n\n")
@@ -1179,7 +1219,11 @@ export class ProjectStore {
     );
     const conversationEntries = (await this.readRecordDirectory<ConversationEntryRecord>(paths.conversationEntriesDir))
       .filter((record) => record.threadId === activeThreadId)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) ||
+          left.id.localeCompare(right.id)
+      );
     const decisions = (await this.readRecordDirectory<DecisionRecord>(paths.decisionsDir))
       .map((record) => normalizeDecisionRecord(record, project.defaultThreadId))
       .filter((record) => record.threadId === activeThreadId);
@@ -2067,6 +2111,7 @@ function formatAttachment(record: AttachmentRecord) {
   return [
     `- ${record.name} (${record.kind}, ${formatAttachmentSize(record.sizeBytes)})`,
     `  Path: ${record.relativePath}`,
+    `  Status: ${record.consumedAt ? `consumed at ${record.consumedAt}` : "active"}`,
     `  Source: ${record.sourcePath}`,
     `  Preview: ${record.excerpt || "none"}`
   ].join("\n");
@@ -2074,7 +2119,38 @@ function formatAttachment(record: AttachmentRecord) {
 
 function formatRuntimeAttachment(record: AttachmentRecord) {
   const excerpt = record.excerpt ? ` — ${truncateRuntimeExcerpt(record.excerpt, 120)}` : "";
-  return `- ${record.relativePath} [${record.kind}]${excerpt}`;
+  const status = record.consumedAt ? "consumed" : "active";
+  return `- ${record.relativePath} [${record.kind}, ${status}]${excerpt}`;
+}
+
+function summarizeRecentRuntimeUserMessages(
+  entries: ConversationEntryRecord[],
+  normalizedPrompt: string,
+  maxItems = 4
+) {
+  const seen = new Set<string>();
+
+  const messages = [...entries]
+    .reverse()
+    .filter((entry) => entry.role === "user")
+    .map((entry) => truncateInline(entry.body, 220))
+    .map((body) => body.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((body) => normalizeContextComparable(body) !== normalizedPrompt)
+    .filter((body) => {
+      const normalized = body.toLowerCase();
+
+      if (!normalized || seen.has(normalized)) {
+        return false;
+      }
+
+      seen.add(normalized);
+      return true;
+    })
+    .slice(0, maxItems)
+    .reverse();
+
+  return messages.length ? messages.map((body) => `- ${body}`).join("\n") : "- none";
 }
 
 function formatAttachmentSize(sizeBytes: number) {
@@ -2168,6 +2244,10 @@ function isRedundantInlineSummary(left: string, right: string) {
   );
 }
 
+function normalizeContextComparable(value: string) {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 function truncateInline(value: string, maxLength: number) {
   const normalized = value.replace(/\s+/g, " ").trim();
 
@@ -2180,6 +2260,26 @@ function truncateInline(value: string, maxLength: number) {
 
 function compactList(values: string[]) {
   return values.map((value) => value.trim()).filter(Boolean);
+}
+
+function prioritizeContextKeyFiles(workspaceFiles: WorkspaceFileRecord[], latestChangedFiles: string[]) {
+  const latestChangedSet = new Set(latestChangedFiles.map((value) => value.trim()).filter(Boolean));
+  const readmeFiles = workspaceFiles.filter(
+    (file) => !file.relativePath.startsWith(".lithium/") && /^readme(\.[^.]+)?$/i.test(file.name)
+  );
+  const changedFiles = workspaceFiles.filter(
+    (file) => !file.relativePath.startsWith(".lithium/") && latestChangedSet.has(file.relativePath)
+  );
+  const remainingFiles = workspaceFiles.filter(
+    (file) =>
+      !file.relativePath.startsWith(".lithium/") &&
+      !latestChangedSet.has(file.relativePath) &&
+      !/^readme(\.[^.]+)?$/i.test(file.name)
+  );
+
+  return [...new Map(
+    [...readmeFiles, ...changedFiles, ...remainingFiles].map((file) => [file.relativePath, file])
+  ).values()];
 }
 
 function logsToLines(lines: string[] | undefined, maxCount: number) {
