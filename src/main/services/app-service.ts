@@ -62,8 +62,17 @@ import {
   handoffUserMessage,
   isOperationalAutomationMessage
 } from "../../shared/handoff-utils";
+import {
+  sanitizePromptEchoProgress,
+  stripLeadingPromptEchoParagraph
+} from "../../shared/prompt-echo";
 import { ProjectStore } from "./project-store";
-import { OracleRunner, normalizeOracleSessionId, resolveOracleLaunchOptions } from "./oracle-runner";
+import {
+  OracleRunner,
+  normalizeOracleSessionId,
+  readOracleSessionError,
+  resolveOracleLaunchOptions
+} from "./oracle-runner";
 import { CodexRunner } from "./codex-runner";
 import { parseCodexProgressLog } from "./codex-progress";
 import { RouterRunner } from "./router-runner";
@@ -123,6 +132,7 @@ type ActiveChatProgress = {
   operationId: string;
   lane: "orchestrator" | "router" | "strategist" | "builder";
   threadId: string;
+  promptPreview?: string;
   progressSummary: string;
   progressDetails: string[];
   activeCommand: string | null;
@@ -417,7 +427,11 @@ export class AppService {
     await this.writeRunningAutomationSession(workspacePath, session, {
       currentStepSummary:
         session.status === "idle" ? "Automation started. Planning the next bounded step." : session.currentStepSummary,
-      startedAt: session.startedAt ?? new Date().toISOString()
+      startedAt: session.startedAt ?? new Date().toISOString(),
+      budget: {
+        ...session.budget,
+        usedRetries: 0
+      }
     });
     await this.store.appendPromptLog(workspacePath, {
       kind: "automation.session.started",
@@ -453,7 +467,11 @@ export class AppService {
     controller.pauseRequested = false;
     controller.stopRequested = false;
     await this.writeRunningAutomationSession(workspacePath, session, {
-      currentStepSummary: "Automation resumed."
+      currentStepSummary: "Automation resumed.",
+      budget: {
+        ...session.budget,
+        usedRetries: 0
+      }
     });
     await this.store.appendActivity(workspacePath, `${session.id} automation resumed`);
     await this.store.updateSessionSummary(workspacePath);
@@ -634,7 +652,11 @@ export class AppService {
       latestCheckpointId: undefined,
       currentStepSummary: "Checkpoint approved. Continuing automation.",
       lastUserInstruction: response || session.lastUserInstruction,
-      queuedUserInstruction: response || session.queuedUserInstruction
+      queuedUserInstruction: response || session.queuedUserInstruction,
+      budget: {
+        ...session.budget,
+        usedRetries: 0
+      }
     });
     await this.appendAutomationStatusEntry(workspacePath, {
       session,
@@ -845,6 +867,7 @@ export class AppService {
     this.setChatProgress(input.workspacePath, {
       lane: "orchestrator",
       threadId: activeThread.id,
+      promptPreview: displayPrompt,
       progressSummary: "",
       progressDetails: [],
       activeCommand: null,
@@ -944,6 +967,7 @@ export class AppService {
     this.setChatProgress(input.workspacePath, {
       lane: "orchestrator",
       threadId: input.activeThread.id,
+      promptPreview: input.prompt,
       progressSummary: "",
       progressDetails: [],
       activeCommand: null,
@@ -1018,9 +1042,8 @@ export class AppService {
           directReply ||
           localizeAutomationStartReply(input.prompt);
 
-        await this.appendConversationEntry(input.workspacePath, {
+        await this.appendAssistantConversationEntry(input.workspacePath, {
           threadId: input.activeThread.id,
-          role: "assistant",
           source: "automation",
           body: reply,
           automationSessionId: sessionId
@@ -1036,9 +1059,8 @@ export class AppService {
       if (!workerDelegations.length) {
         const reply = directReply || "I reviewed the latest workspace state, but I do not have a clearer answer yet.";
 
-        await this.appendConversationEntry(input.workspacePath, {
+        await this.appendAssistantConversationEntry(input.workspacePath, {
           threadId: input.activeThread.id,
-          role: "assistant",
           source: "orchestrator",
           body: reply
         });
@@ -1068,9 +1090,8 @@ export class AppService {
           (liveDelegation
             ? summarizeLiveWorkerStartForConversation(liveDelegation, workerTurn.snapshot)
             : summarizeWorkerSnapshotsForConversation(workerDelegations, workerTurn.snapshot));
-        await this.appendConversationEntry(input.workspacePath, {
+        await this.appendAssistantConversationEntry(input.workspacePath, {
           threadId: input.activeThread.id,
-          role: "assistant",
           source: "orchestrator",
           body: reply,
           runId: workerTurn.snapshot.latestRun?.id
@@ -1107,6 +1128,7 @@ export class AppService {
       this.setChatProgress(input.workspacePath, {
         lane: "orchestrator",
         threadId: input.activeThread.id,
+        promptPreview: input.prompt,
         progressSummary: "",
         progressDetails: [],
         activeCommand: null,
@@ -1150,9 +1172,8 @@ export class AppService {
         ? workerTurn.snapshot.latestRun?.id
         : undefined;
 
-      await this.appendConversationEntry(input.workspacePath, {
+      await this.appendAssistantConversationEntry(input.workspacePath, {
         threadId: input.activeThread.id,
-        role: "assistant",
         source: "orchestrator",
         body: reply,
         decisionId: relatedDecisionId,
@@ -1227,6 +1248,27 @@ export class AppService {
     return entry;
   }
 
+  private async appendAssistantConversationEntry(
+    workspacePath: string,
+    input: Omit<ConversationEntryRecord, "id" | "createdAt" | "role" | "body"> & {
+      threadId: string;
+      body: string;
+    }
+  ) {
+    const latestUserBody = await this.findLatestThreadUserBody(workspacePath, input.threadId);
+    const body = stripLeadingPromptEchoParagraph(sanitizeConversationBody(input.body), latestUserBody);
+
+    if (!body) {
+      return null;
+    }
+
+    return await this.appendConversationEntry(workspacePath, {
+      ...input,
+      role: "assistant",
+      body
+    });
+  }
+
   private async appendAutomationStatusEntry(
     workspacePath: string,
     input: {
@@ -1245,7 +1287,7 @@ export class AppService {
 
     return await this.appendConversationEntry(workspacePath, {
       threadId: input.session.threadId,
-      role: "system",
+      role: "assistant",
       source: input.checkpoint ? "checkpoint" : "system",
       body,
       automationSessionId: input.session.id,
@@ -1266,24 +1308,10 @@ export class AppService {
       stepId?: string;
     }
   ) {
-    const body = sanitizeConversationBody(input.body);
-
-    if (!body) {
-      return null;
-    }
-
-    const latestUserBody = await this.findLatestThreadUserBody(workspacePath, input.session.threadId);
-    const sanitizedBody = stripLeadingUserEchoFromAssistantBody(body, latestUserBody);
-
-    if (!sanitizedBody) {
-      return null;
-    }
-
-    return await this.appendConversationEntry(workspacePath, {
+    return await this.appendAssistantConversationEntry(workspacePath, {
       threadId: input.session.threadId,
-      role: "assistant",
       source: "automation",
-      body: sanitizedBody,
+      body: input.body,
       decisionId: input.decisionId,
       runId: input.runId,
       automationSessionId: input.session.id,
@@ -1478,6 +1506,7 @@ export class AppService {
       this.setChatProgress(input.workspacePath, {
         lane: "strategist",
         threadId: input.activeThread.id,
+        promptPreview: input.prompt,
         progressSummary: "",
         progressDetails: [],
         activeCommand: null,
@@ -1510,6 +1539,7 @@ export class AppService {
       this.setChatProgress(input.workspacePath, {
         lane: "builder",
         threadId: input.activeThread.id,
+        promptPreview: input.prompt,
         progressSummary: "",
         progressDetails: [],
         activeCommand: null,
@@ -1539,6 +1569,7 @@ export class AppService {
     this.setChatProgress(input.workspacePath, {
       lane: "builder",
       threadId: input.activeThread.id,
+      promptPreview: input.prompt,
       progressSummary: "",
       progressDetails: [],
       activeCommand: null,
@@ -1712,6 +1743,7 @@ export class AppService {
       this.setChatProgress(workspacePath, {
         lane: "router",
         threadId: activeThread.id,
+        promptPreview: request.prompt,
         progressSummary: "",
         progressDetails: [],
         activeCommand: null
@@ -1767,6 +1799,7 @@ export class AppService {
           this.setChatProgress(workspacePath, {
             lane: "builder",
             threadId: activeThread.id,
+            promptPreview: builderDisplayPrompt,
             progressSummary: "",
             progressDetails: [],
             activeCommand: null
@@ -1796,6 +1829,7 @@ export class AppService {
           this.setChatProgress(workspacePath, {
             lane: "builder",
             threadId: activeThread.id,
+            promptPreview: request.prompt,
             progressSummary: "",
             progressDetails: [],
             activeCommand: null
@@ -1887,6 +1921,7 @@ export class AppService {
       this.setChatProgress(workspacePath, {
         lane: "strategist",
         threadId: progressThreadId,
+        promptPreview: request.displayPrompt ?? request.prompt,
         progressSummary: "",
         progressDetails: [],
         activeCommand: null,
@@ -1900,6 +1935,7 @@ export class AppService {
         this.setChatProgress(workspacePath, {
           lane: "strategist",
           threadId: progressThreadId,
+          promptPreview: request.displayPrompt ?? request.prompt,
           progressSummary: "",
           progressDetails: [],
           activeCommand: null,
@@ -1974,6 +2010,7 @@ export class AppService {
         this.setChatProgress(workspacePath, {
           lane: "strategist",
           threadId: activeThread.id,
+          promptPreview: request.displayPrompt ?? request.prompt,
           progressSummary: "",
           progressDetails: [],
           activeCommand: null,
@@ -2000,6 +2037,7 @@ export class AppService {
         this.setChatProgress(workspacePath, {
           lane: "strategist",
           threadId: activeThread.id,
+          promptPreview: request.displayPrompt ?? request.prompt,
           progressSummary: "",
           progressDetails: [],
           activeCommand: null,
@@ -2150,6 +2188,7 @@ export class AppService {
         this.setChatProgress(workspacePath, {
           lane: "builder",
           threadId: activeThread.id,
+          promptPreview: displayPrompt,
           progressSummary: "",
           progressDetails: [],
           activeCommand: null,
@@ -2380,6 +2419,7 @@ export class AppService {
       this.setChatProgress(workspacePath, {
         lane: "builder",
         threadId: activeThread.id,
+        promptPreview: displayPrompt,
         progressSummary: "",
         progressDetails: [],
         activeCommand: null,
@@ -2572,7 +2612,9 @@ export class AppService {
       progress.stdoutPath ? readTailText(progress.stdoutPath) : Promise.resolve(""),
       progress.stderrPath ? readTailText(progress.stderrPath) : Promise.resolve(""),
       progress.oracleSessionSlug ? readOracleSessionTail(progress.oracleSessionSlug) : Promise.resolve(""),
-      progress.oracleSessionSlug ? readLiveOracleSessionProgress(progress.oracleSessionSlug) : Promise.resolve(null),
+      progress.oracleSessionSlug
+        ? readLiveOracleSessionProgress(progress.oracleSessionSlug, progress.promptPreview)
+        : Promise.resolve(null),
       resolveChatProgressTouchedAt(progress)
     ]);
     const oracleProgress = extractOracleSessionProgress(oracleLogTail);
@@ -2593,7 +2635,7 @@ export class AppService {
           )
         ).filter((detail) => detail !== progressSummary);
 
-    const inspection = {
+    const inspection = sanitizePromptEchoProgress({
       active: true,
       lane: progress.lane,
       threadId: progress.threadId,
@@ -2605,7 +2647,7 @@ export class AppService {
       stdoutTail,
       stderrTail,
       updatedAt: latestTouchedAt || progress.updatedAt
-    } satisfies ChatProgressInspection;
+    } satisfies ChatProgressInspection, progress.promptPreview);
 
     this.rememberObservedChatProgress(workspacePath, progress, inspection);
 
@@ -4425,6 +4467,177 @@ export class AppService {
     return Date.now() - latestActivityMs >= ASYNC_STRATEGIST_STALL_MS;
   }
 
+  private resolveAsyncStrategistLaunchConfig(
+    strategistStep: AutomationStepRecord,
+    activeOracleProcess: ActiveOracleProcess | null | undefined,
+    appSettings: AppSettings
+  ) {
+    const storedModel = readAutomationStepSideEffectValues(strategistStep, "oracle-model")[0];
+    const storedThinking = readAutomationStepSideEffectValues(strategistStep, "oracle-thinking")[0];
+    const storedFiles = readAutomationStepSideEffectValues(strategistStep, "oracle-file");
+
+    return {
+      model: normalizeStrategistModel(
+        storedModel || activeOracleProcess?.model || appSettings.strategistModel
+      ),
+      reasoningIntensity: normalizeStrategistThinkingTime(
+        storedThinking || appSettings.strategistReasoningIntensity
+      ),
+      files: storedFiles.length ? storedFiles : activeOracleProcess?.files ?? []
+    };
+  }
+
+  private async resolveAsyncStrategistFailureMessage(
+    strategistSlug: string,
+    strategistArtifacts: ReturnType<AppService["resolveStrategistDecisionArtifacts"]> | null,
+    fallback: string
+  ) {
+    const normalizedSlug = normalizeOracleSessionId(strategistSlug);
+    const sessionError = await readOracleSessionError(normalizedSlug).catch(() => "");
+
+    if (sessionError.trim()) {
+      return sessionError.trim();
+    }
+
+    if (!strategistArtifacts) {
+      return fallback;
+    }
+
+    const strategistOutput = await readTextFile(strategistArtifacts.outputPath).catch(() => "");
+    const strategistOutputIssue = describeIncompleteStrategistOutput(strategistOutput);
+
+    return strategistOutputIssue || fallback;
+  }
+
+  private async retryBackgroundStrategistStep(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    controller: AutomationControllerState,
+    strategistStep: AutomationStepRecord,
+    strategistSlug: string,
+    strategistArtifacts: NonNullable<ReturnType<AppService["resolveStrategistDecisionArtifacts"]>>,
+    activeOracleProcess: ActiveOracleProcess | null | undefined,
+    failureMessage: string
+  ) {
+    const requiresVisibleLoginRetry =
+      isStrategistLoginRequiredFailure(failureMessage) || isStrategistSessionExpiredFailure(failureMessage);
+
+    if (
+      !this.oracleRunner.startConsult ||
+      session.mode !== "continuous" ||
+      isStrategistBrowserClosedFailure(failureMessage)
+    ) {
+      return false;
+    }
+
+    const nextUsedRetries = session.budget.usedRetries + 1;
+
+    if (nextUsedRetries >= session.budget.maxRetries) {
+      return false;
+    }
+
+    const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
+    const launchConfig = this.resolveAsyncStrategistLaunchConfig(
+      strategistStep,
+      activeOracleProcess,
+      appSettings
+    );
+    const nextAttempt = readAutomationStrategistAttempt(strategistStep, strategistSlug) + 1;
+    const retrySlug = buildAutomationStrategistRetrySessionSlug(strategistSlug, nextAttempt);
+
+    await Promise.all(
+      [
+        strategistArtifacts.outputPath,
+        strategistArtifacts.stdoutPath,
+        strategistArtifacts.stderrPath
+      ].map((filePath) => writeFile(filePath, "").catch(() => undefined))
+    );
+
+    this.setChatProgress(workspacePath, {
+      lane: "strategist",
+      threadId: session.threadId,
+      promptPreview: `[Autopilot] ${session.displayObjective ?? session.objective}`,
+      progressSummary: "",
+      progressDetails: [],
+      activeCommand: null,
+      oracleSessionSlug: retrySlug,
+      stdoutPath: strategistArtifacts.stdoutPath,
+      stderrPath: strategistArtifacts.stderrPath,
+      operationId: "automation-strategist"
+    });
+
+    try {
+      await this.oracleRunner.startConsult({
+        workspacePath,
+        prompt: strategistStep.prompt,
+        model: launchConfig.model,
+        browserThinkingTime: launchConfig.reasoningIntensity,
+        files: launchConfig.files,
+        stdoutPath: strategistArtifacts.stdoutPath,
+        stderrPath: strategistArtifacts.stderrPath,
+        outputPath: strategistArtifacts.outputPath,
+        slug: retrySlug,
+        strategistSessionReady: requiresVisibleLoginRetry ? false : appSettings.strategistSessionReady
+      });
+    } catch (error) {
+      this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
+      throw error;
+    }
+
+    const updatedAt = new Date().toISOString();
+    const updatedStep: AutomationStepRecord = {
+      ...strategistStep,
+      resumeCursor: retrySlug,
+      startedSideEffects: Array.from(
+        new Set(
+          [
+            ...(strategistStep.startedSideEffects ?? []),
+            ...buildAutomationStrategistLaunchSideEffects({
+              sessionSlug: retrySlug,
+              decisionArtifactsId: strategistArtifacts.id,
+              model: launchConfig.model,
+              reasoningIntensity: launchConfig.reasoningIntensity,
+              files: launchConfig.files,
+              attempt: nextAttempt
+            })
+          ]
+        )
+      ),
+      updatedAt
+    };
+
+    await this.store.writeAutomationStep(workspacePath, updatedStep);
+    await this.updateAutomationCycleLaneState(workspacePath, strategistStep.cycleId, strategistStep.lane, {
+      stepId: strategistStep.id,
+      workerMode: "async",
+      summary: "Strategist research is running in the background.",
+      resumeCursor: retrySlug,
+      updatedAt
+    });
+    await this.writeRunningAutomationSession(workspacePath, session, {
+      activeLaneStepIds: Array.from(new Set([...(session.activeLaneStepIds ?? []), strategistStep.id])),
+      latestStepId: strategistStep.id,
+      currentStepSummary:
+        resolveAutomationUiLanguage([session.displayObjective ?? "", session.objective, failureMessage]) === "ko"
+          ? requiresVisibleLoginRetry
+            ? "ChatGPT 로그인 상태를 다시 준비하면서 백그라운드 strategist를 자동으로 다시 시도하고 있습니다."
+            : "백그라운드 strategist 리서치를 자동으로 다시 시도하고 있습니다."
+          : requiresVisibleLoginRetry
+            ? "Retrying the background strategist after reopening the ChatGPT login flow."
+            : "Retrying the background strategist research automatically.",
+      budget: {
+        ...session.budget,
+        usedRetries: nextUsedRetries
+      }
+    });
+    this.registerActiveAutomationStrategistSession(controller, strategistStep.id, retrySlug);
+    await this.store.appendActivity(
+      workspacePath,
+      `${session.id} auto-restarted background strategist lane ${strategistStep.id} after ${failureMessage}`
+    );
+    return true;
+  }
+
   private clearStrategistChatProgress(
     workspacePath: string,
     threadId: string,
@@ -4594,18 +4807,57 @@ export class AppService {
           strategistArtifacts &&
           (await this.isAsyncStrategistStalled(workspacePath, strategistStep, strategistArtifacts))
         ) {
+          const failureMessage = await this.resolveAsyncStrategistFailureMessage(
+            strategistSlug,
+            strategistArtifacts,
+            "Background strategist research stalled without producing a usable answer."
+          );
           await this.oracleRunner.terminateSession?.(strategistSlug).catch(() => undefined);
           this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
           this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
+
+          if (
+            await this.retryBackgroundStrategistStep(
+              workspacePath,
+              session,
+              controller,
+              strategistStep,
+              strategistSlug,
+              strategistArtifacts,
+              activeOracleProcess,
+              failureMessage
+            )
+          ) {
+            return {
+              handled: true,
+              shouldStopLoop: false
+            };
+          }
+
           await this.completeAutomationStep(workspacePath, session, strategistStep, {
             status: "failed",
-            summary: "Background strategist research stalled without producing a usable answer.",
+            summary: failureMessage,
             changedFiles: [],
-            evidence: []
+            evidence: failureMessage ? [failureMessage] : []
           });
+          const language = resolveAutomationUiLanguage([
+            session.displayObjective ?? "",
+            session.objective,
+            failureMessage
+          ]);
           await this.writeRunningAutomationSession(workspacePath, session, {
-            currentStepSummary: "Background strategist research stalled. Continuing with the latest saved state."
+            currentStepSummary: isStrategistBrowserBlockedFailure(failureMessage)
+              ? language === "ko"
+                ? "다음 strategist 새로고침 전에 백그라운드 strategist 브랜치 점검이 필요합니다."
+                : "The background strategist branch needs attention before the next strategist refresh."
+              : language === "ko"
+                ? "백그라운드 strategist 브랜치가 끝나서 최신 저장 상태로 계속 진행합니다."
+                : "The background strategist branch ended. Continuing with the latest saved state."
           });
+          await this.store.appendActivity(
+            workspacePath,
+            `${session.id} background strategist lane ${strategistStep.id} ended: ${failureMessage}`
+          );
 
           return {
             handled: true,
@@ -4625,17 +4877,57 @@ export class AppService {
         };
       }
 
+      const failureMessage = await this.resolveAsyncStrategistFailureMessage(
+        strategistSlug,
+        strategistArtifacts,
+        "Background strategist research ended without producing a usable answer."
+      );
       this.clearActiveAutomationStrategistSession(controller, strategistStep.id);
       this.clearStrategistChatProgress(workspacePath, session.threadId, strategistArtifacts);
+
+      if (
+        strategistArtifacts &&
+        (await this.retryBackgroundStrategistStep(
+          workspacePath,
+          session,
+          controller,
+          strategistStep,
+          strategistSlug,
+          strategistArtifacts,
+          activeOracleProcess,
+          failureMessage
+        ))
+      ) {
+        return {
+          handled: true,
+          shouldStopLoop: false
+        };
+      }
+
       await this.completeAutomationStep(workspacePath, session, strategistStep, {
         status: "failed",
-        summary: "Background strategist research ended without producing a usable answer.",
+        summary: failureMessage,
         changedFiles: [],
-        evidence: []
+        evidence: failureMessage ? [failureMessage] : []
       });
+      const language = resolveAutomationUiLanguage([
+        session.displayObjective ?? "",
+        session.objective,
+        failureMessage
+      ]);
       await this.writeRunningAutomationSession(workspacePath, session, {
-        currentStepSummary: "Background strategist research ended early. Continuing with the latest saved state."
+        currentStepSummary: isStrategistBrowserBlockedFailure(failureMessage)
+          ? language === "ko"
+            ? "다음 strategist 새로고침 전에 백그라운드 strategist 브랜치 점검이 필요합니다."
+            : "The background strategist branch needs attention before the next strategist refresh."
+          : language === "ko"
+            ? "백그라운드 strategist 브랜치가 끝나서 최신 저장 상태로 계속 진행합니다."
+            : "The background strategist branch ended. Continuing with the latest saved state."
       });
+      await this.store.appendActivity(
+        workspacePath,
+        `${session.id} background strategist lane ${strategistStep.id} ended: ${failureMessage}`
+      );
 
       return {
         handled: true,
@@ -4758,6 +5050,7 @@ export class AppService {
     this.setChatProgress(workspacePath, {
       lane: "orchestrator",
       threadId: activeThread.id,
+      promptPreview: redirectInstruction || session.displayObjective || session.objective,
       progressSummary: "",
       progressDetails: [],
       activeCommand: null,
@@ -4969,6 +5262,7 @@ export class AppService {
     this.setChatProgress(workspacePath, {
       lane: "orchestrator",
       threadId: refreshedThread.id,
+      promptPreview: redirectInstruction || activeSession.displayObjective || activeSession.objective,
       progressSummary: "",
       progressDetails: [],
       activeCommand: null,
@@ -5247,6 +5541,7 @@ export class AppService {
     this.setChatProgress(workspacePath, {
       lane: "strategist",
       threadId: activeThread.id,
+      promptPreview: displayPrompt,
       progressSummary: "",
       progressDetails: [],
       activeCommand: null,
@@ -5280,8 +5575,14 @@ export class AppService {
         new Set(
           [
             ...(strategistStep.startedSideEffects ?? []),
-            `oracle-session:${strategistSlug}`,
-            `decision-artifacts:${decisionPaths.id}`
+            ...buildAutomationStrategistLaunchSideEffects({
+              sessionSlug: strategistSlug,
+              decisionArtifactsId: decisionPaths.id,
+              model: strategistModel,
+              reasoningIntensity: strategistReasoningIntensity,
+              files: strategistSubmission.files,
+              attempt: 1
+            })
           ].filter(Boolean)
         )
       ),
@@ -6446,6 +6747,45 @@ export class AppService {
 
       if (session) {
         await this.failActiveAutomationStep(workspacePath, session, failureMessage);
+        const nextUsedRetries = session.budget.usedRetries + 1;
+
+        if (
+          session.mode === "continuous" &&
+          isRetryableStrategistControllerFailure(failureMessage) &&
+          nextUsedRetries < session.budget.maxRetries
+        ) {
+          const language = resolveAutomationUiLanguage([
+            session.displayObjective ?? "",
+            session.objective,
+            failureMessage
+          ]);
+          const retryMessage =
+            language === "ko"
+              ? "Strategist 브라우저 단계가 빈 응답으로 끝나서 자동으로 한 번 더 다시 시도하고 있습니다. 창은 그대로 두고 잠시만 기다려 주세요."
+              : "The strategist browser step ended with an empty reply, so Lithium is retrying it automatically. Please keep the browser window open for a moment.";
+
+          await this.writeRunningAutomationSession(workspacePath, session, {
+            currentStepSummary:
+              language === "ko"
+                ? "Strategist 브라우저 단계를 자동으로 다시 시도하고 있습니다."
+                : "Retrying the strategist browser step automatically.",
+            budget: {
+              ...session.budget,
+              usedRetries: nextUsedRetries
+            }
+          });
+          await this.appendAutomationStatusEntry(workspacePath, {
+            session,
+            body: retryMessage
+          });
+          await this.store.appendActivity(
+            workspacePath,
+            `${session.id} automation retry queued after strategist browser produced no usable output`
+          );
+          shouldRestartAfterFailure = true;
+          return;
+        }
+
         if (session.mode === "continuous" && !isStrategistBlockedFailure(failureMessage)) {
           const snapshot = await this.store.getSnapshot(workspacePath).catch(() => null);
           const continuation = await this.consultAutomationContinuationAdvisor(workspacePath, {
@@ -7101,6 +7441,7 @@ function sanitizeAutomationConversationSummary(summary: string) {
   }
 
   if (
+    isOperationalAutomationMessage(trimmed) ||
     /builder run (?:stalled without producing|ended without writing) a final answer|automation is still running|waiting for your direction|latest strategist result:|latest builder result:/i.test(
       trimmed
     )
@@ -7134,6 +7475,64 @@ function buildAutomationCheckpointConversationMessage(input: {
   ]);
   const summary = sanitizeAutomationConversationSummary(checkpoint.summary);
   const nextAction = summarizeAutomationNextAction(checkpoint.nextActions);
+  const blockedStrategistMessage = [
+    checkpoint.title,
+    checkpoint.summary,
+    ...checkpoint.risks,
+    ...checkpoint.nextActions
+  ]
+    .join("\n")
+    .trim();
+
+  if (/^automation blocked on the strategist run$/i.test(checkpoint.title)) {
+    if (language === "ko") {
+      return [
+        isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
+          ? "strategist 브라우저 단계가 ChatGPT 로그인 또는 세션 준비 단계에서 막혀 자동 연구를 잠깐 멈췄습니다."
+          : isRetryableStrategistControllerFailure(blockedStrategistMessage)
+          ? "strategist 브라우저 단계가 비어 있는 응답으로 끝나서 자동 연구를 잠깐 멈췄습니다."
+          : "strategist 브라우저 단계에서 응답을 끝까지 받지 못해 자동 연구를 잠깐 멈췄습니다.",
+        isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
+          ? "Chrome에서 ChatGPT 로그인 상태와 사용 가능한 모델 목록을 먼저 확인해 주세요."
+          : "",
+        isStrategistBrowserClosedFailure(blockedStrategistMessage)
+          ? "strategist Chrome 창은 답변이 끝날 때까지 닫지 말고 그대로 두면 됩니다."
+          : "",
+        !isStrategistLoginRequiredFailure(blockedStrategistMessage) &&
+        !isStrategistSessionExpiredFailure(blockedStrategistMessage) &&
+        !isStrategistBrowserClosedFailure(blockedStrategistMessage) &&
+        nextAction
+          ? `다음으로는 ${nextAction}`
+          : "",
+        "원하면 같은 지점부터 다시 이어서 시도할 수 있습니다."
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    return [
+      isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
+        ? "Automation paused because the strategist browser needs a fresh ChatGPT login/session."
+        : isRetryableStrategistControllerFailure(blockedStrategistMessage)
+        ? "The strategist browser step finished with an empty reply, so automation paused here."
+        : "Automation paused because the strategist browser step did not finish cleanly.",
+      isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
+        ? "Please confirm that Chrome is logged into ChatGPT and that the required model is available."
+        : "",
+      isStrategistBrowserClosedFailure(blockedStrategistMessage)
+        ? "Keep the strategist Chrome window open until the answer fully finishes."
+        : "",
+      !isStrategistLoginRequiredFailure(blockedStrategistMessage) &&
+      !isStrategistSessionExpiredFailure(blockedStrategistMessage) &&
+      !isStrategistBrowserClosedFailure(blockedStrategistMessage) &&
+      nextAction
+        ? `Likely next action: ${nextAction}`
+        : "",
+      "If you want, Lithium can retry from the same point."
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
 
   if (language === "ko") {
     if (/^automation paused after the latest step$/i.test(checkpoint.title)) {
@@ -8217,7 +8616,12 @@ function describeAutomationControllerFailure(message: string) {
       title: "Automation blocked on the strategist run",
       summary: "The strategist browser step needs help before automation can continue.",
       currentStepSummary: "Blocked on the strategist run. Waiting for your direction.",
-      nextActions: isStrategistBrowserBlockedFailure(trimmed)
+      nextActions: isStrategistLoginRequiredFailure(trimmed) || isStrategistSessionExpiredFailure(trimmed)
+        ? [
+            "Log in to ChatGPT in Chrome, confirm the required model is available, then retry the strategist step.",
+            "If needed, relaunch the strategist browser visibly so the session can be reattached."
+          ]
+        : isStrategistBrowserBlockedFailure(trimmed)
         ? [
             "Keep the strategist Chrome window open until completion, then retry.",
             "If needed, set LITHIUM_ORACLE_VISIBLE=1 and retry so you can watch the oracle/browser flow."
@@ -8238,13 +8642,33 @@ function describeAutomationControllerFailure(message: string) {
 }
 
 function isStrategistBlockedFailure(message: string) {
-  return /oracle strategist run completed without producing output|chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired/i.test(
+  return /oracle strategist run completed without producing output|chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired|no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/i.test(
+    message
+  );
+}
+
+function isRetryableStrategistControllerFailure(message: string) {
+  return /oracle strategist run completed without producing output|oracle strategist output looked truncated or non-final/i.test(
+    message
+  );
+}
+
+function isStrategistBrowserClosedFailure(message: string) {
+  return /chrome window closed before oracle finished/i.test(message);
+}
+
+function isStrategistSessionExpiredFailure(message: string) {
+  return /saved chatgpt session expired|chatgpt session expired/i.test(message);
+}
+
+function isStrategistLoginRequiredFailure(message: string) {
+  return /no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/i.test(
     message
   );
 }
 
 function isStrategistBrowserBlockedFailure(message: string) {
-  return /chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired/i.test(
+  return /chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired|no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/i.test(
     message
   );
 }
@@ -8382,6 +8806,60 @@ function buildAutomationStrategistSessionSlug(
   ].join("-");
 
   return normalizeOracleSessionId(`ors-auto-${seed}`);
+}
+
+function buildAutomationStrategistRetrySessionSlug(sessionSlug: string, attempt: number) {
+  const words = (normalizeOracleSessionId(sessionSlug).match(/[a-z0-9]+/g) ?? [])
+    .slice(0, 5)
+    .map((word) => word.slice(0, 10));
+
+  if (!words.length || attempt <= 1) {
+    return normalizeOracleSessionId(sessionSlug);
+  }
+
+  const lastWordIndex = words.length - 1;
+  const baseLastWord = words[lastWordIndex]?.replace(/r\d+$/i, "") || "retry";
+  words[lastWordIndex] = `${baseLastWord}r${attempt}`.slice(0, 10);
+  return words.join("-");
+}
+
+function readAutomationStepSideEffectValues(step: AutomationStepRecord, prefix: string) {
+  return (step.startedSideEffects ?? [])
+    .filter((entry) => entry.startsWith(`${prefix}:`))
+    .map((entry) => entry.slice(prefix.length + 1).trim())
+    .filter(Boolean);
+}
+
+function readAutomationStrategistAttempt(step: AutomationStepRecord, sessionSlug: string) {
+  const storedAttempts = readAutomationStepSideEffectValues(step, "oracle-attempt")
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (storedAttempts.length) {
+    return Math.max(...storedAttempts);
+  }
+
+  const retrySuffix = sessionSlug.match(/-r(\d+)$/i);
+
+  return retrySuffix ? Number(retrySuffix[1]) : 1;
+}
+
+function buildAutomationStrategistLaunchSideEffects(input: {
+  sessionSlug: string;
+  decisionArtifactsId: string;
+  model: AppSettings["strategistModel"];
+  reasoningIntensity: AppSettings["strategistReasoningIntensity"];
+  files: string[];
+  attempt: number;
+}) {
+  return [
+    `oracle-session:${input.sessionSlug}`,
+    `decision-artifacts:${input.decisionArtifactsId}`,
+    `oracle-model:${input.model}`,
+    `oracle-thinking:${input.reasoningIntensity}`,
+    `oracle-attempt:${input.attempt}`,
+    ...input.files.map((filePath) => `oracle-file:${filePath}`)
+  ];
 }
 
 function isOracleModelValue(value: string | undefined): value is AppSettings["strategistModel"] {
@@ -8637,49 +9115,6 @@ function sanitizeConversationBody(value: string) {
     .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function stripLeadingUserEchoFromAssistantBody(body: string, latestUserBody?: string) {
-  const trimmedBody = body.trim();
-  const normalizedUser = normalizeEchoComparable(latestUserBody || "");
-
-  if (!trimmedBody || normalizedUser.length < 16) {
-    return trimmedBody;
-  }
-
-  const paragraphs = trimmedBody
-    .split(/\n\s*\n+/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean);
-
-  if (!paragraphs.length) {
-    return "";
-  }
-
-  const [firstParagraph, ...rest] = paragraphs;
-  const normalizedFirstParagraph = normalizeEchoComparable(firstParagraph);
-
-  if (!normalizedFirstParagraph) {
-    return trimmedBody;
-  }
-
-  if (
-    normalizedFirstParagraph === normalizedUser ||
-    normalizedFirstParagraph.startsWith(normalizedUser) ||
-    normalizedUser.startsWith(normalizedFirstParagraph)
-  ) {
-    return rest.join("\n\n").trim();
-  }
-
-  return trimmedBody;
-}
-
-function normalizeEchoComparable(value: string) {
-  return value
-    .replace(/^["'“”‘’「」『』<>\[\](){}]+|["'“”‘’「」『』<>\[\](){}]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
 }
 
 function stripConversationControlFooters(value: string) {

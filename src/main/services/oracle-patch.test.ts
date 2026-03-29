@@ -44,4 +44,16 @@ describe("patched oracle browser integration", () => {
     expect(modelSelection).toContain("const selectedMatch = findBestOption();");
     expect(modelSelection).toContain("resolve({ status: 'switched', label: describeCurrentSelection() || match.label });");
   });
+
+  it("hardens prompt submission against inert send clicks and commit false negatives", async () => {
+    const promptComposer = await readOracleDistFile(path.join("browser", "actions", "promptComposer.js"));
+    const sessionRunner = await readOracleDistFile(path.join("browser", "sessionRunner.js"));
+
+    expect(promptComposer).toContain("const waitForImmediateSubmissionSignal = async (timeoutMs) => {");
+    expect(promptComposer).toContain("Send button click did not produce an immediate submission signal; retried via Enter key");
+    expect(promptComposer).toContain("const submissionLikelyStarted = (info?.stopVisible ?? false) || info?.sendState === 'disabled'");
+    expect(promptComposer).toContain("const normalize = (value) => (value ?? '').toLowerCase().replace(/\\\\s+/g, ' ').trim();");
+    expect(sessionRunner).toContain("message.startsWith('Prompt commit check failed;')");
+    expect(sessionRunner).toContain("/immediate submission signal/i.test(message)");
+  });
 });

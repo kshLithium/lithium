@@ -16,6 +16,10 @@ import {
   handoffUserMessage,
   isOperationalAutomationMessage
 } from "../shared/handoff-utils";
+import {
+  sanitizePromptEchoProgress,
+  stripLeadingPromptEchoParagraph
+} from "../shared/prompt-echo";
 import type { ChatItem } from "./app-types";
 
 type AutomationCheckpointTone =
@@ -230,7 +234,7 @@ export function buildChatItems(
 
     items.push({
       id: `automation-checkpoint:${checkpoint.id}`,
-      role: "system",
+      role: "assistant",
       body: checkpointBody,
       timestamp: checkpoint.updatedAt || checkpoint.createdAt,
       order: items.length
@@ -253,7 +257,20 @@ export function mergeTransientChatItems(
 ) {
   const visiblePendingChatItems = filterAcknowledgedPendingChatItems(chatItems, pendingChatItems);
   const items = [...chatItems, ...visiblePendingChatItems];
-  const liveProgressBody = formatLiveProgressBody(input.chatProgress ?? null);
+  const latestVisibleUserBody = [...items].reverse().find((item) => item.role === "user")?.body;
+  const sanitizedLiveProgress = input.chatProgress
+    ? sanitizePromptEchoProgress(
+        {
+          progressSummary: input.chatProgress.progressSummary,
+          progressDetails: input.chatProgress.progressDetails,
+          activeCommand: input.chatProgress.activeCommand
+        },
+        latestVisibleUserBody
+      )
+    : null;
+  const liveProgressBody = sanitizedLiveProgress
+    ? formatLiveProgressBody(sanitizedLiveProgress)
+    : formatLiveProgressBody(input.chatProgress ?? null);
   const order = items.length;
   const latestPersistedTimestamp = [...chatItems]
     .reverse()
@@ -265,7 +282,9 @@ export function mergeTransientChatItems(
   );
   const transientThreadKey =
     input.chatProgress?.threadId || input.activeThreadId || input.workspacePath || pendingChatItems[0]?.id || "chat";
-  const transientBusyBody = input.busyBody?.trim() || liveProgressBody;
+  const transientBusyBody = input.busyBody?.trim()
+    ? stripLeadingPromptEchoParagraph(input.busyBody, latestVisibleUserBody)
+    : liveProgressBody;
 
   if (input.busyAction && pendingChatItems.length && transientBusyBody) {
     items.push({
@@ -396,6 +415,10 @@ function shouldRenderAutomationStepSummary(
     return false;
   }
 
+  if (looksLikeInternalAutomationSummary(summary)) {
+    return false;
+  }
+
   if (!isOperationalAutomationMessage(summary)) {
     return true;
   }
@@ -500,8 +523,11 @@ function simplifyAutomationCheckpointSummary(
 }
 
 function looksLikeInternalAutomationSummary(value: string) {
-  return /builder run (?:stalled without producing|ended without writing) a final answer|latest strategist result:|latest builder result:|retry \d+\/\d+|module not founderror|shell_snapshot|automation is still running\.|automation stopped when lithium restarted during (?:the )?builder step/i.test(
-    value
+  return (
+    isOperationalAutomationMessage(value) ||
+    /latest strategist result:|latest builder result:|retry \d+\/\d+|module not founderror|shell_snapshot|automation is still running\.|automation stopped when lithium restarted during (?:the )?builder step/i.test(
+      value
+    )
   );
 }
 
@@ -594,7 +620,7 @@ function isBlockedAutomationCheckpoint(
     .join("\n")
     .toLowerCase();
 
-  return /automation blocked|oracle strategist run completed without producing output|chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired/.test(
+  return /automation blocked|oracle strategist run completed without producing output|chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired|no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/.test(
     haystack
   );
 }
@@ -613,7 +639,26 @@ function isStrategistBrowserBlockedCheckpoint(
     .join("\n")
     .toLowerCase();
 
-  return /chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired/.test(
+  return /chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired|no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/.test(
+    haystack
+  );
+}
+
+function isStrategistLoginBlockedCheckpoint(
+  checkpoint: AutomationCheckpointRecord,
+  session?: AutomationSessionRecord
+) {
+  const haystack = [
+    checkpoint.title,
+    checkpoint.summary,
+    ...checkpoint.risks,
+    ...checkpoint.nextActions,
+    session?.stopReason ?? ""
+  ]
+    .join("\n")
+    .toLowerCase();
+
+  return /no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/.test(
     haystack
   );
 }

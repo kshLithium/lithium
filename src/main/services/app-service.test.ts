@@ -2,7 +2,13 @@ import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_APP_SETTINGS, type AutomationCycleRecord, type AutomationSessionRecord, type AutomationStepRecord } from "../../shared/types";
+import {
+  DEFAULT_APP_SETTINGS,
+  type AutomationCheckpointRecord,
+  type AutomationCycleRecord,
+  type AutomationSessionRecord,
+  type AutomationStepRecord
+} from "../../shared/types";
 import {
   AppService,
   buildAutomationContinuationAdvisorPrompt,
@@ -124,6 +130,289 @@ describe("AppService automation loop", () => {
       pending: true
     });
     expect(controller.activeStrategistSessions.get("AS001")).toBe("ors-auto-real-au001-ay001");
+  });
+
+  it("auto-retries a background strategist lane that ends without output", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-bg-strategist-retry-"));
+
+    try {
+      const now = "2026-03-29T00:00:00.000Z";
+      const oracleRunner = {
+        startConsult: vi.fn().mockResolvedValue({
+          command: {
+            command: "oracle",
+            args: ["--slug", "ors-auto-real-au001-ay001-as001-r2"],
+            cwd: workspacePath
+          },
+          sessionId: "ors-auto-real-au001-ay001-as001-r2",
+          startedAt: now,
+          pid: 12345,
+          slug: "ors-auto-real-au001-ay001-as001-r2",
+          model: "gpt-5.4-pro",
+          files: ["/tmp/research.md"],
+          outputPath: path.join(workspacePath, ".lithium", "decisions", "D001.output.txt"),
+          stdoutPath: path.join(workspacePath, ".lithium", "decisions", "D001.stdout.log"),
+          stderrPath: path.join(workspacePath, ".lithium", "decisions", "D001.stderr.log")
+        })
+      };
+      const service = new AppService(workspacePath, {
+        oracleRunner: oracleRunner as any,
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id ?? "TH001";
+      const decisionsDir = appService.store.buildPaths(workspacePath).decisionsDir;
+
+      await mkdir(decisionsDir, { recursive: true });
+      await writeFile(path.join(decisionsDir, "D001.output.txt"), "", "utf8");
+      await writeFile(path.join(decisionsDir, "D001.stdout.log"), "", "utf8");
+      await writeFile(path.join(decisionsDir, "D001.stderr.log"), "", "utf8");
+
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId,
+        objective: "자동 연구를 계속 이어가세요.",
+        displayObjective: "자동 연구를 계속 이어가세요.",
+        mode: "continuous",
+        status: "running",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 2,
+          usedRetries: 0
+        },
+        activeLaneStepIds: ["AS001"],
+        latestStepId: "AS001",
+        currentStepSummary: "Background strategist research is still running while automation continues.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+      const step: AutomationStepRecord = {
+        id: "AS001",
+        sessionId: "AU001",
+        threadId,
+        cycleId: "AY001",
+        kind: "literature-search",
+        lane: "strategist",
+        workerMode: "async",
+        title: "Run the next strategist research branch",
+        prompt: "Review the latest local results.",
+        status: "running",
+        summary: "Step started.",
+        resumeCursor: "ors-auto-real-au001-ay001-as001",
+        startedSideEffects: [
+          "oracle-session:ors-auto-real-au001-ay001-as001",
+          "decision-artifacts:D001",
+          "oracle-model:gpt-5.4-pro",
+          "oracle-thinking:extended",
+          "oracle-file:/tmp/research.md",
+          "oracle-attempt:1"
+        ],
+        completedSideEffects: [],
+        changedFiles: [],
+        evidence: [],
+        checkpointRequired: false,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.store.writeAutomationStep(workspacePath, step);
+
+      const controller = {
+        running: true,
+        pauseRequested: false,
+        stopRequested: false,
+        redirectInstruction: "",
+        activeBuilderRuns: new Map<string, string>(),
+        activeStrategistSessions: new Map<string, string>()
+      };
+
+      const result = await appService.resumeInFlightAutomationStrategistStep(
+        workspacePath,
+        session,
+        controller
+      );
+      const snapshot = await appService.store.getSnapshot(workspacePath);
+      const updatedStep = (snapshot.automationSteps ?? []).find(
+        (entry: AutomationStepRecord) => entry.id === "AS001"
+      );
+
+      expect(result).toEqual({
+        handled: true,
+        shouldStopLoop: false
+      });
+      expect(oracleRunner.startConsult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slug: "ors-auto-real-au001-ay001r2",
+          model: "gpt-5.4-pro",
+          browserThinkingTime: "extended",
+          files: ["/tmp/research.md"]
+        })
+      );
+      expect(snapshot.latestAutomationSession?.budget.usedRetries).toBe(1);
+      expect(snapshot.latestAutomationSession?.currentStepSummary).toBe(
+        "백그라운드 strategist 리서치를 자동으로 다시 시도하고 있습니다."
+      );
+      expect(updatedStep?.status).toBe("running");
+      expect(updatedStep?.resumeCursor).toBe("ors-auto-real-au001-ay001r2");
+      expect(updatedStep?.startedSideEffects).toContain("oracle-attempt:2");
+      expect(controller.activeStrategistSessions.get("AS001")).toBe("ors-auto-real-au001-ay001r2");
+      expect(
+        (snapshot.conversationEntries ?? []).some((entry: { body: string }) =>
+          entry.body.includes("Background strategist research ended without producing a usable answer.")
+        )
+      ).toBe(false);
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("retries a background strategist lane with a visible login flow when cookies are missing", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-bg-strategist-login-"));
+    const oracleHome = await mkdtemp(path.join(os.tmpdir(), "lithium-oracle-home-"));
+    const previousOracleHome = process.env.ORACLE_HOME_DIR;
+
+    try {
+      const now = "2026-03-29T00:00:00.000Z";
+      const oracleRunner = {
+        startConsult: vi.fn().mockResolvedValue({
+          command: {
+            command: "oracle",
+            args: ["--slug", "ors-auto-real-au001-ay001r2"],
+            cwd: workspacePath
+          },
+          sessionId: "ors-auto-real-au001-ay001r2",
+          startedAt: now,
+          pid: 12345,
+          slug: "ors-auto-real-au001-ay001r2",
+          model: "gpt-5.4-pro",
+          files: ["/tmp/research.md"],
+          outputPath: path.join(workspacePath, ".lithium", "decisions", "D001.output.txt"),
+          stdoutPath: path.join(workspacePath, ".lithium", "decisions", "D001.stdout.log"),
+          stderrPath: path.join(workspacePath, ".lithium", "decisions", "D001.stderr.log")
+        })
+      };
+      const service = new AppService(workspacePath, {
+        oracleRunner: oracleRunner as any,
+        getAppSettings: async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          strategistSessionReady: true
+        })
+      });
+      const appService = service as any;
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id ?? "TH001";
+      const decisionsDir = appService.store.buildPaths(workspacePath).decisionsDir;
+      const sessionSlug = "ors-auto-real-au001-ay001";
+
+      process.env.ORACLE_HOME_DIR = oracleHome;
+      await mkdir(path.join(oracleHome, "sessions", sessionSlug), { recursive: true });
+      await writeFile(
+        path.join(oracleHome, "sessions", sessionSlug, "meta.json"),
+        JSON.stringify({
+          status: "error",
+          errorMessage:
+            'Unable to find model option matching "GPT-5.4 Pro" in the model switcher. Available: Extended Pro. No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies.'
+        }),
+        "utf8"
+      );
+
+      await mkdir(decisionsDir, { recursive: true });
+      await writeFile(path.join(decisionsDir, "D001.output.txt"), "", "utf8");
+      await writeFile(path.join(decisionsDir, "D001.stdout.log"), "", "utf8");
+      await writeFile(path.join(decisionsDir, "D001.stderr.log"), "", "utf8");
+
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId,
+        objective: "자동 연구를 계속 이어가세요.",
+        displayObjective: "자동 연구를 계속 이어가세요.",
+        mode: "continuous",
+        status: "running",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 2,
+          usedRetries: 0
+        },
+        activeLaneStepIds: ["AS001"],
+        latestStepId: "AS001",
+        currentStepSummary: "Background strategist research is still running while automation continues.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+      const step: AutomationStepRecord = {
+        id: "AS001",
+        sessionId: "AU001",
+        threadId,
+        cycleId: "AY001",
+        kind: "literature-search",
+        lane: "strategist",
+        workerMode: "async",
+        title: "Run the next strategist research branch",
+        prompt: "Review the latest local results.",
+        status: "running",
+        summary: "Step started.",
+        resumeCursor: sessionSlug,
+        startedSideEffects: [
+          `oracle-session:${sessionSlug}`,
+          "decision-artifacts:D001",
+          "oracle-model:gpt-5.4-pro",
+          "oracle-thinking:extended",
+          "oracle-file:/tmp/research.md",
+          "oracle-attempt:1"
+        ],
+        completedSideEffects: [],
+        changedFiles: [],
+        evidence: [],
+        checkpointRequired: false,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.store.writeAutomationStep(workspacePath, step);
+
+      const controller = {
+        running: true,
+        pauseRequested: false,
+        stopRequested: false,
+        redirectInstruction: "",
+        activeBuilderRuns: new Map<string, string>(),
+        activeStrategistSessions: new Map<string, string>()
+      };
+
+      await appService.resumeInFlightAutomationStrategistStep(workspacePath, session, controller);
+
+      expect(oracleRunner.startConsult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strategistSessionReady: false,
+          slug: "ors-auto-real-au001-ay001r2"
+        })
+      );
+
+      const snapshot = await appService.store.getSnapshot(workspacePath);
+      expect(snapshot.latestAutomationSession?.currentStepSummary).toContain("ChatGPT 로그인 상태를 다시 준비");
+    } finally {
+      if (previousOracleHome === undefined) {
+        delete process.env.ORACLE_HOME_DIR;
+      } else {
+        process.env.ORACLE_HOME_DIR = previousOracleHome;
+      }
+
+      await rm(oracleHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
   });
 
   it("preserves sync strategist worker modes in cycle lane state", () => {
@@ -1218,6 +1507,244 @@ describe("AppService automation loop", () => {
       expect(latestEntry?.role).toBe("assistant");
       expect(latestEntry?.source).toBe("automation");
       expect(latestEntry?.body).toBe("이번 턴 요청 파일이 비어 있어서, 바로 다음 실행과 큐 메모를 새로 다시 써두겠습니다.");
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("strips a leading echoed user paragraph from general assistant chat replies too", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-chat-echo-strip-"));
+
+    try {
+      const service = new AppService(workspacePath, {
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id;
+
+      expect(threadId).toBeTruthy();
+
+      await appService.appendConversationEntry(workspacePath, {
+        threadId: threadId ?? "TH001",
+        role: "user",
+        source: "user",
+        body: "리서치할 때 브라우저에서 버그걸린 더 이제 내가 고쳤음 자유롭게 strate model call 해도 됨"
+      });
+
+      await appService.appendAssistantConversationEntry(workspacePath, {
+        threadId: threadId ?? "TH001",
+        source: "orchestrator",
+        body: [
+          "리서치할 때 브라우저에서 버그걸린 더 이제 내가 고쳤음 자유롭게 strate model call 해도 됨",
+          "",
+          "지금은 live preview 추출 경로와 assistant 저장 경로를 같이 확인하고 있습니다."
+        ].join("\n\n")
+      });
+
+      const snapshot = await service.getSnapshot(workspacePath);
+      const latestEntry = snapshot.conversationEntries?.at(-1);
+
+      expect(latestEntry?.role).toBe("assistant");
+      expect(latestEntry?.source).toBe("orchestrator");
+      expect(latestEntry?.body).toBe("지금은 live preview 추출 경로와 assistant 저장 경로를 같이 확인하고 있습니다.");
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("writes strategist-blocked automation pauses as assistant-facing chat messages", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-strategist-blocked-chat-"));
+
+    try {
+      const now = "2026-03-26T00:00:00.000Z";
+      const service = new AppService(workspacePath, {
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id;
+
+      expect(threadId).toBeTruthy();
+
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId: threadId ?? "TH001",
+        objective: "자동 연구를 계속 이어가세요.",
+        displayObjective: "자동 연구를 계속 이어가세요.",
+        mode: "continuous",
+        status: "running",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 2,
+          usedRetries: 1
+        },
+        activeLaneStepIds: [],
+        currentStepSummary: "Running the strategist branch.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.pauseAutomationWithCheckpoint(workspacePath, {
+        session,
+        title: "Automation blocked on the strategist run",
+        summary: "The strategist browser step needs help before automation can continue.",
+        whatChanged: [],
+        evidence: [],
+        risks: ["Oracle strategist run completed without producing output."],
+        nextActions: [
+          "Keep the strategist Chrome window open until completion, then retry.",
+          "If needed, set LITHIUM_ORACLE_VISIBLE=1 and retry so you can watch the oracle/browser flow."
+        ],
+        currentStepSummary: "Blocked on the strategist run. Waiting for your direction."
+      });
+
+      const snapshot = await service.getSnapshot(workspacePath);
+      const latestEntry = snapshot.conversationEntries?.at(-1);
+
+      expect(latestEntry?.role).toBe("assistant");
+      expect(latestEntry?.source).toBe("checkpoint");
+      expect(latestEntry?.body).toContain("strategist 브라우저");
+      expect(latestEntry?.body).not.toContain("LITHIUM_ORACLE_VISIBLE=1");
+      expect(latestEntry?.body).not.toContain("The strategist browser step needs help before automation can continue.");
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("writes strategist login blockers as explicit ChatGPT login guidance", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-strategist-login-chat-"));
+
+    try {
+      const now = "2026-03-29T00:00:00.000Z";
+      const service = new AppService(workspacePath, {
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id;
+
+      expect(threadId).toBeTruthy();
+
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId: threadId ?? "TH001",
+        objective: "자동 연구를 계속 이어가세요.",
+        displayObjective: "자동 연구를 계속 이어가세요.",
+        mode: "continuous",
+        status: "running",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 2,
+          usedRetries: 1
+        },
+        activeLaneStepIds: [],
+        currentStepSummary: "Running the strategist branch.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.pauseAutomationWithCheckpoint(workspacePath, {
+        session,
+        title: "Automation blocked on the strategist run",
+        summary: "The strategist browser step needs help before automation can continue.",
+        whatChanged: [],
+        evidence: [],
+        risks: [
+          'Unable to find model option matching "GPT-5.4 Pro" in the model switcher. Available: Extended Pro. No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies.'
+        ],
+        nextActions: [
+          "Log in to ChatGPT in Chrome, confirm the required model is available, then retry the strategist step."
+        ],
+        currentStepSummary: "Blocked on the strategist run. Waiting for your direction."
+      });
+
+      const snapshot = await service.getSnapshot(workspacePath);
+      const latestEntry = snapshot.conversationEntries?.at(-1);
+
+      expect(latestEntry?.role).toBe("assistant");
+      expect(latestEntry?.body).toContain("ChatGPT 로그인");
+      expect(latestEntry?.body).not.toContain("창은 답변이 끝날 때까지 닫지 말고");
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("resets strategist retry debt when a user approves a pending automation checkpoint", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-automation-resume-budget-"));
+
+    try {
+      const now = "2026-03-29T00:00:00.000Z";
+      const service = new AppService(workspacePath, {
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id ?? "TH001";
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId,
+        objective: "자동 연구를 계속 이어가세요.",
+        displayObjective: "자동 연구를 계속 이어가세요.",
+        mode: "continuous",
+        status: "idle",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 2,
+          usedRetries: 3
+        },
+        latestCheckpointId: "AC001",
+        currentStepSummary: "Waiting for your direction.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+      const checkpoint: AutomationCheckpointRecord = {
+        id: "AC001",
+        sessionId: "AU001",
+        threadId,
+        status: "pending",
+        title: "Automation blocked on the strategist run",
+        summary: "The strategist browser step needs help before automation can continue.",
+        whatChanged: [],
+        evidence: [],
+        risks: ["Oracle strategist run completed without producing output."],
+        nextActions: ["Keep the strategist Chrome window open until completion, then retry."],
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.store.writeAutomationCheckpoint(workspacePath, checkpoint);
+      appService.scheduleAutomationLoop = vi.fn();
+
+      const snapshot = await appService.approveAutomationCheckpoint({
+        workspacePath,
+        sessionId: "AU001",
+        checkpointId: "AC001",
+        response: "계속 진행해줘"
+      });
+
+      expect(snapshot.latestAutomationSession?.status).toBe("running");
+      expect(snapshot.latestAutomationSession?.budget.usedRetries).toBe(0);
+      expect(snapshot.conversationEntries?.at(-1)?.body).toContain("자동 연구를 다시 이어갑니다");
+      expect(appService.scheduleAutomationLoop).toHaveBeenCalledWith(workspacePath, "AU001");
     } finally {
       await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
     }

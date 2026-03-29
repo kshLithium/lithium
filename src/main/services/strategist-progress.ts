@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { sanitizePromptEchoProgress } from "../../shared/prompt-echo";
 import { readTextFile } from "./run-artifacts";
 
 export type StrategistProgress = {
@@ -94,7 +95,10 @@ export function mergeStrategistLiveProgress(
   };
 }
 
-export async function readLiveOracleSessionProgress(sessionSlug: string): Promise<StrategistProgress | null> {
+export async function readLiveOracleSessionProgress(
+  sessionSlug: string,
+  promptPreview?: string
+): Promise<StrategistProgress | null> {
   try {
     const sessionDir = path.join(resolveOracleHomeDir(), "sessions", sessionSlug);
     const metadataRaw = await readTextFile(path.join(sessionDir, "meta.json"));
@@ -166,10 +170,10 @@ export async function readLiveOracleSessionProgress(sessionSlug: string): Promis
             ? thinkingStatus.slice(-3)
             : [];
 
-      return {
+      return sanitizePromptEchoProgress({
         progressSummary: previewHistory.at(-1) ?? "",
         progressDetails: previewHistory.slice(0, -1)
-      };
+      }, promptPreview);
     } finally {
       await client.close().catch(() => undefined);
     }
@@ -360,15 +364,30 @@ function looksLikeFinishedOracleSentence(value: string) {
 function buildLiveOracleProgressExpression() {
   return `(() => {
     const markdownSelector = '.markdown,[data-message-content],.prose,[class*="markdown"]';
+    const assistantTurnSelector = [
+      'article[data-testid^="conversation-turn"][data-message-author-role="assistant"]',
+      'article[data-testid^="conversation-turn"][data-turn="assistant"]',
+      'div[data-testid^="conversation-turn"][data-message-author-role="assistant"]',
+      'div[data-testid^="conversation-turn"][data-turn="assistant"]',
+      'section[data-testid^="conversation-turn"][data-message-author-role="assistant"]',
+      'section[data-testid^="conversation-turn"][data-turn="assistant"]',
+      '[data-message-author-role="assistant"]',
+      '[data-turn="assistant"]'
+    ].join(', ');
+    const userTurnSelector = [
+      'article[data-testid^="conversation-turn"][data-message-author-role="user"]',
+      'article[data-testid^="conversation-turn"][data-turn="user"]',
+      'div[data-testid^="conversation-turn"][data-message-author-role="user"]',
+      'div[data-testid^="conversation-turn"][data-turn="user"]',
+      'section[data-testid^="conversation-turn"][data-message-author-role="user"]',
+      'section[data-testid^="conversation-turn"][data-turn="user"]',
+      '[data-message-author-role="user"]',
+      '[data-turn="user"]'
+    ].join(', ');
     const excluded = (node) =>
       Boolean(node?.closest?.('form, nav, aside, [data-testid*="sidebar"], [data-testid*="composer"]'));
-    const assistantContainers = Array.from(
-      document.querySelectorAll('[data-message-author-role="assistant"], [data-turn="assistant"], [data-testid*="assistant"]')
-    );
-    let assistantPreview = '';
-
-    for (let index = assistantContainers.length - 1; index >= 0; index -= 1) {
-      const container = assistantContainers[index];
+    const normalizeComparable = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const collectContainerText = (container) => {
       const candidates = Array.from(container.querySelectorAll(markdownSelector)).filter((node) => !excluded(node));
 
       for (let candidateIndex = candidates.length - 1; candidateIndex >= 0; candidateIndex -= 1) {
@@ -376,32 +395,46 @@ function buildLiveOracleProgressExpression() {
         const text = (node.innerText || node.textContent || '').trim();
 
         if (text) {
-          assistantPreview = text;
-          break;
+          return text;
         }
       }
+
+      const fallback = (container.innerText || container.textContent || '').trim();
+      return excluded(container) ? '' : fallback;
+    };
+    const readLatestTurnText = (selector) => {
+      const containers = Array.from(document.querySelectorAll(selector)).filter((node) => !excluded(node));
+
+      for (let index = containers.length - 1; index >= 0; index -= 1) {
+        const text = collectContainerText(containers[index]);
+
+        if (text) {
+          return text;
+        }
+      }
+
+      return '';
+    };
+    const assistantContainers = Array.from(document.querySelectorAll(assistantTurnSelector)).filter((node) => !excluded(node));
+    let assistantPreview = '';
+
+    for (let index = assistantContainers.length - 1; index >= 0; index -= 1) {
+      const container = assistantContainers[index];
+      assistantPreview = collectContainerText(container);
 
       if (assistantPreview) {
         break;
       }
     }
 
-    if (!assistantPreview) {
-      const fallbacks = Array.from(document.querySelectorAll(markdownSelector)).filter((node) => {
-        if (excluded(node)) return false;
-        const roleNode = node.closest('[data-message-author-role], [data-turn]');
-        const role =
-          (roleNode?.getAttribute('data-message-author-role') || roleNode?.getAttribute('data-turn') || '').toLowerCase();
-        return role !== 'user';
-      });
+    const latestUserPreview = readLatestTurnText(userTurnSelector);
 
-      for (let index = fallbacks.length - 1; index >= 0; index -= 1) {
-        const text = (fallbacks[index].innerText || fallbacks[index].textContent || '').trim();
-        if (text) {
-          assistantPreview = text;
-          break;
-        }
-      }
+    if (
+      assistantPreview &&
+      latestUserPreview &&
+      normalizeComparable(assistantPreview) === normalizeComparable(latestUserPreview)
+    ) {
+      assistantPreview = '';
     }
 
     const thinkingSelectors = [

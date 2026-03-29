@@ -129,6 +129,30 @@ describe("mergeTransientChatItems", () => {
     expect(merged.some((item) => item.id === "pending:2")).toBe(true);
     expect(merged.some((item) => item.id.startsWith("busy:"))).toBe(false);
   });
+
+  it("suppresses live progress that only echoes the latest user prompt", () => {
+    const persistedItems: ChatItem[] = [
+      {
+        id: "conversation:M001",
+        role: "user",
+        body: "리서치할 때 브라우저에서 버그걸린 더 이제 내가 고쳤음 자유롭게 strate model call 해도 됨",
+        timestamp: "2026-03-26T02:00:01.000Z",
+        order: 0
+      }
+    ];
+
+    const merged = mergeTransientChatItems(persistedItems, [], {
+      busyAction: "Running chat",
+      busyBody: "리서치할 때 브라우저에서 버그걸린 더 이제 내가 고쳤음 자유롭게 strate model call 해도 됨",
+      chatProgress: buildProgress({
+        progressSummary: "리서치할 때 브라우저에서 버그걸린 더 이제 내가 고쳤음 자유롭게 strate model call 해도 됨",
+        progressDetails: []
+      }),
+      activeThreadId: "TH001"
+    });
+
+    expect(merged).toEqual(persistedItems);
+  });
 });
 
 describe("formatLiveProgressBody", () => {
@@ -372,6 +396,99 @@ describe("buildChatItems", () => {
     const summaryItem = items.find((item) => item.id === "automation-step-summary:AS001");
 
     expect(summaryItem?.body).toBe("Run the next builder execution branch");
+  });
+
+  it("hides internal background strategist failure summaries from the chat timeline", () => {
+    const thread: ThreadRecord = {
+      id: "TH001",
+      title: "Main thread",
+      summary: "",
+      createdAt: "2026-03-26T00:00:00.000Z",
+      updatedAt: "2026-03-26T00:00:00.000Z"
+    };
+    const session: AutomationSessionRecord = {
+      id: "AU001",
+      threadId: "TH001",
+      objective: "자동 연구를 계속 이어가세요.",
+      displayObjective: "자동 연구를 계속 이어가세요.",
+      mode: "continuous",
+      status: "running",
+      allowedActions: ["strategize", "experiment-run"],
+      evidenceMode: "strict",
+      budget: {
+        maxSteps: 10,
+        maxRuntimeMinutes: 60,
+        maxRetries: 3,
+        usedSteps: 2,
+        usedRetries: 1
+      },
+      currentStepSummary: "백그라운드 strategist 브랜치가 끝나서 최신 저장 상태로 계속 진행합니다.",
+      createdAt: "2026-03-26T00:00:00.000Z",
+      updatedAt: "2026-03-26T00:04:00.000Z"
+    };
+    const step: AutomationStepRecord = {
+      id: "AS001",
+      sessionId: "AU001",
+      threadId: "TH001",
+      kind: "literature-search",
+      lane: "strategist",
+      workerMode: "async",
+      title: "Run the next strategist research branch",
+      prompt: "Review the latest local results.",
+      status: "failed",
+      summary: "Background strategist research ended without producing a usable answer.",
+      startedSideEffects: [],
+      completedSideEffects: [],
+      changedFiles: [],
+      evidence: [
+        "Oracle strategist run completed without producing output."
+      ],
+      checkpointRequired: true,
+      createdAt: "2026-03-26T00:02:00.000Z",
+      updatedAt: "2026-03-26T00:03:00.000Z",
+      completedAt: "2026-03-26T00:03:00.000Z"
+    };
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "P001",
+        name: "real",
+        workspacePath: "/tmp",
+        oracleModel: "gpt-5.4-pro",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-26T00:00:00.000Z",
+        updatedAt: "2026-03-26T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [thread],
+      activeThreadId: "TH001",
+      activeThread: thread,
+      conversationEntries: [],
+      latestConversationEntry: null,
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      automationSessions: [session],
+      automationCycles: [],
+      automationSteps: [step],
+      automationCheckpoints: [],
+      latestAutomationSession: session,
+      latestAutomationCycle: null,
+      latestAutomationCheckpoint: null,
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, "/tmp");
+
+    expect(items.some((item) => item.id === "automation-step-summary:AS001")).toBe(false);
   });
 
   it("collapses identical non-user automation messages that arrive back-to-back", () => {

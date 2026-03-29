@@ -31,11 +31,6 @@ const electronResourcesPath =
   typeof (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath === "string"
     ? (process as NodeJS.Process & { resourcesPath: string }).resourcesPath
     : "";
-const LOCAL_ORACLE_BIN_CANDIDATES = [
-  path.resolve(process.cwd(), "node_modules", ".bin", "oracle"),
-  path.resolve(electronResourcesPath, "app.asar.unpacked", "node_modules", ".bin", "oracle"),
-  path.resolve(electronResourcesPath, "node_modules", ".bin", "oracle")
-];
 
 export type OracleLaunchOptions = {
   browserVisible: boolean;
@@ -638,13 +633,43 @@ export class OracleRunner {
 }
 
 async function resolveLocalOracleCommand() {
-  for (const candidate of LOCAL_ORACLE_BIN_CANDIDATES) {
+  for (const candidate of buildLocalOracleBinCandidates()) {
     if (await pathExists(candidate)) {
       return candidate;
     }
   }
 
   return undefined;
+}
+
+export function buildLocalOracleBinCandidates(input?: {
+  cwd?: string;
+  moduleDir?: string;
+  argvEntry?: string;
+  resourcesPath?: string;
+}) {
+  const candidateRoots = [
+    input?.cwd ?? process.cwd(),
+    input?.argvEntry ? path.dirname(input.argvEntry) : process.argv[1] ? path.dirname(process.argv[1]) : "",
+    input?.moduleDir ?? __dirname,
+    input?.resourcesPath
+      ? path.join(input.resourcesPath, "app.asar.unpacked")
+      : electronResourcesPath
+        ? path.join(electronResourcesPath, "app.asar.unpacked")
+        : "",
+    input?.resourcesPath ?? electronResourcesPath
+  ].filter(Boolean);
+
+  const candidates = new Set<string>();
+
+  for (const root of candidateRoots) {
+    for (let depth = 0; depth <= 3; depth += 1) {
+      const prefixes = new Array(depth).fill("..");
+      candidates.add(path.resolve(root, ...prefixes, "node_modules", ".bin", "oracle"));
+    }
+  }
+
+  return [...candidates];
 }
 
 function sleep(ms: number) {
@@ -931,12 +956,16 @@ export function classifyInteractiveSessionRecovery(
     return null;
   }
 
-  if (/no chatgpt cookies were applied|cannot proceed in browser mode/i.test(reason)) {
+  if (
+    /no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|cannot proceed in browser mode/i.test(
+      reason
+    )
+  ) {
     return "cookies";
   }
 
   if (
-    /connect econnrefused|prompt textarea did not appear before timeout|prompt-not-in-composer|chrome window closed before oracle finished|chrome disconnected before completion/i.test(
+    /connect econnrefused|prompt textarea did not appear before timeout|prompt-not-in-composer|prompt did not appear in conversation before timeout|send may have failed|chrome window closed before oracle finished|chrome disconnected before completion/i.test(
       reason
     )
   ) {

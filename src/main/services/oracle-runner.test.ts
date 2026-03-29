@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildLocalOracleBinCandidates,
   clearOracleBrowserSessionRestoreState,
   classifyInteractiveSessionRecovery,
   extractReusableChatgptConversationUrl,
@@ -25,6 +26,17 @@ const LOCAL_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google
 const DEFAULT_CHROME_PROFILE = "/tmp/lithium-fixtures/google-chrome-default";
 
 describe("OracleRunner", () => {
+  it("finds the repo-local oracle binary even when Electron starts outside the project cwd", () => {
+    expect(
+      buildLocalOracleBinCandidates({
+        cwd: "/tmp",
+        moduleDir: "/Users/rubidium/project/lithium/dist-electron",
+        argvEntry: "/Users/rubidium/project/lithium/dist-electron/index.cjs",
+        resourcesPath: "/Applications/Electron.app/Contents/Resources"
+      })
+    ).toContain("/Users/rubidium/project/lithium/node_modules/.bin/oracle");
+  });
+
   it("opens the first browser run visibly so the user can sign in once", () => {
     expect(resolveOracleLaunchOptions({}, { strategistSessionReady: false })).toEqual({
       browserVisible: true,
@@ -380,6 +392,22 @@ describe("OracleRunner", () => {
     ).toBe(false);
   });
 
+  it("treats model-switcher failures with missing cookies as a cookie recovery path", () => {
+    expect(
+      classifyInteractiveSessionRecovery(
+        'Unable to find model option matching "GPT-5.4 Pro" in the model switcher. Available: Extended Pro. No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies.',
+        {
+          browserVisible: false,
+          browserHeadless: false,
+          keepBrowser: false,
+          manualLogin: true,
+          strategistSessionReady: true,
+          chatgptUrl: undefined
+        }
+      )
+    ).toBe("cookies");
+  });
+
   it("classifies stale strategist browser failures for fresh headless recovery", () => {
     expect(
       classifyInteractiveSessionRecovery("connect ECONNREFUSED 127.0.0.1:55510", {
@@ -401,6 +429,20 @@ describe("OracleRunner", () => {
         strategistSessionReady: true,
         chatgptUrl: undefined
       })
+    ).toBe("fresh-browser");
+
+    expect(
+      classifyInteractiveSessionRecovery(
+        "Prompt did not appear in conversation before timeout (send may have failed)",
+        {
+          browserVisible: false,
+          browserHeadless: true,
+          keepBrowser: false,
+          manualLogin: true,
+          strategistSessionReady: true,
+          chatgptUrl: undefined
+        }
+      )
     ).toBe("fresh-browser");
   });
 
