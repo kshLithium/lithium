@@ -3,85 +3,33 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "productName": "Lithium",
   "author": "Lithium contributors",
-  "description": "Lithium desktop app for chat-first research automation",
-  "main": "dist-electron/index.cjs",
+  "description": "Lithium CLI for chat-first research automation",
+  "main": "dist/cli.cjs",
+  "bin": {
+    "lithium": "dist/cli.cjs"
+  },
   "type": "module",
   "scripts": {
-    "postinstall": "tsx scripts/patch-oracle.mts && electron-builder install-app-deps",
-    "generate:icons": "tsx scripts/generate-icons.mts",
-    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"tsx scripts/generate-icons.mts && tsup src/main/index.ts src/main/preload.ts --format cjs --out-dir dist-electron --external electron --external node-pty --watch\" \"wait-on tcp:5173 dist-electron/index.cjs dist-electron/preload.cjs && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 LITHIUM_APP_NAME='Lithium Dev' electron dist-electron/index.cjs\"",
-    "dev:renderer": "vite --host 127.0.0.1 --port 5173 --strictPort",
-    "dev:main": "npm run generate:icons && tsup src/main/index.ts src/main/preload.ts --format cjs --out-dir dist-electron --external electron --external node-pty --watch",
-    "dev:electron": "wait-on tcp:5173 dist-electron/index.cjs dist-electron/preload.cjs && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 \"LITHIUM_APP_NAME=Lithium Dev\" electron dist-electron/index.cjs",
-    "build": "npm run generate:icons && npm run build:main && npm run build:renderer",
-    "build:main": "tsup src/main/index.ts src/main/preload.ts --format cjs --out-dir dist-electron --external electron --external node-pty --clean",
-    "build:renderer": "vite build",
-    "package:dir": "npm run build && electron-builder --dir",
-    "package:open": "tsx scripts/open-packaged-app.mts",
-    "dev:focus": "tsx scripts/focus-dev-app.mts",
-    "dev:packaged": "npm run package:dir && npm run package:open",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "rebuild:native": "electron-builder install-app-deps",
-    "check:release": "npm run typecheck && npm test && npm run build && npm audit --omit=dev --audit-level=high",
+    "postinstall": "tsx scripts/patch-oracle.mts",
+    "dev": "tsx src/cli/index.ts",
+    "build": "tsup src/cli/index.ts --format cjs --out-dir dist --external node-pty --external playwright-core --clean && node -e \"const fs=require('fs');if(fs.existsSync('dist/index.cjs'))fs.renameSync('dist/index.cjs','dist/cli.cjs')\"",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.scripts.json",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "capture:readme": "npm run build && tsx scripts/capture-readme-screens.mts",
-    "preview": "vite preview"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@steipete/oracle": "0.9.0",
-    "katex": "^0.16.40",
     "node-pty": "^1.1.0",
     "playwright-core": "^1.58.2",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "react-markdown": "^10.1.0",
-    "rehype-katex": "^7.0.1",
-    "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0",
     "yauzl": "^2.10.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
-    "@types/react": "^19.1.13",
-    "@types/react-dom": "^19.1.9",
     "@types/yauzl": "^2.10.3",
-    "@vitejs/plugin-react": "^5.0.2",
-    "concurrently": "^9.2.1",
-    "cross-env": "^10.0.0",
-    "electron": "^40.0.0",
-    "electron-builder": "^26.0.12",
     "tsup": "^8.5.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
-    "vite": "^7.1.5",
-    "vitest": "^3.2.4",
-    "wait-on": "^8.0.5"
-  },
-  "build": {
-    "appId": "dev.lithium.app",
-    "productName": "Lithium",
-    "asar": true,
-    "directories": {
-      "buildResources": "build",
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "dist-electron/**/*",
-      "build/icon.png",
-      "build/icon.icns",
-      "LICENSE",
-      "docs/legal/THIRD_PARTY_NOTICES.md",
-      "package.json"
-    ],
-    "mac": {
-      "category": "public.app-category.productivity",
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
-      "icon": "build/icon.icns"
-    }
+    "vitest": "^3.2.4"
   }
 }

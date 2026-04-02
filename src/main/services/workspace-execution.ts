@@ -8,8 +8,7 @@ const EXECUTION_ROOT_SCAN_IGNORES = new Set([
   ".venv",
   "venv",
   "node_modules",
-  "dist",
-  "dist-electron"
+  "dist"
 ]);
 
 export async function resolveWorkspaceExecutionRoot(workspacePath: string) {

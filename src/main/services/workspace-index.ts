@@ -21,7 +21,6 @@ const DOCUMENT_EXTENSIONS = new Set([
 export const WORKSPACE_INDEX_IGNORED_DIRS = new Set([
   ".git",
   "dist",
-  "dist-electron",
   "build",
   "release",
   "output",

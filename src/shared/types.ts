@@ -561,24 +561,3 @@ export type AutomationInterruptRequest = AutomationSessionControlRequest & {
   instruction: string;
   stopNow?: boolean;
 };
-
-export type AppCommand =
-  | "open-workspace"
-  | "open-new-thread"
-  | "toggle-sidebar";
-
-export type LithiumApi = {
-  getAppState: () => Promise<RuntimeAppState>;
-  notifyShellReady: () => Promise<void>;
-  pickWorkspace: () => Promise<WorkspaceSelectionResult>;
-  pickAttachmentFiles: (workspacePath?: string) => Promise<string[]>;
-  getProjectSnapshot: (workspacePath?: string) => Promise<ProjectSnapshot>;
-  createThread: (request?: ThreadCreateRequest) => Promise<ProjectSnapshot>;
-  selectThread: (request: ThreadSelectionRequest) => Promise<ProjectSnapshot>;
-  sendChatMessage: (request: ChatRequest) => Promise<ProjectSnapshot>;
-  inspectChatProgress: (request?: ChatProgressRequest) => Promise<ChatProgressInspection | null>;
-  importAttachments: (request: AttachmentImportRequest) => Promise<ProjectSnapshot>;
-  removeAttachment: (request: AttachmentDeleteRequest) => Promise<ProjectSnapshot>;
-  onAppCommand: (listener: (command: AppCommand) => void) => () => void;
-  toggleFullscreen: () => Promise<boolean>;
-};

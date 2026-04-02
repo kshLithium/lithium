@@ -27,7 +27,7 @@ type OracleRunOptions = {
 };
 
 let browserThinkingTimeSupportPromise: Promise<boolean> | null = null;
-const electronResourcesPath =
+const packagedResourcesPath =
   typeof (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath === "string"
     ? (process as NodeJS.Process & { resourcesPath: string }).resourcesPath
     : "";
@@ -654,10 +654,10 @@ export function buildLocalOracleBinCandidates(input?: {
     input?.moduleDir ?? __dirname,
     input?.resourcesPath
       ? path.join(input.resourcesPath, "app.asar.unpacked")
-      : electronResourcesPath
-        ? path.join(electronResourcesPath, "app.asar.unpacked")
+      : packagedResourcesPath
+        ? path.join(packagedResourcesPath, "app.asar.unpacked")
         : "",
-    input?.resourcesPath ?? electronResourcesPath
+    input?.resourcesPath ?? packagedResourcesPath
   ].filter(Boolean);
 
   const candidates = new Set<string>();

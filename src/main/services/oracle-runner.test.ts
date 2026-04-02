@@ -26,13 +26,13 @@ const LOCAL_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google
 const DEFAULT_CHROME_PROFILE = "/tmp/lithium-fixtures/google-chrome-default";
 
 describe("OracleRunner", () => {
-  it("finds the repo-local oracle binary even when Electron starts outside the project cwd", () => {
+  it("finds the repo-local oracle binary even when the packaged runtime starts outside the project cwd", () => {
     expect(
       buildLocalOracleBinCandidates({
         cwd: "/tmp",
-        moduleDir: "/Users/rubidium/project/lithium/dist-electron",
-        argvEntry: "/Users/rubidium/project/lithium/dist-electron/index.cjs",
-        resourcesPath: "/Applications/Electron.app/Contents/Resources"
+        moduleDir: "/Users/rubidium/project/lithium/dist",
+        argvEntry: "/Users/rubidium/project/lithium/dist/cli.cjs",
+        resourcesPath: "/Applications/Lithium.app/Contents/Resources"
       })
     ).toContain("/Users/rubidium/project/lithium/node_modules/.bin/oracle");
   });
