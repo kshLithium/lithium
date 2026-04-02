@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path, { basename } from "node:path";
 import type { AttachmentRecord, ProjectSnapshot, WorkspaceFileRecord } from "../../shared/types";
-import { handoffMachineSummary } from "../../shared/handoff-utils";
+import { handoffMachineSummary, resolveMeaningfulAutomationSummary } from "../../shared/handoff-utils";
 
 const SUPPORTED_STRATEGIST_UPLOAD_EXTENSIONS = new Set([
   ".md",
@@ -311,18 +311,18 @@ export function buildStrategistContextFingerprint(
       ? {
           id: snapshot.latestAutomationSession.id,
           status: snapshot.latestAutomationSession.status,
-          latestCheckpointId: snapshot.latestAutomationSession.latestCheckpointId,
-          currentStepSummary: snapshot.latestAutomationSession.currentStepSummary,
-          updatedAt: snapshot.latestAutomationSession.updatedAt
+          currentStepSummary: resolveMeaningfulAutomationSummary(
+            snapshot.latestAutomationSession.currentStepSummary,
+            snapshot.latestAutomationSession.displayObjective,
+            snapshot.latestAutomationSession.objective
+          )
         }
       : null,
     latestAutomationCheckpoint: snapshot.latestAutomationCheckpoint
       ? {
-          id: snapshot.latestAutomationCheckpoint.id,
           status: snapshot.latestAutomationCheckpoint.status,
           title: snapshot.latestAutomationCheckpoint.title,
-          summary: snapshot.latestAutomationCheckpoint.summary,
-          updatedAt: snapshot.latestAutomationCheckpoint.updatedAt
+          summary: snapshot.latestAutomationCheckpoint.summary
         }
       : null,
     workspaceFingerprint: options.workspaceFingerprint ?? ""
@@ -362,6 +362,9 @@ export function buildStrategistPromptEnvelope(input: {
     return [
       "당신은 이 연구 워크스페이스의 strategist입니다.",
       "첨부된 context 파일들을 현재 상태의 기준으로 사용하세요.",
+      "기본적으로는 큰 실험 흐름, branch 우선순위, decision gate, 다음 bounded move를 먼저 판단하세요.",
+      "개별 코드 조각, 단일 로그, 단일 실험 카드의 세부 해석은 사용자가 명시적으로 요구하거나 그 세부가 분기 판단에 직접 필요할 때만 다루세요.",
+      "세부 쟁점이 여러 개면 한 답변에서 모두 깊게 파고들기보다, 공통 흐름 판단을 먼저 내리고 독립 쟁점을 분리할 수 있게 정리하세요.",
       originalPrompt !== workingPrompt
         ? "원래 사용자 문장과 정리된 작업 지시가 다르면, 원래 사용자 의도를 우선하고 정리된 문장은 보조 설명으로만 사용하세요."
         : "아래 사용자 요청을 그대로 되풀이하지 말고, 현재 상태 판단과 다음 중요한 방향으로 바로 들어가세요.",
@@ -384,6 +387,9 @@ export function buildStrategistPromptEnvelope(input: {
   return [
     "You are the strategist for this research workspace.",
     "Use the attached context files as the source of truth for the current project state.",
+    "Default to the portfolio-level experiment flow: branch priority, decision gates, and the next bounded move.",
+    "Do not dive into line-level code, single-log fragments, or one experiment card at a time unless the user explicitly asked for that detail or it is directly required for the decision.",
+    "If the ask contains several fine-grained issues, lead with the shared flow judgment first and separate the independent sub-questions instead of drilling into everything at once.",
     originalPrompt !== workingPrompt
       ? "If the original user wording and the clarified working ask differ, satisfy the original user intent first and use the clarified ask only as supporting structure."
       : "Do not begin by repeating the user's wording verbatim; move directly into the current judgment and next high-value direction.",

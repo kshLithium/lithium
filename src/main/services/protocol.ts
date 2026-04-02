@@ -7,6 +7,8 @@ const ROUTER_MARKER = "LITHIUM_ROUTE";
 
 const INCOMPLETE_STRATEGIST_PREFIX =
   /^(?:i['’]?m|let me|sure|certainly|okay|ok|alright|based on|here(?:'s| is)?|pulling|reviewing|comparing|synthesizing)\b/i;
+const USER_VISIBLE_SYSTEM_NOISE_PATTERN =
+  /^(?:connect econnrefused\b.*|prompt textarea did not appear before timeout\b.*|prompt did not appear in conversation before timeout\b.*|prompt-not-in-composer\b.*|send may have failed\b.*|reconnecting\.\.\.\s*\d+\/\d+\b.*|stream disconnected before comp\b.*|write_stdin failed\b.*|stdin is closed\b.*|chrome window closed before oracle finished\b.*|chrome disconnected before completion\b.*|if the saved chatgpt session expired\b.*|set lithium_oracle_visible=1\b.*|no (?:chatgpt )?cookies were applied\b.*|log in to chatgpt in chrome\b.*|provide inline cookies\b.*|unable to find model option matching\b.*)$/i;
 
 export function parseOracleOutput(rawOutput: string): LithiumHandoff {
   const parsed = parseMarkedJsonBlock(rawOutput, STRATEGIST_MARKER);
@@ -214,13 +216,31 @@ function stripMarkedBlock(rawText: string, marker: string) {
 }
 
 export function extractVisibleStrategistMessage(rawOutput: string) {
-  const stripped = stripMarkedBlock(rawOutput, STRATEGIST_MARKER).trim();
+  const stripped = stripUserVisibleSystemNoise(stripMarkedBlock(rawOutput, STRATEGIST_MARKER)).trim();
 
   if (!stripped || looksLikeStructuredStrategistOnly(stripped)) {
     return "";
   }
 
   return stripped;
+}
+
+export function containsUserVisibleSystemNoise(value: string) {
+  return value
+    .split("\n")
+    .map((line) => normalizePotentialSystemNoiseLine(line))
+    .some((line) => USER_VISIBLE_SYSTEM_NOISE_PATTERN.test(line));
+}
+
+export function stripUserVisibleSystemNoise(value: string) {
+  const filteredLines = value
+    .split("\n")
+    .filter((line) => !USER_VISIBLE_SYSTEM_NOISE_PATTERN.test(normalizePotentialSystemNoiseLine(line)));
+
+  return filteredLines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export function extractVisibleBuilderMessage(finalMessage: string) {
@@ -343,7 +363,7 @@ function firstNonEmptyLine(rawOutput: string) {
 }
 
 function extractFallbackStrategistSummary(rawOutput: string, maxChars = 280) {
-  const stripped = stripMarkedBlock(rawOutput, STRATEGIST_MARKER).trim();
+  const stripped = stripUserVisibleSystemNoise(stripMarkedBlock(rawOutput, STRATEGIST_MARKER)).trim();
 
   if (!stripped) {
     return "";
@@ -371,6 +391,13 @@ function extractFallbackStrategistSummary(rawOutput: string, maxChars = 280) {
   }
 
   return truncateInline(firstNonEmptyLine(stripped), maxChars);
+}
+
+function normalizePotentialSystemNoiseLine(line: string) {
+  return line
+    .trim()
+    .replace(/^(?:[-*+]|>\s*|\d+[.)])\s*/, "")
+    .trim();
 }
 
 function isHeadingOnlyParagraph(paragraph: string) {

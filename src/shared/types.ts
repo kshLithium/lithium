@@ -203,6 +203,7 @@ export type AutomationSessionRecord = {
   latestStepId?: string;
   latestCheckpointId?: string;
   currentStepSummary: string;
+  lastConversationReportFingerprint?: string;
   lastUserInstruction?: string;
   queuedUserInstruction?: string;
   stopReason?: string;

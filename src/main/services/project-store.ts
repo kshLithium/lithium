@@ -26,7 +26,8 @@ import { DEFAULT_PROJECT_RESEARCH_GOAL } from "../../shared/types";
 import {
   handoffMachineSummary,
   handoffUserMessage,
-  isOperationalAutomationMessage
+  isOperationalAutomationMessage,
+  resolveMeaningfulAutomationSummary
 } from "../../shared/handoff-utils";
 import { extractFinalSummary } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
@@ -107,6 +108,7 @@ type RuntimeContextOptions = {
   artifactId?: string;
   strategistSelectedUploadLines?: string[];
   strategistSkippedUploadLines?: string[];
+  omitRecentAutomationAssistantEntries?: boolean;
 };
 
 export class ProjectStore {
@@ -833,7 +835,10 @@ export class ProjectStore {
     const recentConversation = (snapshot.conversationEntries ?? [])
       .filter((entry) => {
         if (entry.role !== "user") {
-          return true;
+          return !(
+            options.omitRecentAutomationAssistantEntries &&
+            isAutomationAssistantConversationEntry(entry)
+          );
         }
 
         return normalizeContextComparable(entry.body) !== normalizedPrompt;
@@ -2153,6 +2158,14 @@ function summarizeRecentRuntimeUserMessages(
   return messages.length ? messages.map((body) => `- ${body}`).join("\n") : "- none";
 }
 
+function isAutomationAssistantConversationEntry(entry: ConversationEntryRecord) {
+  return (
+    entry.role !== "user" &&
+    Boolean(entry.automationSessionId) &&
+    (entry.source === "automation" || entry.source === "checkpoint" || entry.source === "system")
+  );
+}
+
 function formatAttachmentSize(sizeBytes: number) {
   if (sizeBytes < 1024) {
     return `${sizeBytes} B`;
@@ -2303,7 +2316,11 @@ function formatAutomationContextState(
   }
 
   const summary = humanizeAutomationContextSummary(
-    session.currentStepSummary || session.displayObjective || session.objective,
+    resolveMeaningfulAutomationSummary(
+      session.currentStepSummary,
+      session.displayObjective,
+      session.objective
+    ),
     language
   );
   const status = formatAutomationStatusToken(session.status, language);
@@ -2335,7 +2352,11 @@ function formatAutomationSessionSummary(
 
   const status = formatAutomationStatusToken(session.status, language);
   const summary = humanizeAutomationContextSummary(
-    session.currentStepSummary || session.displayObjective || session.objective,
+    resolveMeaningfulAutomationSummary(
+      session.currentStepSummary,
+      session.displayObjective,
+      session.objective
+    ),
     language
   );
 

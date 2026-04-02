@@ -63,6 +63,9 @@ import {
   isOperationalAutomationMessage
 } from "../../shared/handoff-utils";
 import {
+  dedupeNormalizedParagraphs
+} from "../../shared/conversation-normalization";
+import {
   sanitizePromptEchoProgress,
   stripLeadingPromptEchoParagraph
 } from "../../shared/prompt-echo";
@@ -80,11 +83,13 @@ import { OrchestratorRunner, type OrchestratorDelegationLane } from "./orchestra
 import { type OrchestratorDelegationDirective } from "./orchestrator-directives";
 import { ChatgptAuthRunner } from "./chatgpt-auth-runner";
 import {
+  containsUserVisibleSystemNoise,
   describeIncompleteStrategistOutput,
   extractVisibleBuilderMessage,
   extractVisibleStrategistMessage,
   parseBuilderOutput,
-  parseOracleOutput
+  parseOracleOutput,
+  stripUserVisibleSystemNoise
 } from "./protocol";
 import {
   collectGitChangedFiles,
@@ -110,6 +115,7 @@ import {
 } from "./strategist-context";
 import {
   extractOracleSessionProgress,
+  hasMeaningfulStrategistProgress,
   mergeStrategistLiveProgress,
   readLiveOracleSessionProgress
 } from "./strategist-progress";
@@ -206,9 +212,12 @@ type StrategistSubmission = {
 
 const ASYNC_STRATEGIST_POLL_INTERVAL_MS = 5_000;
 const ASYNC_STRATEGIST_STALL_MS = 10 * 60 * 1000;
+const AUTOMATION_CHAT_ANSWER_TIMEOUT_MS = 10 * 60 * 1000;
 const STRATEGIST_ARCHIVE_DIGEST_MAX_ENTRIES = 160;
 const STRATEGIST_ARCHIVE_DIGEST_MAX_PREVIEWS = 12;
 const STRATEGIST_ARCHIVE_DIGEST_MAX_PREVIEW_BYTES = 24_000;
+const STRATEGIST_DEFAULT_DIRECT_UPLOAD_MAX_FILES = 2;
+const STRATEGIST_EXPLICIT_DIRECT_UPLOAD_MAX_FILES = 3;
 
 export class AppService {
   private selectedWorkspacePath: string;
@@ -772,31 +781,115 @@ export class AppService {
     },
     displayPrompt: string
   ) {
-    await this.store.appendPromptLog(input.workspacePath, {
-      kind: "chat.user",
-      lane: "automation",
-      threadId: input.session.threadId,
-      prompt: displayPrompt,
-      normalizedPrompt: input.question,
-      source: "automation-checkpoint-question"
-    });
+    const snapshot = await this.store.getSnapshot(input.workspacePath);
+    const activeThread =
+      snapshot.threads.find((thread) => thread.id === input.session.threadId) ?? snapshot.activeThread;
 
+    if (!activeThread) {
+      throw new Error("No active thread is available.");
+    }
+
+    const prompt = buildAutomationChatFollowupPrompt(
+      input.session,
+      input.question,
+      input.checkpoint
+    );
+    const answerPaths = this.buildAutomationQuestionAnswerPaths(
+      input.workspacePath,
+      activeThread.id,
+      displayPrompt
+    );
+    const context = await this.prepareModelContext({
+      workspacePath: input.workspacePath,
+      prompt,
+      lane: "builder",
+      snapshot,
+      artifactId: answerPaths.id
+    });
+    const executionContext = await resolveWorkspaceCommandContext(input.workspacePath);
+    const appSettings = await this.getAppSettings().catch(() => DEFAULT_APP_SETTINGS);
+    const answerModel = appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel;
+
+    await mkdir(path.dirname(answerPaths.outputPath), { recursive: true });
+    await this.appendAutomationUserEntry(input.workspacePath, input.session, displayPrompt);
+    await this.store.appendPromptLog(input.workspacePath, {
+      kind: "automation.question.request",
+      lane: "automation",
+      threadId: activeThread.id,
+      sessionId: input.session.id,
+      checkpointId: input.checkpoint.id,
+      prompt,
+      displayPrompt,
+      source: "automation-checkpoint-question",
+      runtimeContext: context.runtimeContext,
+      contextPackPath: context.contextPackPath
+    });
     await this.store.appendActivity(
       input.workspacePath,
-      `${input.session.id} answered an automation checkpoint question in chat`
+      `${input.session.id} answering an automation checkpoint question in chat`
     );
-    await this.appendAutomationUserEntry(input.workspacePath, input.session, displayPrompt);
 
-    return await this.startBuilderTask({
-      workspacePath: input.workspacePath,
-      threadId: input.session.threadId,
-      prompt: buildAutomationChatFollowupPrompt(
-        input.session,
-        input.question,
-        input.checkpoint
-      ),
-      displayPrompt
+    this.setChatProgress(input.workspacePath, {
+      lane: "orchestrator",
+      threadId: activeThread.id,
+      promptPreview: displayPrompt,
+      progressSummary: "",
+      progressDetails: [],
+      activeCommand: null,
+      stdoutPath: answerPaths.stdoutPath,
+      stderrPath: answerPaths.stderrPath,
+      operationId: "automation-chat-answer"
     });
+
+    try {
+      const result = await this.codexRunner.runTask({
+        workspacePath: input.workspacePath,
+        commandCwd: executionContext.commandCwd,
+        prompt,
+        runtimeContext: context.runtimeContext,
+        artifactContext: context.artifactContext,
+        model: answerModel,
+        reasoningEffort: "xhigh",
+        promptLanguage: appSettings.autopilotPromptLanguage,
+        stdoutPath: answerPaths.stdoutPath,
+        stderrPath: answerPaths.stderrPath,
+        outputPath: answerPaths.outputPath,
+        timeoutMs: AUTOMATION_CHAT_ANSWER_TIMEOUT_MS,
+        env: executionContext.env
+      });
+      const reply =
+        sanitizeConversationBody(result.finalMessage) ||
+        input.checkpoint.summary.trim() ||
+        "I reviewed the latest checkpoint context, but I do not have a clearer answer yet.";
+
+      await this.store.appendPromptLog(input.workspacePath, {
+        kind: "automation.question.response",
+        lane: "automation",
+        threadId: activeThread.id,
+        sessionId: input.session.id,
+        checkpointId: input.checkpoint.id,
+        model: answerModel,
+        command: result.command,
+        finalMessage: result.finalMessage,
+        summary: reply,
+        timedOut: result.timedOut
+      });
+      await this.appendAutomationAssistantEntry(input.workspacePath, {
+        session: input.session,
+        body: reply
+      });
+      await this.syncThreadFromArtifacts(input.workspacePath, activeThread, {
+        prompt: displayPrompt,
+        summary: reply
+      });
+      await this.store.appendActivity(
+        input.workspacePath,
+        `${input.session.id} answered an automation checkpoint question in chat`
+      );
+      return await this.getSummarizedSnapshot(input.workspacePath);
+    } finally {
+      this.clearChatProgress(input.workspacePath, activeThread.id, "automation-chat-answer");
+    }
   }
 
   private async answerRunningAutomationQuestion(
@@ -889,6 +982,7 @@ export class AppService {
         stdoutPath: answerPaths.stdoutPath,
         stderrPath: answerPaths.stderrPath,
         outputPath: answerPaths.outputPath,
+        timeoutMs: AUTOMATION_CHAT_ANSWER_TIMEOUT_MS,
         env: executionContext.env
       });
       const reply =
@@ -1255,8 +1349,11 @@ export class AppService {
       body: string;
     }
   ) {
-    const latestUserBody = await this.findLatestThreadUserBody(workspacePath, input.threadId);
-    const body = stripLeadingPromptEchoParagraph(sanitizeConversationBody(input.body), latestUserBody);
+    const body = await this.prepareAssistantConversationBody(
+      workspacePath,
+      input.threadId,
+      input.body
+    );
 
     if (!body) {
       return null;
@@ -1279,7 +1376,11 @@ export class AppService {
       stepId?: string;
     }
   ) {
-    const body = input.body.trim();
+    const body = await this.prepareAssistantConversationBody(
+      workspacePath,
+      input.session.threadId,
+      input.body
+    );
 
     if (!body) {
       return null;
@@ -1318,6 +1419,15 @@ export class AppService {
       automationCycleId: input.cycleId,
       automationStepId: input.stepId
     });
+  }
+
+  private async prepareAssistantConversationBody(
+    workspacePath: string,
+    threadId: string,
+    body: string
+  ) {
+    const latestUserBody = await this.findLatestThreadUserBody(workspacePath, threadId);
+    return stripLeadingPromptEchoParagraph(sanitizeConversationBody(body), latestUserBody);
   }
 
   private async appendAutomationWorkerHistory(
@@ -1457,6 +1567,34 @@ export class AppService {
     return nextSession;
   }
 
+  private async persistAutomationConversationReportFingerprint(
+    workspacePath: string,
+    session: AutomationSessionRecord,
+    fingerprint: string
+  ) {
+    const normalizedFingerprint = fingerprint.trim();
+
+    if (!normalizedFingerprint) {
+      return session;
+    }
+
+    const currentSession =
+      (await this.store.readAutomationSession(workspacePath, session.id).catch(() => null)) ?? session;
+
+    if (currentSession.lastConversationReportFingerprint === normalizedFingerprint) {
+      return currentSession;
+    }
+
+    const nextSession: AutomationSessionRecord = {
+      ...currentSession,
+      lastConversationReportFingerprint: normalizedFingerprint,
+      updatedAt: new Date().toISOString()
+    };
+
+    await this.store.writeAutomationSession(workspacePath, nextSession);
+    return nextSession;
+  }
+
   private async runSerializedOrchestratorTurn<T>(
     workspacePath: string,
     scopeKey: string,
@@ -1498,9 +1636,10 @@ export class AppService {
     delegation: Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>,
     options: {
       strategistSessionReady?: boolean;
+      progressOperationId?: string;
     } = {}
   ) {
-    const progressOperationId = delegation.lane;
+    const progressOperationId = options.progressOperationId ?? delegation.lane;
 
     if (delegation.lane === "strategist") {
       this.setChatProgress(input.workspacePath, {
@@ -1609,7 +1748,13 @@ export class AppService {
     } = {}
   ) {
     const results = await Promise.all(
-      delegations.map((delegation) => this.runOrchestratorWorkerTurn(input, delegation, options))
+      delegations.map((delegation, index) =>
+        this.runOrchestratorWorkerTurn(input, delegation, {
+          ...options,
+          progressOperationId:
+            delegations.length > 1 ? `${delegation.lane}-${index + 1}` : delegation.lane
+        })
+      )
     );
 
     return {
@@ -2608,17 +2753,20 @@ export class AppService {
     workspacePath: string,
     progress: ActiveChatProgress
   ): Promise<ChatProgressInspection> {
-    const [stdoutTail, stderrTail, oracleLogTail, liveOracleProgress, latestTouchedAt] = await Promise.all([
+    const [stdoutTail, stderrTail, oracleLogTail, latestTouchedAt] = await Promise.all([
       progress.stdoutPath ? readTailText(progress.stdoutPath) : Promise.resolve(""),
       progress.stderrPath ? readTailText(progress.stderrPath) : Promise.resolve(""),
       progress.oracleSessionSlug ? readOracleSessionTail(progress.oracleSessionSlug) : Promise.resolve(""),
-      progress.oracleSessionSlug
-        ? readLiveOracleSessionProgress(progress.oracleSessionSlug, progress.promptPreview)
-        : Promise.resolve(null),
       resolveChatProgressTouchedAt(progress)
     ]);
     const oracleProgress = extractOracleSessionProgress(oracleLogTail);
     const strategistProgress = progress.lane === "strategist";
+    const liveOracleProgress =
+      strategistProgress &&
+      progress.oracleSessionSlug &&
+      !hasMeaningfulStrategistProgress(oracleProgress)
+        ? await readLiveOracleSessionProgress(progress.oracleSessionSlug, progress.promptPreview)
+        : null;
     const strategistLiveProgress = mergeStrategistLiveProgress(liveOracleProgress, oracleProgress);
     const codexProgress = strategistProgress ? null : parseCodexProgressLog(stdoutTail);
     const hasCodexNarration = Boolean(codexProgress?.progressSummary || codexProgress?.progressDetails.length);
@@ -3285,32 +3433,36 @@ export class AppService {
       workspaceFilePaths: relevantWorkspaceFiles
     });
     const uploadPlan = await this.resolveStrategistUploadPlan({
+      maxFiles:
+        input.attachExplicitWorkspaceFiles === true
+          ? STRATEGIST_EXPLICIT_DIRECT_UPLOAD_MAX_FILES
+          : STRATEGIST_DEFAULT_DIRECT_UPLOAD_MAX_FILES,
       candidates: [
         {
           path: strategistContext.runtimeContextPath,
           priority: 1_000,
           label: path.relative(input.workspacePath, strategistContext.runtimeContextPath)
         },
-        strategistContext.contextPackPath
+        {
+          path: strategistReferenceDigestPath,
+          priority: 980,
+          label: path.relative(input.workspacePath, strategistReferenceDigestPath)
+        },
+        input.attachExplicitWorkspaceFiles === true && strategistContext.contextPackPath
           ? {
               path: strategistContext.contextPackPath,
-              priority: 960,
+              priority: 920,
               label: path.relative(input.workspacePath, strategistContext.contextPackPath)
             }
           : null,
-        {
-          path: strategistReferenceDigestPath,
-          priority: 940,
-          label: path.relative(input.workspacePath, strategistReferenceDigestPath)
-        },
         ...relevantWorkspaceFiles.map((filePath, index) => ({
           path: filePath,
-          priority: 920 - index,
+          priority: 880 - index,
           label: path.relative(input.workspacePath, filePath)
         })),
         ...recentAttachmentPaths.map((filePath, index) => ({
           path: filePath,
-          priority: 860 - index,
+          priority: 820 - index,
           label: path.relative(input.workspacePath, filePath)
         }))
       ]
@@ -3345,9 +3497,11 @@ export class AppService {
         latestChangedFiles,
         recentAttachmentNames: threadAttachmentRecords.map((record) => record.relativePath),
         attachedContextLabels: [
-          "runtime context",
-          strategistContext.contextPackPath ? "full context pack" : "",
-          "strategist digest"
+          uploadPlan.files.includes(refreshedRuntimeContext.path) ? "runtime context" : "",
+          strategistContext.contextPackPath && uploadPlan.files.includes(strategistContext.contextPackPath)
+            ? "full context pack"
+            : "",
+          uploadPlan.files.includes(strategistReferenceDigestPath) ? "strategist digest" : ""
         ].filter(Boolean),
         attachedRawFileNames: uploadPlan.files
           .filter((filePath) => filePath !== refreshedRuntimeContext.path)
@@ -3369,6 +3523,7 @@ export class AppService {
   }
 
   private async resolveStrategistUploadPlan(input: {
+    maxFiles?: number;
     candidates: Array<StrategistUploadPlanCandidate | null>;
   }): Promise<StrategistUploadPlan> {
     const deduped = new Map<string, StrategistUploadPlanCandidate>();
@@ -3410,7 +3565,7 @@ export class AppService {
     }
 
     const files = limitStrategistUploadCandidates(supported, {
-      maxFiles: STRATEGIST_BROWSER_UPLOAD_MAX_FILES
+      maxFiles: input.maxFiles ?? STRATEGIST_BROWSER_UPLOAD_MAX_FILES
     });
     const selectedPaths = new Set(files);
 
@@ -4150,28 +4305,37 @@ export class AppService {
     delegations: AutomationWorkerDelegation[]
   ): AutomationCycleLaneState[] {
     const now = new Date().toISOString();
+    const states = new Map<AutomationCycleLaneState["lane"], AutomationCycleLaneState>();
 
-    return delegations.map((delegation) => ({
-      lane: delegation.lane,
-      title:
-        delegation.lane === "builder"
-          ? "Run the next builder execution branch"
-          : "Run the next strategist research branch",
-      status: "pending",
-      workerMode:
-        delegation.lane === "builder"
-          ? delegation.executionMode === "live"
-            ? "live"
-            : delegation.executionMode === "sync"
-            ? "sync"
-            : "async"
-          : resolveStrategistWorkerMode(delegation.workerMode),
-      summary:
-        delegation.lane === "builder"
-          ? "Waiting for the next builder branch to start."
-          : "Waiting for the next strategist branch to start.",
-      updatedAt: now
-    }));
+    for (const delegation of delegations) {
+      if (states.has(delegation.lane)) {
+        continue;
+      }
+
+      states.set(delegation.lane, {
+        lane: delegation.lane,
+        title:
+          delegation.lane === "builder"
+            ? "Run the next builder execution branch"
+            : "Run the next strategist research branch",
+        status: "pending",
+        workerMode:
+          delegation.lane === "builder"
+            ? delegation.executionMode === "live"
+              ? "live"
+              : delegation.executionMode === "sync"
+              ? "sync"
+              : "async"
+            : resolveStrategistWorkerMode(delegation.workerMode),
+        summary:
+          delegation.lane === "builder"
+            ? "Waiting for the next builder branch to start."
+            : "Waiting for the next strategist branch to start.",
+        updatedAt: now
+      });
+    }
+
+    return [...states.values()];
   }
 
   private async updateAutomationCycleLaneState(
@@ -5111,18 +5275,50 @@ export class AppService {
       workspacePath,
       session.id
     );
+    const automationSessionPatch = buildAutomationDelegationSessionPatch({
+      automationDelegation,
+      session: activeSession,
+      redirectInstruction
+    });
+
+    if (Object.keys(automationSessionPatch).length > 0) {
+      activeSession = await this.writeRunningAutomationSession(
+        workspacePath,
+        activeSession,
+        automationSessionPatch
+      );
+    }
+
+    const explicitCheckpointPause = shouldPauseForAutomationDelegation({
+      automationDelegation,
+      session: activeSession,
+      redirectInstruction
+    });
     const refreshStrategistDelegation = buildRequiredAutomationStrategistDelegation({
       existingDelegations: plannedWorkerDelegations,
-      hasAutomationDelegation: Boolean(automationDelegation),
+      hasAutomationDelegation: explicitCheckpointPause,
       hasRunningBackgroundStrategist,
-      session,
+      session: activeSession,
       redirectInstruction,
       languagePreference: appSettings.autopilotPromptLanguage,
       snapshot
     });
-    const augmentedWorkerDelegations = refreshStrategistDelegation
-      ? [...plannedWorkerDelegations, refreshStrategistDelegation]
-      : plannedWorkerDelegations;
+    const fallbackStrategistDelegation = buildFallbackAutomationStrategistDelegation({
+      automationDelegation,
+      existingDelegations: refreshStrategistDelegation
+        ? [...plannedWorkerDelegations, refreshStrategistDelegation]
+        : plannedWorkerDelegations,
+      hasRunningBackgroundStrategist,
+      session: activeSession,
+      redirectInstruction,
+      languagePreference: appSettings.autopilotPromptLanguage,
+      snapshot
+    });
+    const augmentedWorkerDelegations = [
+      ...plannedWorkerDelegations,
+      ...(refreshStrategistDelegation ? [refreshStrategistDelegation] : []),
+      ...(fallbackStrategistDelegation ? [fallbackStrategistDelegation] : [])
+    ];
     const workerDelegations = hasRunningBackgroundStrategist
       ? plannedWorkerDelegations.filter(
           (delegation) =>
@@ -5165,7 +5361,7 @@ export class AppService {
       });
     }
 
-    if (automationDelegation && !workerDelegations.length) {
+    if (explicitCheckpointPause && automationDelegation && !workerDelegations.length) {
       const pauseSummary =
         planningReply ||
         automationDelegation.prompt.trim() ||
@@ -5206,7 +5402,7 @@ export class AppService {
       };
     }
 
-    if (!workerDelegations.length && skippedDuplicateBackgroundStrategist) {
+    if (!workerDelegations.length && hasRunningBackgroundStrategist && !explicitCheckpointPause) {
       await this.writeRunningAutomationSession(workspacePath, activeSession, {
         currentStepSummary: "A background strategist branch is still running. Waiting for fresh research before replanning."
       });
@@ -5250,67 +5446,82 @@ export class AppService {
     const refreshedSnapshot = workerTurn.snapshot;
     const refreshedThread =
       refreshedSnapshot.threads.find((thread) => thread.id === activeThread.id) ?? activeThread;
-    const followupPrompt = buildAutomationOrchestratorFollowupPrompt({
-      objective: redirectInstruction || activeSession.displayObjective || activeSession.objective,
-      results: workerTurn.results,
-      language: resolveConversationLanguageFromEntries(
-        refreshedSnapshot.conversationEntries ?? [],
-        activeSession.threadId
-      )
-    });
+    const followupFallbackReply = summarizeAutomationWorkerResultsForConversation(workerTurn.results);
+    const followupReportFingerprint = buildAutomationConversationReportFingerprint(workerTurn.results);
+    const shouldPublishFollowup = shouldPublishAutomationConversationReport(
+      activeSession,
+      followupReportFingerprint
+    );
+    const lastPublishedUpdate = findLatestAutomationConversationUpdate(
+      refreshedSnapshot.conversationEntries ?? [],
+      activeSession.threadId
+    );
+    let followupReply = followupFallbackReply;
 
-    this.setChatProgress(workspacePath, {
-      lane: "orchestrator",
-      threadId: refreshedThread.id,
-      promptPreview: redirectInstruction || activeSession.displayObjective || activeSession.objective,
-      progressSummary: "",
-      progressDetails: [],
-      activeCommand: null,
-      stdoutPath: path.join(requestDir, "orchestrator.automation.followup.stdout.log"),
-      stderrPath: path.join(requestDir, "orchestrator.automation.followup.stderr.log"),
-      operationId: "automation-orchestrator"
-    });
-
-    let followupTurn: Awaited<ReturnType<NonNullable<typeof this.orchestratorRunner>["runTurn"]>>;
-
-    try {
-      const followupContext = await this.store.buildRuntimeContext(workspacePath, followupPrompt, {
-        lane: "builder"
+    if (shouldPublishFollowup) {
+      const followupPrompt = buildAutomationOrchestratorFollowupPrompt({
+        objective: redirectInstruction || activeSession.displayObjective || activeSession.objective,
+        results: workerTurn.results,
+        language: resolveConversationLanguageFromEntries(
+          refreshedSnapshot.conversationEntries ?? [],
+          activeSession.threadId
+        ),
+        lastPublishedUpdate
       });
-      followupTurn = await this.runSerializedOrchestratorTurn(
+
+      this.setChatProgress(workspacePath, {
+        lane: "orchestrator",
+        threadId: refreshedThread.id,
+        promptPreview: redirectInstruction || activeSession.displayObjective || activeSession.objective,
+        progressSummary: "",
+        progressDetails: [],
+        activeCommand: null,
+        stdoutPath: path.join(requestDir, "orchestrator.automation.followup.stdout.log"),
+        stderrPath: path.join(requestDir, "orchestrator.automation.followup.stderr.log"),
+        operationId: "automation-orchestrator"
+      });
+
+      let followupTurn: Awaited<ReturnType<NonNullable<typeof this.orchestratorRunner>["runTurn"]>>;
+
+      try {
+        const followupContext = await this.store.buildRuntimeContext(workspacePath, followupPrompt, {
+          lane: "builder",
+          omitRecentAutomationAssistantEntries: true
+        });
+        followupTurn = await this.runSerializedOrchestratorTurn(
+          workspacePath,
+          `planner:${session.id}`,
+          async () =>
+            await this.orchestratorRunner!.runTurn({
+              workspacePath,
+              sessionId:
+                activeSession.plannerSessionId ||
+                planningTurn.sessionId ||
+                session.plannerSessionId,
+              prompt: followupPrompt,
+              runtimeContext: followupContext.content,
+              stdoutPath: path.join(requestDir, "orchestrator.automation.followup.stdout.log"),
+              stderrPath: path.join(requestDir, "orchestrator.automation.followup.stderr.log"),
+              outputPath: path.join(requestDir, "orchestrator.automation.followup.reply.md"),
+              requestPaths,
+              hostKey: `planner:${session.id}`,
+              model: appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel,
+              reasoningEffort: "xhigh"
+            })
+        );
+      } finally {
+        this.clearChatProgress(workspacePath, refreshedThread.id, "automation-orchestrator");
+      }
+
+      activeSession = await this.persistAutomationPlannerSessionId(
         workspacePath,
-        `planner:${session.id}`,
-        async () =>
-          await this.orchestratorRunner!.runTurn({
-            workspacePath,
-            sessionId:
-              activeSession.plannerSessionId ||
-              planningTurn.sessionId ||
-              session.plannerSessionId,
-            prompt: followupPrompt,
-            runtimeContext: followupContext.content,
-            stdoutPath: path.join(requestDir, "orchestrator.automation.followup.stdout.log"),
-            stderrPath: path.join(requestDir, "orchestrator.automation.followup.stderr.log"),
-            outputPath: path.join(requestDir, "orchestrator.automation.followup.reply.md"),
-            requestPaths,
-            hostKey: `planner:${session.id}`,
-            model: appSettings.builderModel === "gpt-5.3-codex" ? "gpt-5.4" : appSettings.builderModel,
-            reasoningEffort: "xhigh"
-          })
+        activeSession,
+        followupTurn.sessionId
       );
-    } finally {
-      this.clearChatProgress(workspacePath, refreshedThread.id, "automation-orchestrator");
+
+      followupReply = sanitizeConversationBody(followupTurn.finalMessage) || followupFallbackReply;
     }
 
-    activeSession = await this.persistAutomationPlannerSessionId(
-      workspacePath,
-      activeSession,
-      followupTurn.sessionId
-    );
-
-    const followupReply =
-      sanitizeConversationBody(followupTurn.finalMessage) ||
-      summarizeAutomationWorkerResultsForConversation(workerTurn.results);
     const relatedDecisionId = workerTurn.results.some(
       (result) => result.lane === "strategist" && !result.pending
     )
@@ -5320,13 +5531,24 @@ export class AppService {
       ? refreshedSnapshot.latestRun?.id
       : undefined;
 
-    await this.appendAutomationAssistantEntry(workspacePath, {
-      session: activeSession,
-      body: followupReply,
-      decisionId: relatedDecisionId,
-      runId: relatedRunId,
-      cycleId: cycle.id
-    });
+    if (shouldPublishFollowup) {
+      const appendedFollowupEntry = await this.appendAutomationAssistantEntry(workspacePath, {
+        session: activeSession,
+        body: followupReply,
+        decisionId: relatedDecisionId,
+        runId: relatedRunId,
+        cycleId: cycle.id
+      });
+
+      if (appendedFollowupEntry) {
+        activeSession = await this.persistAutomationConversationReportFingerprint(
+          workspacePath,
+          activeSession,
+          followupReportFingerprint
+        );
+      }
+    }
+
     await this.syncThreadFromArtifacts(workspacePath, refreshedThread, {
       prompt: redirectInstruction || activeSession.displayObjective || activeSession.objective,
       summary: followupReply
@@ -5617,7 +5839,6 @@ export class AppService {
     appSettings: AppSettings
   ): Promise<AutomationDelegatedWorkerResult> {
     const displayPrompt = resolveAutomationActiveInstruction(session, redirectInstruction);
-    const progressOperationId = `automation-${delegation.lane}`;
 
     if (delegation.lane === "strategist") {
       const strategistWorkerMode = resolveStrategistWorkerMode(delegation.workerMode);
@@ -5631,6 +5852,7 @@ export class AppService {
       });
       const strategistDisplayPrompt = `[Autopilot] ${displayPrompt}`;
       const strategistSlug = buildAutomationStrategistSessionSlug(workspacePath, session, cycle, strategistStep);
+      const progressOperationId = `automation-strategist-${strategistStep.id}`;
 
       if (strategistWorkerMode === "async") {
         const startedStrategist = await this.startAutomationStrategistLane(
@@ -5728,6 +5950,7 @@ export class AppService {
       title: "Run the next builder execution branch",
       prompt: delegation.prompt
     });
+    const progressOperationId = `automation-builder-${builderStep.id}`;
     let latestRun: RunRecord | null = null;
     let runStatus: RecordStatus = "failed";
     let runSummary = "";
@@ -7379,6 +7602,23 @@ function looksLikeAutomationStopInstruction(instruction: string) {
 }
 
 function looksLikeAutomationQuestion(instruction: string) {
+  return looksLikeAutomationQuestionWithMode(instruction, {
+    loose: true
+  });
+}
+
+function looksLikeExplicitAutomationQuestion(instruction: string) {
+  return looksLikeAutomationQuestionWithMode(instruction, {
+    loose: false
+  });
+}
+
+function looksLikeAutomationQuestionWithMode(
+  instruction: string,
+  options: {
+    loose: boolean;
+  }
+) {
   const normalized = instruction.trim().toLowerCase().replace(/\s+/g, " ");
 
   if (!normalized) {
@@ -7395,6 +7635,18 @@ function looksLikeAutomationQuestion(instruction: string) {
     )
   ) {
     return true;
+  }
+
+  if (
+    /(?:progress|status|update|report|summary|진행사항|현황|상태|보고|업데이트|요약).*(?:알려줘|말해줘|설명해줘|정리해줘)/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  if (!options.loose) {
+    return false;
   }
 
   return /(?:progress|status|update|report|summary|what|why|how|which|where|when|did|does|is it|are we|so far|진행사항|현황|상태|보고|업데이트|요약|왜|어떻게|뭐야|뭐임|뭔가|맞아|맞음|좋아졌|기준삼아|기준으로|된 거|된거|어느 쪽|무슨 근거|무슨 기준|설명해|정리해|비교해)/i.test(
@@ -7434,7 +7686,7 @@ function resolveAutomationConversationMode(
 }
 
 function sanitizeAutomationConversationSummary(summary: string) {
-  const trimmed = summary.trim();
+  const trimmed = stripUserVisibleSystemNoise(summary).trim();
 
   if (!trimmed) {
     return "";
@@ -7454,6 +7706,46 @@ function sanitizeAutomationConversationSummary(summary: string) {
   }
 
   return trimmed.replace(/\s+/g, " ").trim();
+}
+
+function humanizeAutomationUiIssue(summary: string, language: "ko" | "en") {
+  const sanitized = sanitizeAutomationConversationSummary(summary);
+
+  if (sanitized) {
+    return sanitized;
+  }
+
+  const trimmed = summary.trim();
+
+  if (!trimmed) {
+    return "";
+  }
+
+  if (isStrategistLoginRequiredFailure(trimmed) || isStrategistSessionExpiredFailure(trimmed)) {
+    return language === "ko"
+      ? "strategist 브라우저 단계가 ChatGPT 로그인 또는 세션 준비 문제로 막혔습니다."
+      : "The strategist browser step is blocked on ChatGPT login or session readiness.";
+  }
+
+  if (isStrategistBrowserClosedFailure(trimmed)) {
+    return language === "ko"
+      ? "strategist 브라우저 단계가 창 종료 또는 브라우저 연결 문제로 끝까지 이어지지 못했습니다."
+      : "The strategist browser step did not stay attached through completion.";
+  }
+
+  if (containsUserVisibleSystemNoise(trimmed)) {
+    return language === "ko"
+      ? "strategist/browser 전달 단계에서 일시적인 로컬 연결 문제가 있었습니다."
+      : "The strategist/browser handoff hit a temporary local connection issue.";
+  }
+
+  if (isStrategistBlockedFailure(trimmed)) {
+    return language === "ko"
+      ? "strategist 브라우저 단계에 보조 조치가 필요합니다."
+      : "The strategist browser step needs attention before automation can continue.";
+  }
+
+  return "";
 }
 
 function summarizeAutomationNextAction(nextActions: string[]) {
@@ -7715,11 +8007,18 @@ function classifyAutomationChatIntent(instruction: string): "resume" | "redirect
     return "stop";
   }
 
+  const explicitQuestion = looksLikeExplicitAutomationQuestion(instruction);
+  const resumeInstruction = looksLikeAutomationResumeInstruction(instruction);
+
+  if (!explicitQuestion && resumeInstruction) {
+    return "resume";
+  }
+
   if (looksLikeAutomationQuestion(instruction)) {
     return "question";
   }
 
-  if (looksLikeAutomationResumeInstruction(instruction)) {
+  if (resumeInstruction) {
     return "resume";
   }
 
@@ -7791,9 +8090,15 @@ function extractRunSummary(finalMessage: string) {
     return machineSummary;
   }
 
-  return stripConversationControlFooters(finalMessage)
+  const stripped = stripUserVisibleSystemNoise(stripConversationControlFooters(finalMessage))
     .replace(/\s+/g, " ")
-    .trim()
+    .trim();
+
+  if (stripped) {
+    return stripped.slice(0, 180);
+  }
+
+  return humanizeAutomationUiIssue(finalMessage, containsHangul(finalMessage) ? "ko" : "en")
     .slice(0, 180);
 }
 
@@ -7912,7 +8217,7 @@ export function buildAutomationContinuationAdvisorPrompt(input: {
   );
   const latestDecisionSummary =
     handoffMachineSummary(input.latestDecision?.handoff) || input.latestDecision?.summary || "";
-  const latestRunSummary =
+  const latestRunSummaryCandidate =
     handoffMachineSummary(input.latestRun?.handoff) ||
     input.runSummary.trim() ||
     extractRunSummary(input.latestRun?.finalMessage || "");
@@ -7921,10 +8226,12 @@ export function buildAutomationContinuationAdvisorPrompt(input: {
   const promptLanguage = resolveAutomationPromptLanguage(input.languagePreference, [
     latestInstruction,
     latestDecisionSummary,
-    latestRunSummary,
+    latestRunSummaryCandidate,
     latestCheckpointSummary,
     input.failureMessage
   ]);
+  const latestRunSummary =
+    humanizeAutomationUiIssue(latestRunSummaryCandidate, promptLanguage) || latestRunSummaryCandidate;
 
   const issueSummary =
     input.reason === "failed-run"
@@ -7986,7 +8293,7 @@ export function buildAutomationContinuationAdvisorPrompt(input: {
     .join("\n\n");
 }
 
-function buildAutomationOrchestratorPrompt(input: {
+export function buildAutomationOrchestratorPrompt(input: {
   session: AutomationSessionRecord;
   redirectInstruction: string;
   languagePreference: AppSettings["autopilotPromptLanguage"];
@@ -8070,6 +8377,7 @@ function buildAutomationOrchestratorFollowupPrompt(input: {
   objective: string;
   results: AutomationDelegatedWorkerResult[];
   language: "ko" | "en";
+  lastPublishedUpdate?: string;
 }) {
   const sections = [...input.results]
     .sort((left, right) => compareConversationLanePriority(left.lane, right.lane))
@@ -8080,9 +8388,12 @@ function buildAutomationOrchestratorFollowupPrompt(input: {
   if (promptLanguage === "ko") {
     return [
       `자동 연구 목표: ${input.objective.trim()}`,
+      input.lastPublishedUpdate ? `직전 사용자용 자동 보고: ${input.lastPublishedUpdate}` : "",
       ...sections,
       "이 답변은 자동 연구의 사용자용 진행 보고입니다.",
       "2~4문장 정도로만 짧게 답하고, 무엇이 달라졌는지, 왜 중요한지, 다음에 무엇을 할지를 쉬운 말로 정리하세요.",
+      "직전 사용자용 자동 보고와 비교해 이번에 실제로 바뀐 점부터 먼저 말하세요.",
+      "안 바뀐 baseline, gate, hold 문구는 바뀌지 않았다면 다시 길게 풀어쓰지 마세요.",
       "결과를 이해하는 데 꼭 필요한 metric 1개 정도만 넣고, command, env var, 내부 파일 경로, run id, bounded cycle 같은 운영 디테일은 사용자가 직접 요청하지 않은 이상 넣지 마세요.",
       "worker가 직접 말하는 듯한 톤을 피하고, 오케스트레이터가 전체 맥락을 보고 정리하는 한 명의 목소리로 쓰세요.",
       "최신 branch의 실행 play-by-play보다 전체 상태 변화와 우선순위를 먼저 말하세요. research branch가 있으면 그 판단을 framing으로 삼고 execution detail은 뒷받침 1개 정도로만 압축하세요.",
@@ -8094,9 +8405,12 @@ function buildAutomationOrchestratorFollowupPrompt(input: {
 
   return [
     `Automation objective: ${input.objective.trim()}`,
+    input.lastPublishedUpdate ? `Last user-facing automation update: ${input.lastPublishedUpdate}` : "",
     ...sections,
     "This reply is a user-facing progress update for the ongoing automation.",
     "Keep it to about 2-4 sentences and explain what changed, why it matters, and what happens next in simple language.",
+    "Lead with what actually changed since the last user-facing automation update.",
+    "Do not re-explain an unchanged baseline, gate, or hold line unless it changed in this cycle.",
     "Include at most one key metric when it materially helps. Do not include commands, env vars, internal file paths, run ids, or other operational detail unless the user explicitly asked.",
     "Do not sound like the worker speaking directly. Write as the orchestrator giving a single high-level update with the full context in view.",
     "Lead with the overall state change and priority, not the branch play-by-play. When a research branch exists, use it as the framing and compress execution detail to at most one supporting point.",
@@ -8157,6 +8471,7 @@ function summarizeAutomationDelegationCycle(
   languageSample: string
 ) {
   const uniqueLanes = Array.from(new Set(delegations.map((delegation) => delegation.lane)));
+  const strategistCount = delegations.filter((delegation) => delegation.lane === "strategist").length;
   const isKo = containsHangul(languageSample);
 
   if (uniqueLanes.includes("builder") && uniqueLanes.includes("strategist")) {
@@ -8172,7 +8487,11 @@ function summarizeAutomationDelegationCycle(
   }
 
   return isKo
-    ? "다음 실행 판단을 위한 strategist 리서치를 진행하고 있습니다."
+    ? strategistCount > 1
+      ? "다음 실행 판단을 위해 strategist 리서치 분기들을 병렬로 진행하고 있습니다."
+      : "다음 실행 판단을 위한 strategist 리서치를 진행하고 있습니다."
+    : strategistCount > 1
+    ? "Running strategist research branches in parallel for the next execution decision."
     : "Running strategist research for the next execution decision.";
 }
 
@@ -8195,7 +8514,9 @@ export function buildAutomationStrategistPrompt(
     if (promptLanguage === "ko") {
       return [
         `현재 사용자 목표: ${latestInstruction.trim()}`,
-        "위 문구를 그대로 반복해 답변을 시작하지 말고, 현재 상태 판단과 다음 bounded step으로 바로 요약하세요."
+        "위 문구를 그대로 반복해 답변을 시작하지 말고, 현재 상태 판단과 다음 bounded step으로 바로 요약하세요.",
+        "기본적으로는 개별 실험 카드나 코드 조각의 세부 비교보다, 현재 포트폴리오 흐름, branch 우선순위, decision gate를 먼저 판단하세요.",
+        "세부 로그나 코드 단편은 그 큰 흐름 판단을 지지하는 근거로만 짧게 사용하세요."
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -8203,7 +8524,9 @@ export function buildAutomationStrategistPrompt(
 
     return [
       `Current user goal: ${latestInstruction.trim()}`,
-      "Do not begin by repeating that wording verbatim. Translate it into the current state, the key judgment, and the next bounded step."
+      "Do not begin by repeating that wording verbatim. Translate it into the current state, the key judgment, and the next bounded step.",
+      "Default to portfolio-level experiment flow: branch priority, decision gates, and the next bounded cycle rather than one experiment card at a time.",
+      "Use detailed logs or code fragments only as supporting evidence for that higher-level judgment."
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -8219,6 +8542,7 @@ export function buildAutomationStrategistPrompt(
       failureSummary ? `직전 실패 요약: ${failureSummary}` : "",
       failureRisks.length ? formatPromptList("Failure risks", failureRisks) : "",
       "답변 첫 문장을 위 목표 문구의 반복으로 시작하지 말고, 실패 진단과 다음 판단으로 바로 들어가세요.",
+      "실패를 보더라도 개별 로그 한 줄이나 단일 코드 조각에 매달리기보다, 현재 branch 흐름과 recovery gate를 먼저 판단하세요.",
       "지금은 사용자에게 멈춰서 물어볼 단계가 아니라, 이 실패를 해결 대상으로 보고 원인을 진단한 뒤 다음 bounded recovery step을 하나 정해 진행해야 합니다.",
       "추가 리서치가 필요하면 먼저 하고, 그 다음 가장 가능성 높은 복구 step을 제안하세요.",
       "다만 다음 단계가 사용자 선택에 크게 의존하거나 여러 방향 중 하나를 골라야 한다면, 짧은 질문 하나를 하고 needs_user_checkpoint=true로 표시하세요."
@@ -8233,6 +8557,7 @@ export function buildAutomationStrategistPrompt(
     failureSummary ? `Latest failure summary: ${failureSummary}` : "",
     failureRisks.length ? formatPromptList("Failure risks", failureRisks) : "",
     "Do not begin by repeating that goal wording verbatim; move straight into the failure diagnosis and next judgment.",
+    "Even on failure, lead with the branch-level recovery gate and broader flow rather than over-indexing on one log fragment or one code edit.",
     "Do not stop for user review yet. Treat this failure as the next problem to solve, diagnose the cause, and choose the single highest-value bounded recovery step.",
     "If you need more research before editing code, do that first and then propose the most plausible recovery step.",
     "If the next move depends on a real user choice or multiple materially different directions, ask one concise question and set needs_user_checkpoint=true."
@@ -8356,6 +8681,44 @@ export function buildRequiredAutomationStrategistDelegation(input: {
   };
 }
 
+export function buildFallbackAutomationStrategistDelegation(input: {
+  automationDelegation?: Extract<OrchestratorDelegationDirective, { lane: "automation" }> | null;
+  existingDelegations: Array<Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>>;
+  hasRunningBackgroundStrategist: boolean;
+  session: AutomationSessionRecord;
+  redirectInstruction: string;
+  languagePreference: AppSettings["autopilotPromptLanguage"];
+  snapshot: ProjectSnapshot;
+}) {
+  if (!input.automationDelegation || input.hasRunningBackgroundStrategist) {
+    return null;
+  }
+
+  if (input.automationDelegation.mode === "checkpoint") {
+    return null;
+  }
+
+  if (input.existingDelegations.length > 0) {
+    return null;
+  }
+
+  return {
+    lane: "strategist" as const,
+    prompt: buildAutomationStrategistPrompt(
+      input.session,
+      input.redirectInstruction,
+      input.languagePreference,
+      input.snapshot.latestRun,
+      input.snapshot.latestAutomationCheckpoint,
+      input.snapshot.latestDecision
+    ),
+    workerMode: "async" as const,
+    model: "gpt-5.4-pro" as const,
+    reasoningIntensity: "extended" as const,
+    attachExplicitWorkspaceFiles: false
+  };
+}
+
 function resolveAutomationActiveInstruction(
   session: AutomationSessionRecord,
   redirectInstruction = ""
@@ -8366,6 +8729,73 @@ function resolveAutomationActiveInstruction(
     session.lastUserInstruction?.trim() ||
     session.displayObjective?.trim() ||
     session.objective.trim()
+  );
+}
+
+export function buildAutomationDelegationSessionPatch(input: {
+  automationDelegation?: Extract<OrchestratorDelegationDirective, { lane: "automation" }> | null;
+  session: AutomationSessionRecord;
+  redirectInstruction: string;
+}) {
+  const automationDelegation = input.automationDelegation;
+
+  if (!automationDelegation) {
+    return {} satisfies Partial<AutomationSessionRecord>;
+  }
+
+  const nextBudget = {
+    ...input.session.budget,
+    maxSteps: automationDelegation.maxSteps ?? input.session.budget.maxSteps,
+    maxRuntimeMinutes:
+      automationDelegation.maxRuntimeMinutes ?? input.session.budget.maxRuntimeMinutes,
+    maxRetries: automationDelegation.maxRetries ?? input.session.budget.maxRetries
+  };
+  const resolvedMode = automationDelegation.mode
+    ? resolveAutomationConversationMode(
+        automationDelegation.mode,
+        input.redirectInstruction ||
+          input.session.queuedUserInstruction?.trim() ||
+          input.session.lastUserInstruction?.trim() ||
+          input.session.displayObjective?.trim() ||
+          input.session.objective
+      )
+    : input.session.mode;
+  const budgetChanged =
+    nextBudget.maxSteps !== input.session.budget.maxSteps ||
+    nextBudget.maxRuntimeMinutes !== input.session.budget.maxRuntimeMinutes ||
+    nextBudget.maxRetries !== input.session.budget.maxRetries;
+
+  const patch: Partial<AutomationSessionRecord> = {};
+
+  if (resolvedMode !== input.session.mode) {
+    patch.mode = resolvedMode;
+  }
+
+  if (budgetChanged) {
+    patch.budget = nextBudget;
+  }
+
+  return patch;
+}
+
+function shouldPauseForAutomationDelegation(input: {
+  automationDelegation?: Extract<OrchestratorDelegationDirective, { lane: "automation" }> | null;
+  session: AutomationSessionRecord;
+  redirectInstruction: string;
+}) {
+  if (!input.automationDelegation || input.automationDelegation.mode !== "checkpoint") {
+    return false;
+  }
+
+  return (
+    resolveAutomationConversationMode(
+      input.automationDelegation.mode,
+      input.redirectInstruction ||
+        input.session.queuedUserInstruction?.trim() ||
+        input.session.lastUserInstruction?.trim() ||
+        input.session.displayObjective?.trim() ||
+        input.session.objective
+    ) === "checkpoint"
   );
 }
 
@@ -8437,12 +8867,14 @@ function summarizeAutomationFailureRecovery(input: {
   maxRetries: number;
   language: "ko" | "en";
 }) {
+  const visibleRunSummary = humanizeAutomationUiIssue(input.runSummary, input.language);
+
   if (input.language === "ko") {
     const base =
       input.runStatus === "cancelled"
         ? "직전 단계가 끝나기 전에 중단되었습니다."
         : "직전 단계가 깔끔하게 끝나지 않았습니다.";
-    return [base, input.runSummary.trim(), "자동으로 다음 복구 경로를 정리하고 있습니다."]
+    return [base, visibleRunSummary, "자동으로 다음 복구 경로를 정리하고 있습니다."]
       .filter(Boolean)
       .join(" ");
   }
@@ -8451,7 +8883,7 @@ function summarizeAutomationFailureRecovery(input: {
     input.runStatus === "cancelled"
       ? "The latest step was cancelled before it finished."
       : "The latest step did not finish cleanly.";
-  return [base, input.runSummary.trim(), "Lithium is already planning the next recovery step."]
+  return [base, visibleRunSummary, "Lithium is already planning the next recovery step."]
     .filter(Boolean)
     .join(" ");
 }
@@ -9051,48 +9483,63 @@ export function buildOrchestratorParallelFollowupPrompt(input: {
   delegations: Array<Extract<OrchestratorDelegationDirective, { lane: "builder" | "strategist" }>>;
   snapshot: ProjectSnapshot;
 }) {
-  const sections = [...input.delegations]
-    .sort((left, right) => compareConversationLanePriority(left.lane, right.lane))
-    .map((delegation) => {
-    if (delegation.lane === "strategist") {
-      const summary = input.snapshot.latestDecision?.summary?.trim() || "none";
-      const rationale = input.snapshot.latestDecision?.rationale?.trim() || "";
-      const nextAction = summarizeAutomationNextAction([
-        ...(input.snapshot.latestDecision?.handoff?.runActions ?? []),
-        ...(input.snapshot.latestDecision?.handoff?.openQuestions ?? [])
-      ]);
+  const strategistDelegations = input.delegations.filter(
+    (delegation): delegation is Extract<OrchestratorDelegationDirective, { lane: "strategist" }> =>
+      delegation.lane === "strategist"
+  );
+  const builderDelegations = input.delegations.filter(
+    (delegation): delegation is Extract<OrchestratorDelegationDirective, { lane: "builder" }> =>
+      delegation.lane === "builder"
+  );
+  const sections: string[] = [];
 
-      return [
-        "Research branch",
-        `Delegated task: ${delegation.prompt.trim()}`,
+  if (strategistDelegations.length > 0) {
+    const summary = input.snapshot.latestDecision?.summary?.trim() || "none";
+    const rationale = input.snapshot.latestDecision?.rationale?.trim() || "";
+    const nextAction = summarizeAutomationNextAction([
+      ...(input.snapshot.latestDecision?.handoff?.runActions ?? []),
+      ...(input.snapshot.latestDecision?.handoff?.openQuestions ?? [])
+    ]);
+    const delegatedTasks = strategistDelegations
+      .map((delegation) => `- ${delegation.prompt.trim()}`)
+      .join("\n");
+
+    sections.push(
+      [
+        strategistDelegations.length > 1 ? "Research branches" : "Research branch",
+        delegatedTasks ? `Delegated tasks:\n${delegatedTasks}` : "",
         `Summary: ${summary}`,
         rationale ? `Rationale: ${rationale}` : "",
         nextAction ? `Next step candidate: ${nextAction}` : ""
       ]
         .filter(Boolean)
-        .join("\n\n");
-    }
+        .join("\n\n")
+    );
+  }
 
-    const summary =
-      handoffMachineSummary(input.snapshot.latestRun?.handoff) ||
-      extractRunSummary(input.snapshot.latestRun?.finalMessage || "") ||
-      "none";
-    const nextAction = summarizeAutomationNextAction([
-      ...(input.snapshot.latestRun?.handoff?.runActions ?? []),
-      ...(input.snapshot.latestRun?.handoff?.openQuestions ?? [])
-    ]);
-    const runStatus = input.snapshot.latestRun?.status || "unknown";
+  const executionSummary =
+    handoffMachineSummary(input.snapshot.latestRun?.handoff) ||
+    extractRunSummary(input.snapshot.latestRun?.finalMessage || "") ||
+    "none";
+  const executionNextAction = summarizeAutomationNextAction([
+    ...(input.snapshot.latestRun?.handoff?.runActions ?? []),
+    ...(input.snapshot.latestRun?.handoff?.openQuestions ?? [])
+  ]);
+  const runStatus = input.snapshot.latestRun?.status || "unknown";
 
-    return [
-      "Execution branch",
-      `Delegated task: ${delegation.prompt.trim()}`,
-      `Status: ${runStatus}`,
-      `Summary: ${summary}`,
-      nextAction ? `Next step candidate: ${nextAction}` : ""
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  });
+  for (const delegation of builderDelegations) {
+    sections.push(
+      [
+        "Execution branch",
+        `Delegated task: ${delegation.prompt.trim()}`,
+        `Status: ${runStatus}`,
+        `Summary: ${executionSummary}`,
+        executionNextAction ? `Next step candidate: ${executionNextAction}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+  }
 
   return [
     "The current user request is already available in the thread context. Address it directly without restating it verbatim.",
@@ -9111,10 +9558,12 @@ export function buildOrchestratorParallelFollowupPrompt(input: {
 }
 
 function sanitizeConversationBody(value: string) {
-  return stripConversationControlFooters(value)
+  const sanitized = stripConversationControlFooters(value)
     .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  return dedupeNormalizedParagraphs(sanitized);
 }
 
 function stripConversationControlFooters(value: string) {
@@ -9162,7 +9611,7 @@ export function summarizeAutomationWorkerResultsForConversation(results: Automat
   const builderResult = results.find(
     (result): result is AutomationDelegatedBuilderResult => result.lane === "builder"
   );
-  const strategistResult = results.find(
+  const strategistResults = results.filter(
     (result): result is AutomationDelegatedStrategistResult => result.lane === "strategist"
   );
   const language = resolveAutomationUiLanguage(
@@ -9174,25 +9623,38 @@ export function summarizeAutomationWorkerResultsForConversation(results: Automat
   );
 
   const parts: string[] = [];
+  const completedStrategistSummaries = strategistResults
+    .filter((result) => !result.pending)
+    .map((result) =>
+      sanitizeAutomationConversationSummary(
+        handoffMachineSummary(result.decision?.handoff) || result.decision?.summary || ""
+      )
+    )
+    .filter(Boolean);
+  const hasPendingStrategist = strategistResults.some((result) => result.pending);
 
-  if (strategistResult?.pending) {
+  if (hasPendingStrategist) {
     parts.push(
       language === "ko"
-        ? "전체 방향 리서치는 백그라운드에서 계속 진행 중입니다."
+        ? strategistResults.length > 1
+          ? "전체 방향 리서치 분기들이 백그라운드에서 계속 진행 중입니다."
+          : "전체 방향 리서치는 백그라운드에서 계속 진행 중입니다."
+        : strategistResults.length > 1
+        ? "The high-level research branches are still running in the background."
         : "The high-level research branch is still running in the background."
     );
-  } else if (strategistResult) {
-    const strategistSummary = sanitizeAutomationConversationSummary(
-      handoffMachineSummary(strategistResult.decision?.handoff) || strategistResult.decision?.summary || ""
+  }
+
+  if (completedStrategistSummaries.length > 0) {
+    const strategistSummary = completedStrategistSummaries.join(
+      language === "ko" ? " / " : " / "
     );
 
-    if (strategistSummary) {
-      parts.push(
-        language === "ko"
-          ? `전체적으로는 ${strategistSummary}`
-          : `At the portfolio level, ${strategistSummary}`
-      );
-    }
+    parts.push(
+      language === "ko"
+        ? `전체적으로는 ${strategistSummary}`
+        : `At the portfolio level, ${strategistSummary}`
+    );
   }
 
   if (builderResult) {
@@ -9215,6 +9677,78 @@ export function summarizeAutomationWorkerResultsForConversation(results: Automat
   }
 
   return Array.from(new Set(parts.map((part) => part.trim()).filter(Boolean))).join("\n\n");
+}
+
+export function buildAutomationConversationReportFingerprint(results: AutomationDelegatedWorkerResult[]) {
+  const builderResult = results.find(
+    (result): result is AutomationDelegatedBuilderResult => result.lane === "builder"
+  );
+  const strategistResults = results.filter(
+    (result): result is AutomationDelegatedStrategistResult => result.lane === "strategist"
+  );
+  const completedStrategistSummaries = strategistResults
+    .filter((result) => !result.pending)
+    .map((result) =>
+      sanitizeAutomationConversationSummary(
+        handoffMachineSummary(result.decision?.handoff) || result.decision?.summary || ""
+      )
+    )
+    .filter(Boolean)
+    .sort();
+  const nextStepSummary = summarizeAutomationConversationNextStep(results);
+
+  return createHash("sha1")
+    .update(
+      JSON.stringify({
+        pendingStrategist: strategistResults.some((result) => result.pending),
+        strategistSummaries: completedStrategistSummaries,
+        builderSummary: sanitizeAutomationConversationSummary(builderResult?.runSummary ?? ""),
+        nextStepSummary
+      })
+    )
+    .digest("hex");
+}
+
+function summarizeAutomationConversationNextStep(results: AutomationDelegatedWorkerResult[]) {
+  const nextActions = results.flatMap((result) => {
+    if (result.lane === "builder") {
+      return result.runActions ?? [];
+    }
+
+    return [
+      ...(result.decision?.handoff?.runActions ?? []),
+      ...(result.decision?.handoff?.openQuestions ?? [])
+    ];
+  });
+
+  return sanitizeAutomationConversationSummary(summarizeAutomationNextAction(nextActions));
+}
+
+export function shouldPublishAutomationConversationReport(
+  session: AutomationSessionRecord,
+  fingerprint: string
+) {
+  return Boolean(fingerprint && session.lastConversationReportFingerprint !== fingerprint);
+}
+
+function findLatestAutomationConversationUpdate(
+  entries: ConversationEntryRecord[],
+  threadId: string
+) {
+  const latestAutomationEntry = [...entries]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.threadId === threadId &&
+        entry.role !== "user" &&
+        (entry.source === "automation" || entry.source === "checkpoint" || entry.source === "system")
+    );
+
+  if (!latestAutomationEntry) {
+    return "";
+  }
+
+  return shortenAutomationNarration(sanitizeConversationBody(latestAutomationEntry.body), 220);
 }
 
 function compareConversationLanePriority(
@@ -9328,16 +9862,31 @@ function resolveOrchestratorDelegations(
 }
 
 function dedupeOrchestratorDelegations(delegations: OrchestratorDelegationDirective[]) {
-  const latestByLane = new Map<OrchestratorDelegationDirective["lane"], OrchestratorDelegationDirective>();
+  const latestByLane = new Map<"automation" | "builder", OrchestratorDelegationDirective>();
+  const strategists: Extract<OrchestratorDelegationDirective, { lane: "strategist" }>[] = [];
+  const seenStrategistPrompts = new Set<string>();
 
   for (const delegation of delegations) {
+    if (delegation.lane === "strategist") {
+      const promptKey = delegation.prompt.trim().toLowerCase();
+
+      if (!promptKey || seenStrategistPrompts.has(promptKey)) {
+        continue;
+      }
+
+      seenStrategistPrompts.add(promptKey);
+      strategists.push(delegation);
+      continue;
+    }
+
     latestByLane.set(delegation.lane, delegation);
   }
 
-  const orderedLanes: OrchestratorDelegationDirective["lane"][] = ["automation", "builder", "strategist"];
-  return orderedLanes
-    .map((lane) => latestByLane.get(lane) ?? null)
-    .filter((delegation): delegation is OrchestratorDelegationDirective => Boolean(delegation));
+  return [
+    latestByLane.get("automation") ?? null,
+    latestByLane.get("builder") ?? null,
+    ...strategists
+  ].filter((delegation): delegation is OrchestratorDelegationDirective => Boolean(delegation));
 }
 
 function looksLikeStructuredStrategistOnly(value: string) {

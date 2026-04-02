@@ -561,4 +561,88 @@ describe("buildChatItems", () => {
 
     expect(matchingItems).toHaveLength(1);
   });
+
+  it("collapses legacy automation messages that only differ by repeated paragraphs", () => {
+    const thread: ThreadRecord = {
+      id: "TH001",
+      title: "Main thread",
+      summary: "",
+      createdAt: "2026-03-26T00:00:00.000Z",
+      updatedAt: "2026-03-26T00:00:00.000Z"
+    };
+    const normalizedBody = [
+      "기준선은 그대로 두고 loader lane을 다음 bounded step으로 봅니다.",
+      "",
+      "AWQ는 이번 cycle에서 더 파지 않습니다."
+    ].join("\n\n");
+    const snapshot: ProjectSnapshot = {
+      project: {
+        id: "P001",
+        name: "real",
+        workspacePath: "/tmp",
+        oracleModel: "gpt-5.4-pro",
+        codexModel: "gpt-5.4",
+        defaultThreadId: "TH001",
+        activeThreadId: "TH001",
+        createdAt: "2026-03-26T00:00:00.000Z",
+        updatedAt: "2026-03-26T00:00:00.000Z"
+      },
+      memory: null,
+      threads: [thread],
+      activeThreadId: "TH001",
+      activeThread: thread,
+      conversationEntries: [
+        {
+          id: "C001",
+          threadId: "TH001",
+          role: "assistant",
+          source: "automation",
+          body: [
+            "기준선은 그대로 두고 loader lane을 다음 bounded step으로 봅니다.",
+            "",
+            "AWQ는 이번 cycle에서 더 파지 않습니다.",
+            "",
+            "기준선은 그대로 두고 loader lane을 다음 bounded step으로 봅니다."
+          ].join("\n\n"),
+          createdAt: "2026-03-26T00:01:00.000Z"
+        },
+        {
+          id: "C002",
+          threadId: "TH001",
+          role: "assistant",
+          source: "automation",
+          body: normalizedBody,
+          createdAt: "2026-03-26T00:01:30.000Z"
+        }
+      ],
+      latestConversationEntry: null,
+      attachments: [],
+      activeThreadAttachments: [],
+      decisions: [],
+      tasks: [],
+      runs: [],
+      routerTraces: [],
+      latestDecision: null,
+      latestTask: null,
+      latestRun: null,
+      latestRouterTrace: null,
+      automationSessions: [],
+      automationCycles: [],
+      automationSteps: [],
+      automationCheckpoints: [],
+      latestAutomationSession: null,
+      latestAutomationCycle: null,
+      latestAutomationCheckpoint: null,
+      logs: []
+    };
+
+    const items = buildChatItems(snapshot, "/tmp");
+    const matchingItems = items.filter(
+      (item) =>
+        item.role === "assistant" &&
+        item.body.includes("기준선은 그대로 두고 loader lane을 다음 bounded step으로 봅니다.")
+    );
+
+    expect(matchingItems).toHaveLength(1);
+  });
 });

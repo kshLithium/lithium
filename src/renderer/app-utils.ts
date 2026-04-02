@@ -16,6 +16,7 @@ import {
   handoffUserMessage,
   isOperationalAutomationMessage
 } from "../shared/handoff-utils";
+import { buildNormalizedConversationBodyKey } from "../shared/conversation-normalization";
 import {
   sanitizePromptEchoProgress,
   stripLeadingPromptEchoParagraph
@@ -774,7 +775,7 @@ function collapseDuplicateUserTaskItems(items: ChatItem[]) {
 
   for (const item of items) {
     if (item.role !== "user") {
-      const normalizedBody = normalizePromptForComparison(item.body);
+      const normalizedBody = buildNormalizedConversationBodyKey(item.body);
       const isDuplicateNonUser =
         normalizedBody &&
         item.role === lastVisibleNonUserRole &&

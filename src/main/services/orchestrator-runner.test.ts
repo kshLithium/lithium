@@ -183,6 +183,77 @@ describe("OrchestratorRunner", () => {
     ]);
   });
 
+  it("captures multiple parallel strategist delegations from one strategist request file", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "lithium-orch-multi-strat-"));
+    tempDirs.push(workspace);
+    const requestDir = path.join(workspace, ".lithium", "orchestrator", "TH010");
+    const requestPaths = {
+      builder: path.join(requestDir, "builder.md"),
+      strategist: path.join(requestDir, "strategist.md"),
+      automation: path.join(requestDir, "automation.md")
+    };
+    const outputPath = path.join(requestDir, "reply.md");
+
+    vi.mocked(runCommand).mockImplementationOnce(async () => {
+      await writeFile(outputPath, "research branches prepared", "utf8");
+      await writeFile(
+        requestPaths.strategist,
+        [
+          "Model: gpt-5.4-pro",
+          "Intensity: extended",
+          "",
+          "Review the top-level branch priority and decision gate.",
+          "",
+          "---",
+          "",
+          "Model: gpt-5.4-pro",
+          "Intensity: extended",
+          "",
+          "Compare the freshest public baselines that matter after the current gate."
+        ].join("\n"),
+        "utf8"
+      );
+
+      return {
+        startedAt: "2026-03-25T01:00:00.000Z",
+        endedAt: "2026-03-25T01:00:04.000Z",
+        exitCode: 0,
+        timedOut: false,
+        stdout: "{\"type\":\"thread.started\",\"thread_id\":\"orch-thread-10\"}",
+        stderr: ""
+      };
+    });
+
+    const runner = new OrchestratorRunner();
+    const result = await runner.runTurn({
+      workspacePath: workspace,
+      prompt: "세부 연구 판단을 병렬로 나눠줘",
+      runtimeContext: "# Runtime Context",
+      stdoutPath: path.join(requestDir, "orchestrator.stdout.log"),
+      stderrPath: path.join(requestDir, "orchestrator.stderr.log"),
+      outputPath,
+      requestPaths
+    });
+
+    expect(result.requestedLane).toBe("strategist");
+    expect(result.delegations).toEqual([
+      {
+        lane: "strategist",
+        prompt: "Review the top-level branch priority and decision gate.",
+        model: "gpt-5.4-pro",
+        reasoningIntensity: "extended",
+        attachExplicitWorkspaceFiles: undefined
+      },
+      {
+        lane: "strategist",
+        prompt: "Compare the freshest public baselines that matter after the current gate.",
+        model: "gpt-5.4-pro",
+        reasoningIntensity: "extended",
+        attachExplicitWorkspaceFiles: undefined
+      }
+    ]);
+  });
+
   it("prepares each lane request directory before the orchestrator writes into split paths", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "lithium-orch-split-"));
     tempDirs.push(workspace);

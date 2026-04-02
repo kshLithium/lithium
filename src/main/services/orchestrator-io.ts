@@ -2,7 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { readTextFileIfExists } from "./fs-utils";
 import {
-  parseOrchestratorDelegationRequest,
+  parseOrchestratorDelegationRequestsForLane,
   type OrchestratorDelegationDirective
 } from "./orchestrator-directives";
 
@@ -39,11 +39,7 @@ export async function readOrchestratorDelegationRequests(requestPaths: Orchestra
       continue;
     }
 
-    const directive = parseOrchestratorDelegationRequest(lane, raw);
-
-    if (directive) {
-      delegations.push(directive);
-    }
+    delegations.push(...parseOrchestratorDelegationRequestsForLane(lane, raw));
   }
 
   return delegations;

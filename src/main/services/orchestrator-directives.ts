@@ -130,6 +130,17 @@ export function parseOrchestratorDelegationRequest(
   };
 }
 
+export function parseOrchestratorDelegationRequestsForLane(
+  lane: OrchestratorDelegationDirective["lane"],
+  raw: string
+) {
+  const blocks = splitDelegationBlocks(raw, lane);
+
+  return blocks
+    .map((block) => parseOrchestratorDelegationRequest(lane, block))
+    .filter((directive): directive is OrchestratorDelegationDirective => Boolean(directive));
+}
+
 function splitDirectiveHeaders(raw: string, lane: OrchestratorDelegationDirective["lane"]) {
   const lines = raw.split(/\r?\n/);
   const headers: Record<string, string> = {};
@@ -180,6 +191,23 @@ function splitDirectiveHeaders(raw: string, lane: OrchestratorDelegationDirectiv
     headers,
     body: lines.slice(index).join("\n")
   };
+}
+
+function splitDelegationBlocks(raw: string, lane: OrchestratorDelegationDirective["lane"]) {
+  const trimmed = raw.trim();
+
+  if (!trimmed) {
+    return [];
+  }
+
+  if (lane !== "strategist") {
+    return [trimmed];
+  }
+
+  return trimmed
+    .split(/\n\s*---+\s*\n/g)
+    .map((block) => block.trim())
+    .filter(Boolean);
 }
 
 function isLaneHeading(line: string, lane: OrchestratorDelegationDirective["lane"]) {

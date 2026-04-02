@@ -110,6 +110,54 @@ describe("strategist-context", () => {
     );
   });
 
+  it("ignores operational automation summaries and checkpoint ids in the strategist fingerprint", () => {
+    const baseSnapshot = {
+      activeThread: {
+        id: "TH001",
+        strategistContextFingerprint: ""
+      },
+      attachments: [],
+      latestRun: null,
+      latestTask: null,
+      memory: null,
+      latestAutomationSession: {
+        id: "AU001",
+        status: "idle",
+        objective: "Keep researching fresh ideas and run one experiment.",
+        displayObjective: "Research one new idea, run one experiment, record the delta.",
+        currentStepSummary: "Waiting for your direction.",
+        latestCheckpointId: "AC001",
+        updatedAt: "2026-04-02T00:00:00.000Z"
+      },
+      latestAutomationCheckpoint: {
+        id: "AC001",
+        status: "approved",
+        title: "Checkpoint ready",
+        summary: "Fresh novelty-first cycle reset.",
+        updatedAt: "2026-04-02T00:00:00.000Z"
+      }
+    } as unknown as ProjectSnapshot;
+
+    const changedOperationalState = {
+      ...baseSnapshot,
+      latestAutomationSession: {
+        ...baseSnapshot.latestAutomationSession,
+        currentStepSummary: "Recovering after an automation controller issue.",
+        latestCheckpointId: "AC099",
+        updatedAt: "2026-04-02T00:10:00.000Z"
+      },
+      latestAutomationCheckpoint: {
+        ...baseSnapshot.latestAutomationCheckpoint,
+        id: "AC099",
+        updatedAt: "2026-04-02T00:10:00.000Z"
+      }
+    } as unknown as ProjectSnapshot;
+
+    expect(buildStrategistContextFingerprint(baseSnapshot)).toBe(
+      buildStrategistContextFingerprint(changedOperationalState)
+    );
+  });
+
   it("accepts only supported strategist upload file types", () => {
     expect(isSupportedStrategistUploadPath("/tmp/README")).toBe(true);
     expect(isSupportedStrategistUploadPath("/tmp/notes.md")).toBe(true);
@@ -247,6 +295,7 @@ describe("strategist-context", () => {
 
     expect(prompt).toContain("원래 사용자 메시지");
     expect(prompt).toContain("정리된 strategist 작업 지시");
+    expect(prompt).toContain("큰 실험 흐름");
     expect(prompt).toContain("직전 builder 요약");
     expect(prompt).toContain("추가 raw 파일");
     expect(prompt).toContain("직접 업로드에서 빠진 파일 메모");

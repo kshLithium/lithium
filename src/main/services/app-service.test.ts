@@ -11,11 +11,16 @@ import {
 } from "../../shared/types";
 import {
   AppService,
+  buildAutomationConversationReportFingerprint,
+  buildAutomationDelegationSessionPatch,
+  buildFallbackAutomationStrategistDelegation,
   buildAutomationContinuationAdvisorPrompt,
+  buildAutomationOrchestratorPrompt,
   buildAutomationStrategistPrompt,
   buildRequiredAutomationStrategistDelegation,
   buildOrchestratorParallelFollowupPrompt,
   buildOrchestratorWorkerFollowupPrompt,
+  shouldPublishAutomationConversationReport,
   shouldRefreshAutomationStrategist,
   summarizeAutomationWorkerResultsForConversation,
   summarizeWorkerSnapshotsForConversation
@@ -503,6 +508,11 @@ describe("AppService automation loop", () => {
 
       expect(interruptSpy).not.toHaveBeenCalled();
       expect(codexRunner.runTask).toHaveBeenCalledTimes(1);
+      expect(codexRunner.runTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeoutMs: 10 * 60 * 1000
+        })
+      );
       expect(snapshot.latestAutomationSession?.status).toBe("running");
       expect(snapshot.latestAutomationSession?.lastUserInstruction).toBe(
         "Keep the local automation loop running."
@@ -524,6 +534,190 @@ describe("AppService automation loop", () => {
             entry.source === "automation" &&
             entry.automationSessionId === "AU001" &&
             entry.body.includes("GitHub 공식 상위권")
+        )
+      ).toBe(true);
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("treats resume-like checkpoint instructions as resume instead of a question", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-automation-resume-"));
+
+    try {
+      const now = "2026-03-30T00:00:00.000Z";
+      const service = new AppService(workspacePath, {
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+
+      vi.spyOn(appService, "scheduleAutomationLoop").mockImplementation(() => undefined);
+
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id ?? "TH001";
+
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId,
+        objective: "Restart the local automation loop.",
+        displayObjective: "Restart the local automation loop.",
+        mode: "continuous",
+        status: "idle",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 3,
+          usedRetries: 0
+        },
+        activeLaneStepIds: [],
+        latestCheckpointId: "AC001",
+        currentStepSummary: "Blocked on the strategist run. Waiting for your direction.",
+        lastUserInstruction: "Restart the local automation loop.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+      const checkpoint: AutomationCheckpointRecord = {
+        id: "AC001",
+        sessionId: "AU001",
+        threadId,
+        status: "pending",
+        title: "Automation blocked on the strategist run",
+        summary: "The strategist browser step needs help before automation can continue.",
+        whatChanged: [],
+        evidence: [],
+        risks: [],
+        nextActions: ["Resume the automation from the latest saved state."],
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.store.writeAutomationCheckpoint(workspacePath, checkpoint);
+
+      const snapshot = await service.sendChatMessage({
+        workspacePath,
+        threadId,
+        prompt:
+          "계속 연구 시작 다양한 알고리즘, 손실함수, 학습방법, 등을 깊게 리서치하고 논문등을 참고해서 그리고 parameter golf github 리포지토리를 깊게 리서치해서 pr 이나 커뮤니티 등에서 도움되는 접근들을 모두 조사해서 점수를 어떻게든 올리셈(공식적으로 점수 인정받을 수 있는 접근법으로만)"
+      });
+      const checkpoints = snapshot.automationCheckpoints ?? [];
+
+      expect(snapshot.latestAutomationSession?.status).toBe("running");
+      expect(snapshot.latestAutomationSession?.latestCheckpointId).toBeUndefined();
+      expect(checkpoints.find((entry) => entry.id === "AC001")?.status).toBe("approved");
+      expect(snapshot.runs).toHaveLength(0);
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it("answers pending checkpoint questions directly without starting a live builder run", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-automation-checkpoint-chat-"));
+
+    try {
+      const now = "2026-03-30T00:00:00.000Z";
+      const codexRunner = {
+        runTask: vi.fn().mockResolvedValue({
+          command: {
+            command: "codex",
+            args: ["exec"],
+            cwd: workspacePath
+          },
+          startedAt: now,
+          endedAt: now,
+          exitCode: 0,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          finalMessage: [
+            "지금 막힌 건 전략 브라우저 단계이고, 최근 로컬 점수 기준선 자체가 사라진 건 아닙니다.",
+            "체크포인트를 승인하면 같은 상태에서 자동화를 다시 이어갈 수 있습니다.",
+            "LITHIUM_STATUS",
+            '{"machine_summary":"Answered the pending checkpoint question directly from saved artifacts.","result":"success"}'
+          ].join("\n")
+        })
+      };
+      const service = new AppService(workspacePath, {
+        codexRunner,
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+      const appService = service as any;
+      const startBuilderTaskSpy = vi.spyOn(appService, "startBuilderTask");
+
+      const initialized = await service.initProject(workspacePath);
+      const threadId = initialized.activeThread?.id ?? "TH001";
+
+      const session: AutomationSessionRecord = {
+        id: "AU001",
+        threadId,
+        objective: "Restart the local automation loop.",
+        displayObjective: "Restart the local automation loop.",
+        mode: "continuous",
+        status: "idle",
+        allowedActions: ["strategize", "experiment-run", "result-analysis"],
+        evidenceMode: "strict",
+        budget: {
+          maxSteps: 12,
+          maxRuntimeMinutes: 120,
+          maxRetries: 4,
+          usedSteps: 3,
+          usedRetries: 0
+        },
+        activeLaneStepIds: [],
+        latestCheckpointId: "AC001",
+        currentStepSummary: "Blocked on the strategist run. Waiting for your direction.",
+        lastUserInstruction: "Restart the local automation loop.",
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now
+      };
+      const checkpoint: AutomationCheckpointRecord = {
+        id: "AC001",
+        sessionId: "AU001",
+        threadId,
+        status: "pending",
+        title: "Automation blocked on the strategist run",
+        summary: "The strategist browser step needs help before automation can continue.",
+        whatChanged: [],
+        evidence: [],
+        risks: [],
+        nextActions: ["Resume the automation from the latest saved state."],
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await appService.store.writeAutomationSession(workspacePath, session);
+      await appService.store.writeAutomationCheckpoint(workspacePath, checkpoint);
+
+      const snapshot = await service.sendChatMessage({
+        workspacePath,
+        threadId,
+        prompt: "지금 뭐가 막혀있는지 쉽게 설명해줘"
+      });
+      const checkpoints = snapshot.automationCheckpoints ?? [];
+      const conversationEntries = snapshot.conversationEntries ?? [];
+
+      expect(startBuilderTaskSpy).not.toHaveBeenCalled();
+      expect(codexRunner.runTask).toHaveBeenCalledTimes(1);
+      expect(codexRunner.runTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeoutMs: 10 * 60 * 1000
+        })
+      );
+      expect(snapshot.runs).toHaveLength(0);
+      expect(snapshot.latestAutomationSession?.status).toBe("idle");
+      expect(checkpoints.find((entry) => entry.id === "AC001")?.status).toBe("pending");
+      expect(
+        conversationEntries.some(
+          (entry) =>
+            entry.role === "assistant" &&
+            entry.source === "automation" &&
+            entry.automationSessionId === "AU001" &&
+            entry.body.includes("전략 브라우저 단계")
         )
       ).toBe(true);
     } finally {
@@ -803,7 +997,7 @@ describe("AppService automation loop", () => {
     }
   });
 
-  it("packages richer strategist context and caps browser uploads to provider limits", async () => {
+  it("packages strategist context while keeping direct browser uploads minimal", async () => {
     const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-strategist-context-"));
     const sourceDir = await mkdtemp(path.join(os.tmpdir(), "lithium-strategist-context-src-"));
 
@@ -869,12 +1063,17 @@ describe("AppService automation loop", () => {
 
       expect(consultInput.prompt).toContain("원래 사용자 메시지");
       expect(consultInput.prompt).toContain("정리된 strategist 작업 지시");
-      expect(consultInput.files).toHaveLength(10);
+      expect(consultInput.files).toHaveLength(2);
       expect(consultInput.files.some((file: string) => file.endsWith(".strategist.runtime.md"))).toBe(true);
-      expect(consultInput.files.some((file: string) => file.endsWith(".strategist.md"))).toBe(true);
       expect(consultInput.files.some((file: string) => file.endsWith(".strategist.digest.md"))).toBe(true);
-      expect(consultInput.files).toContain(path.join(workspacePath, "reports", "metrics.csv"));
-      expect(consultInput.files).toContain(path.join(workspacePath, "src", "train_model.py"));
+      expect(consultInput.files.join("\n")).not.toContain(path.join(workspacePath, "reports", "metrics.csv"));
+      expect(consultInput.files.join("\n")).not.toContain(path.join(workspacePath, "src", "train_model.py"));
+      const digestPath = consultInput.files.find((file: string) => file.endsWith(".strategist.digest.md"));
+      expect(digestPath).toBeTruthy();
+      const digest = await readFile(digestPath!, "utf8");
+      expect(digest).toContain("reports/metrics.csv");
+      expect(digest).toContain("src/train_model.py");
+      expect(digest).toContain("note-1.md");
     } finally {
       await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
       await rm(sourceDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
@@ -937,10 +1136,9 @@ describe("AppService automation loop", () => {
       );
 
       const consultInput = oracleRunner.consult.mock.calls.at(-1)?.[0]!;
-      expect(consultInput.files).toContain(
-        path.join(workspacePath, "attachments", threadId!, "chart.png")
-      );
+      expect(consultInput.files).toHaveLength(2);
       expect(consultInput.files.join("\n")).not.toContain("bundle.zip");
+      expect(consultInput.files.join("\n")).not.toContain("chart.png");
       expect(consultInput.prompt).toContain("직접 업로드");
       expect(consultInput.prompt).toContain("bundle.zip");
 
@@ -1089,9 +1287,10 @@ describe("AppService automation loop", () => {
         expect.arrayContaining([
           expect.stringContaining(".strategist.runtime.md"),
           expect.stringContaining(".strategist.md"),
-          expect.stringContaining("chart.png")
+          expect.stringContaining(".strategist.digest.md")
         ])
       );
+      expect(startInput.files.join("\n")).not.toContain("chart.png");
       expect(startInput.files.join("\n")).not.toContain("bundle.zip");
     } finally {
       await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
@@ -1308,23 +1507,8 @@ describe("AppService automation loop", () => {
     const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-automation-planner-"));
 
     try {
-      const prompts: string[] = [];
-      const orchestratorRunner = {
-        runTurn: vi.fn(async ({ prompt }: { prompt: string }) => {
-          prompts.push(prompt);
-          return {
-            sessionId: "planner-session",
-            finalMessage: "",
-            requestedLane: null,
-            delegatedPrompt: "",
-            delegation: null,
-            delegations: []
-          };
-        })
-      };
       const now = "2026-03-26T00:00:00.000Z";
       const service = new AppService(workspacePath, {
-        orchestratorRunner: orchestratorRunner as any,
         getAppSettings: async () => DEFAULT_APP_SETTINGS
       });
       const appService = service as any;
@@ -1367,27 +1551,22 @@ describe("AppService automation loop", () => {
       });
 
       const snapshot = await service.getSnapshot(workspacePath);
-      const controller = appService.getAutomationController(workspacePath, "AU001");
-
-      await appService.runAutomationOrchestratorCycle(
-        workspacePath,
+      const prompt = buildAutomationOrchestratorPrompt({
         session,
-        controller,
-        snapshot,
-        "",
-        DEFAULT_APP_SETTINGS
-      );
+        redirectInstruction: "",
+        languagePreference: DEFAULT_APP_SETTINGS.autopilotPromptLanguage,
+        snapshot
+      });
 
-      expect(orchestratorRunner.runTurn).toHaveBeenCalled();
-      expect(prompts[0]).toContain("현재 가장 우선할 사용자 지시: 공식 상위권 baseline 대비 gap을 더 중요하게 봐");
-      expect(prompts[0]).toContain("최근 사용자 메시지:");
-      expect(prompts[0]).toContain("이번엔 warm38 주변 미세조정보다 다른 알고리즘 family를 먼저 봐줘.");
+      expect(prompt).toContain("현재 가장 우선할 사용자 지시: 공식 상위권 baseline 대비 gap을 더 중요하게 봐");
+      expect(prompt).toContain("최근 사용자 메시지:");
+      expect(prompt).toContain("이번엔 warm38 주변 미세조정보다 다른 알고리즘 family를 먼저 봐줘.");
     } finally {
       await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
     }
   });
 
-  it("does not collapse repeated automation paragraphs at save time", async () => {
+  it("collapses repeated automation paragraphs at save time", async () => {
     const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-automation-dedupe-"));
 
     try {
@@ -1440,10 +1619,91 @@ describe("AppService automation loop", () => {
 
       expect(latestEntry?.role).toBe("assistant");
       expect(latestEntry?.source).toBe("automation");
-      expect(latestEntry?.body.match(/warm36 한 점입니다\./g)?.length).toBe(2);
+      expect(latestEntry?.body.match(/warm36 한 점입니다\./g)?.length).toBe(1);
+      expect(latestEntry?.body).toContain("TIED_EMBED_LR=0.0475 시도는 크게 졌습니다.");
     } finally {
       await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
     }
+  });
+
+  it("keeps automation report fingerprints stable for identical results and changes them for new outcomes", () => {
+    const baseResults = [
+      {
+        lane: "strategist",
+        pending: false,
+        decision: {
+          summary: "Check 1 should stay fail.",
+          handoff: {
+            summary: "Check 1 should stay fail.",
+            runActions: ["Test the loader lane."],
+            openQuestions: []
+          }
+        }
+      },
+      {
+        lane: "builder",
+        runSummary: "val_bpb 2.46560334 is still the held baseline.",
+        runActions: ["Keep AWQ on hold and probe the loader lane next."]
+      }
+    ] as any;
+    const changedResults = [
+      baseResults[0],
+      {
+        lane: "builder",
+        runSummary: "val_bpb 2.46390000 became the new held baseline.",
+        runActions: ["Promote the loader lane to the main branch."]
+      }
+    ] as any;
+
+    expect(buildAutomationConversationReportFingerprint(baseResults)).toBe(
+      buildAutomationConversationReportFingerprint(baseResults)
+    );
+    expect(buildAutomationConversationReportFingerprint(changedResults)).not.toBe(
+      buildAutomationConversationReportFingerprint(baseResults)
+    );
+  });
+
+  it("treats unchanged automation report fingerprints as no-op followups", () => {
+    const workerResults = [
+      {
+        lane: "strategist",
+        pending: false,
+        decision: {
+          summary: "Check 1 should stay fail.",
+          handoff: {
+            summary: "Check 1 should stay fail.",
+            runActions: ["Test the loader lane next."],
+            openQuestions: []
+          }
+        }
+      }
+    ] as any;
+    const changedWorkerResults = [
+      {
+        lane: "strategist",
+        pending: false,
+        decision: {
+          summary: "Check 1 should stay fail, but loader lane is now the main branch.",
+          handoff: {
+            summary: "Check 1 should stay fail, but loader lane is now the main branch.",
+            runActions: ["Promote the loader lane immediately."],
+            openQuestions: []
+          }
+        }
+      }
+    ] as any;
+    const stableFingerprint = buildAutomationConversationReportFingerprint(workerResults);
+    const session = {
+      lastConversationReportFingerprint: stableFingerprint
+    } as AutomationSessionRecord;
+
+    expect(shouldPublishAutomationConversationReport(session, stableFingerprint)).toBe(false);
+    expect(
+      shouldPublishAutomationConversationReport(
+        session,
+        buildAutomationConversationReportFingerprint(changedWorkerResults)
+      )
+    ).toBe(true);
   });
 
   it("strips a leading echoed user steering paragraph from automation assistant replies", async () => {
@@ -1948,6 +2208,41 @@ describe("AppService automation loop", () => {
     expect(prompt).not.toContain("Internal delegated reply");
   });
 
+  it("groups multiple strategist delegations into research branches in parallel followup prompts", () => {
+    const prompt = buildOrchestratorParallelFollowupPrompt({
+      originalPrompt: "세부 리서치를 병렬로 나눠서 정리해줘.",
+      delegations: [
+        { lane: "strategist", prompt: "Review branch priority and decision gates." },
+        { lane: "strategist", prompt: "Compare the freshest public baselines after the current gate." },
+        { lane: "builder", prompt: "Run the next smoke eval." }
+      ] as any,
+      snapshot: {
+        latestDecision: {
+          summary: "현재는 prompt-cache branch를 먼저 닫고 그 다음 fresh baseline sourcing으로 넘어가는 게 맞습니다.",
+          rationale: "지금은 분기 우선순위 판단이 이미 정리돼 있고, 비교 기준만 보강하면 됩니다.",
+          handoff: {
+            runActions: ["prompt-cache first observation을 먼저 끝내세요."],
+            openQuestions: []
+          }
+        },
+        latestRun: {
+          status: "completed",
+          handoff: {
+            summary: "smoke eval은 이미 통과했습니다.",
+            runActions: ["full eval을 이어서 돌리세요."],
+            openQuestions: []
+          },
+          finalMessage: ""
+        }
+      } as any
+    });
+
+    expect(prompt).toContain("Research branches");
+    expect(prompt).toContain("Review branch priority and decision gates.");
+    expect(prompt).toContain("Compare the freshest public baselines after the current gate.");
+    expect(prompt).toContain("Execution branch");
+  });
+
   it("prefers strategist framing before execution in orchestrator snapshot summaries", () => {
     const summary = summarizeWorkerSnapshotsForConversation(
       [
@@ -2003,6 +2298,37 @@ describe("AppService automation loop", () => {
     expect(summary).toContain("전체적으로는 비교 기준선을 먼저 닫는 게 지금 전체 우선순위입니다.");
     expect(summary).toContain("실행 쪽에서는 baseline smoke는 이미 통과했습니다.");
     expect(summary.indexOf("전체적으로는")).toBeLessThan(summary.indexOf("실행 쪽에서는"));
+  });
+
+  it("combines multiple strategist summaries in automation fallback summaries", () => {
+    const summary = summarizeAutomationWorkerResultsForConversation([
+      {
+        lane: "strategist",
+        pending: false,
+        decision: {
+          summary: "prompt-cache branch를 먼저 닫는 게 맞습니다.",
+          handoff: {
+            summary: "prompt-cache branch를 먼저 닫는 게 맞습니다.",
+            runActions: ["first observation을 진행하세요."],
+            openQuestions: []
+          }
+        }
+      },
+      {
+        lane: "strategist",
+        pending: false,
+        decision: {
+          summary: "fresh baseline sourcing은 그 다음 단계로 미루면 됩니다.",
+          handoff: {
+            summary: "fresh baseline sourcing은 그 다음 단계로 미루면 됩니다.",
+            runActions: ["fallback shortlist를 정리하세요."],
+            openQuestions: []
+          }
+        }
+      }
+    ] as any);
+
+    expect(summary).toContain("전체적으로는 prompt-cache branch를 먼저 닫는 게 맞습니다. / fresh baseline sourcing은 그 다음 단계로 미루면 됩니다.");
   });
 
   it("refreshes strategist when the latest execution is newer than the latest strategic judgment", () => {
@@ -2076,6 +2402,108 @@ describe("AppService automation loop", () => {
     });
     expect(delegation?.prompt).toContain("Current user goal: Keep researching and improving the parameter-golf baseline.");
     expect(delegation?.prompt).toContain("Do not begin by repeating that wording verbatim.");
+    expect(delegation?.prompt).toContain("portfolio-level experiment flow");
+  });
+
+  it("injects a fallback strategist delegation when planner emits automation-only in a continuous session", () => {
+    const delegation = buildFallbackAutomationStrategistDelegation({
+      automationDelegation: {
+        lane: "automation",
+        prompt: "Keep the autonomous research moving with the updated branch."
+      },
+      existingDelegations: [],
+      hasRunningBackgroundStrategist: false,
+      session: {
+        objective: "Keep researching and improving the parameter-golf baseline.",
+        displayObjective: "Keep researching and improving the parameter-golf baseline."
+      } as any,
+      redirectInstruction: "",
+      languagePreference: "en",
+      snapshot: {
+        latestDecision: {
+          createdAt: "2026-03-31T00:00:00.000Z",
+          summary: "Check 1 should stay fail and the next move should test the loader lane."
+        },
+        latestRun: {
+          createdAt: "2026-03-31T00:05:00.000Z",
+          startedAt: "2026-03-31T00:05:00.000Z",
+          endedAt: "2026-03-31T00:10:00.000Z",
+          status: "completed"
+        },
+        latestAutomationCheckpoint: null
+      } as any
+    });
+
+    expect(delegation).toMatchObject({
+      lane: "strategist",
+      workerMode: "async",
+      model: "gpt-5.4-pro",
+      reasoningIntensity: "extended",
+      attachExplicitWorkspaceFiles: false
+    });
+    expect(delegation?.prompt).toContain("Current user goal: Keep researching and improving the parameter-golf baseline.");
+  });
+
+  it("does not inject a fallback strategist delegation for explicit checkpoint-mode automation", () => {
+    const delegation = buildFallbackAutomationStrategistDelegation({
+      automationDelegation: {
+        lane: "automation",
+        prompt: "Pause at the next review boundary.",
+        mode: "checkpoint"
+      },
+      existingDelegations: [],
+      hasRunningBackgroundStrategist: false,
+      session: {
+        objective: "Pause at real decision branches only.",
+        displayObjective: "Pause at real decision branches only."
+      } as any,
+      redirectInstruction: "",
+      languagePreference: "en",
+      snapshot: {
+        latestDecision: null,
+        latestRun: null,
+        latestAutomationCheckpoint: null
+      } as any
+    });
+
+    expect(delegation).toBeNull();
+  });
+
+  it("applies automation delegation budget updates without rewriting the session objective", () => {
+    const patch = buildAutomationDelegationSessionPatch({
+      automationDelegation: {
+        lane: "automation",
+        prompt: "Keep going.",
+        maxSteps: 80,
+        maxRuntimeMinutes: 180,
+        maxRetries: 1
+      },
+      session: {
+        objective: "Original objective",
+        displayObjective: "Original objective",
+        mode: "continuous",
+        budget: {
+          maxSteps: 64,
+          maxRuntimeMinutes: 120,
+          maxRetries: 8,
+          usedSteps: 12,
+          usedRetries: 2
+        }
+      } as any,
+      redirectInstruction: ""
+    });
+
+    expect(patch).toMatchObject({
+      budget: {
+        maxSteps: 80,
+        maxRuntimeMinutes: 180,
+        maxRetries: 1,
+        usedSteps: 12,
+        usedRetries: 2
+      }
+    });
+    expect("objective" in patch).toBe(false);
+    expect("displayObjective" in patch).toBe(false);
   });
 
   it("formats automation strategist prompts as labeled goals instead of raw user echoes", () => {
@@ -2094,6 +2522,7 @@ describe("AppService automation loop", () => {
     expect(prompt).toContain("Current user goal: Keep researching and improving the parameter-golf baseline.");
     expect(prompt).not.toMatch(/^Keep researching and improving the parameter-golf baseline\./);
     expect(prompt).toContain("Do not begin by repeating that wording verbatim.");
+    expect(prompt).toContain("portfolio-level experiment flow");
   });
 
   it("formats automation continuation advisor prompts as labeled goals instead of raw user echoes", () => {
@@ -2122,6 +2551,34 @@ describe("AppService automation loop", () => {
     );
     expect(prompt).toContain("Pro strategist perspective");
     expect(prompt).toContain("Do not begin by repeating that goal wording verbatim;");
+  });
+
+  it("sanitizes transport errors out of automation continuation prompts", () => {
+    const prompt = buildAutomationContinuationAdvisorPrompt({
+      session: {
+        objective: "계속 연구를 이어가고 strategist 판단도 같이 유지하세요.",
+        displayObjective: "계속 연구를 이어가고 strategist 판단도 같이 유지하세요."
+      } as any,
+      reason: "failed-run",
+      languagePreference: "auto",
+      latestDecision: null,
+      latestRun: null,
+      latestCheckpoint: null,
+      redirectInstruction: "",
+      runSummary: [
+        "connect ECONNREFUSED 127.0.0.1:50142",
+        "Prompt did not appear in conversation before timeout (send may have failed)"
+      ].join("\n"),
+      runRisks: [],
+      runActions: [],
+      failureMessage: ""
+    });
+
+    expect(prompt).toContain("현재 사용자 목표:");
+    expect(prompt).toContain("Pro strategist 관점");
+    expect(prompt).toContain("strategist/browser 전달 단계에서 일시적인 로컬 연결 문제가 있었습니다.");
+    expect(prompt).not.toContain("ECONNREFUSED");
+    expect(prompt).not.toContain("Prompt did not appear");
   });
 
   it("stores full automation worker replies in a dedicated worker history log", async () => {

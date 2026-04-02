@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { extractOracleSessionProgress, mergeStrategistLiveProgress } from "./strategist-progress";
+import {
+  extractOracleSessionProgress,
+  hasMeaningfulStrategistProgress,
+  mergeStrategistLiveProgress
+} from "./strategist-progress";
 
 describe("strategist-progress", () => {
   it("surfaces assistant preview history from oracle logs and strips markup noise", () => {
@@ -107,5 +111,27 @@ describe("strategist-progress", () => {
       "먼저 공개 기록과 로컬 official 상태를 아주 얇게 다시 확인한 뒤, 바로 가장 싼 MLX bounded step 하나를 실제로 돌리겠습니다."
     );
     expect(parsed.progressDetails).toEqual([]);
+  });
+
+  it("treats logged strategist previews as meaningful progress", () => {
+    expect(
+      hasMeaningfulStrategistProgress({
+        progressSummary: "지금 컨텍스트만 기준으로 핵심만 추려볼게요.",
+        progressDetails: []
+      })
+    ).toBe(true);
+    expect(
+      hasMeaningfulStrategistProgress({
+        progressSummary: "",
+        progressDetails: ["최근 실행 상태를 먼저 확인하고 있습니다."]
+      })
+    ).toBe(true);
+    expect(
+      hasMeaningfulStrategistProgress({
+        progressSummary: "   ",
+        progressDetails: ["   "]
+      })
+    ).toBe(false);
+    expect(hasMeaningfulStrategistProgress(null)).toBe(false);
   });
 });

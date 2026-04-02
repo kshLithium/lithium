@@ -95,6 +95,17 @@ export function mergeStrategistLiveProgress(
   };
 }
 
+export function hasMeaningfulStrategistProgress(progress: StrategistProgress | null | undefined) {
+  if (!progress) {
+    return false;
+  }
+
+  return Boolean(
+    progress.progressSummary.trim() ||
+      progress.progressDetails.some((detail) => detail.trim())
+  );
+}
+
 export async function readLiveOracleSessionProgress(
   sessionSlug: string,
   promptPreview?: string

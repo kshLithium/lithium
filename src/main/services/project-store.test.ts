@@ -2,6 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AutomationSessionRecord } from "../../shared/types";
 import { ProjectStore } from "./project-store";
 
 const tempDirs: string[] = [];
@@ -245,6 +246,83 @@ describe("ProjectStore", () => {
     );
   });
 
+  it("omits recent automation assistant chatter from automation followup runtime context", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+
+    const project = await store.initProject(workspace);
+    const session: AutomationSessionRecord = {
+      id: "AU001",
+      threadId: project.activeThreadId,
+      objective: "Keep the automation moving.",
+      displayObjective: "Keep the automation moving.",
+      mode: "continuous",
+      status: "running",
+      allowedActions: ["strategize", "experiment-run", "result-analysis"],
+      evidenceMode: "strict",
+      budget: {
+        maxSteps: 12,
+        maxRuntimeMinutes: 120,
+        maxRetries: 4,
+        usedSteps: 3,
+        usedRetries: 0
+      },
+      activeLaneStepIds: [],
+      currentStepSummary: "Plan and launch the next bounded automation cycle",
+      createdAt: "2026-03-28T00:00:00.000Z",
+      updatedAt: "2026-03-28T00:00:00.000Z",
+      startedAt: "2026-03-28T00:00:00.000Z"
+    };
+    await store.writeAutomationSession(workspace, session);
+
+    const firstEntry = await store.allocateConversationEntry(workspace);
+    await store.writeConversationEntry(workspace, {
+      id: firstEntry.id,
+      threadId: project.activeThreadId,
+      role: "user",
+      source: "user",
+      body: "Loader lane first로 계속 가줘.",
+      automationSessionId: session.id,
+      createdAt: "2026-03-28T00:00:01.000Z"
+    });
+    const secondEntry = await store.allocateConversationEntry(workspace);
+    await store.writeConversationEntry(workspace, {
+      id: secondEntry.id,
+      threadId: project.activeThreadId,
+      role: "assistant",
+      source: "automation",
+      body: "기준선은 그대로 두고 loader lane을 다음 bounded step으로 봅니다.",
+      automationSessionId: session.id,
+      createdAt: "2026-03-28T00:00:02.000Z"
+    });
+    const thirdEntry = await store.allocateConversationEntry(workspace);
+    await store.writeConversationEntry(workspace, {
+      id: thirdEntry.id,
+      threadId: project.activeThreadId,
+      role: "assistant",
+      source: "orchestrator",
+      body: "A separate non-automation assistant note should stay visible.",
+      createdAt: "2026-03-28T00:00:03.000Z"
+    });
+
+    const runtimeContext = await store.buildRuntimeContext(
+      workspace,
+      "Write the next user-facing automation followup.",
+      {
+        lane: "builder",
+        omitRecentAutomationAssistantEntries: true
+      }
+    );
+
+    expect(runtimeContext.content).toContain("- User: Loader lane first로 계속 가줘.");
+    expect(runtimeContext.content).toContain(
+      "- Assistant: A separate non-automation assistant note should stay visible."
+    );
+    expect(runtimeContext.content).not.toContain(
+      "- Assistant: 기준선은 그대로 두고 loader lane을 다음 bounded step으로 봅니다."
+    );
+  });
+
   it("prefers the latest meaningful research run over a newer operational failure in runtime context and session summary", async () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
@@ -323,6 +401,51 @@ describe("ProjectStore", () => {
     expect(memory?.sessionSummary).toContain(
       "Latest operational issue: The app terminated a detached builder process after restart left it running without an active session."
     );
+  });
+
+  it("uses the automation objective when the latest step summary is only operational noise", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+
+    const project = await store.initProject(workspace);
+    const session: AutomationSessionRecord = {
+      id: "AU001",
+      threadId: project.activeThreadId,
+      objective: "Keep researching fresh externally-sourced ideas and test exactly one per cycle.",
+      displayObjective: "Fresh-idea loop: research one new idea, run one real MLX check, record the delta.",
+      mode: "continuous",
+      status: "idle",
+      allowedActions: ["strategize", "literature-search", "experiment-run", "result-analysis"],
+      evidenceMode: "strict",
+      budget: {
+        maxSteps: 12,
+        maxRuntimeMinutes: 120,
+        maxRetries: 2,
+        usedSteps: 4,
+        usedRetries: 1
+      },
+      activeLaneStepIds: [],
+      currentStepSummary: "Waiting for your direction.",
+      createdAt: "2026-04-02T00:00:00.000Z",
+      updatedAt: "2026-04-02T00:00:00.000Z",
+      startedAt: "2026-04-02T00:00:00.000Z"
+    };
+    await store.writeAutomationSession(workspace, session);
+
+    await store.updateSessionSummary(workspace);
+    const runtimeContext = await store.buildRuntimeContext(workspace, "Pick the next experiment.", {
+      lane: "strategist"
+    });
+    const memory = await store.readProjectMemory(workspace);
+
+    expect(runtimeContext.content).toContain(
+      "Automation: idle — Fresh-idea loop: research one new idea, run one real MLX check, record the delta."
+    );
+    expect(runtimeContext.content).not.toContain("Automation: idle — Waiting for your direction.");
+    expect(memory?.sessionSummary).toContain(
+      "Latest automation status: idle — Fresh-idea loop: research one new idea, run one real MLX check, record the delta."
+    );
+    expect(memory?.sessionSummary).not.toContain("Waiting for your direction.");
   });
 
   it("allocates new artifact ids when partial logs already exist", async () => {

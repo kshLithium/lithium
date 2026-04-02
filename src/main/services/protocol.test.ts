@@ -48,6 +48,41 @@ describe("protocol", () => {
     });
   });
 
+  it("strips oracle/browser transport noise from visible strategist text", () => {
+    const result = parseOracleOutput([
+      "계속 연구 진행",
+      "",
+      "connect ECONNREFUSED 127.0.0.1:50142",
+      "",
+      "Reconnecting... 2/5 (stream disconnected before completion)",
+      "",
+      "Prompt did not appear in conversation before timeout (send may have failed)",
+      "",
+      "write_stdin failed: stdin is closed for this session",
+      "",
+      "이제는 Check 1을 fail로 두는 쪽이 더 정확하다는 판단이 우세합니다.",
+      "",
+      "LITHIUM_HANDOFF",
+      JSON.stringify({
+        summary: "Check 1 should stay fail.",
+        rationale: "The local evidence is already strong enough."
+      })
+    ].join("\n"));
+
+    expect(result).toMatchObject({
+      summary: "Check 1 should stay fail.",
+      userMessage: [
+        "계속 연구 진행",
+        "",
+        "이제는 Check 1을 fail로 두는 쪽이 더 정확하다는 판단이 우세합니다."
+      ].join("\n")
+    });
+    expect(result.userMessage).not.toContain("ECONNREFUSED");
+    expect(result.userMessage).not.toContain("Reconnecting");
+    expect(result.userMessage).not.toContain("Prompt did not appear");
+    expect(result.userMessage).not.toContain("stdin is closed");
+  });
+
   it("extracts the strategist JSON block even when oracle appends trailing reference lines", () => {
     const result = parseOracleOutput([
       "운영 메모: local context is thin, so official sources were used.",
