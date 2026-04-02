@@ -1,7 +1,7 @@
 import path, { basename } from "node:path";
+import os from "node:os";
 import { execFile } from "node:child_process";
 import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
 import { createHash } from "node:crypto";
 import yauzl from "yauzl";
 import {
@@ -47,14 +47,12 @@ import type {
   ProjectSnapshot,
   RecordStatus,
   RouterTraceRecord,
-  RuntimeAppState,
   StrategistRequest,
   ThreadCreateRequest,
   ThreadRecord,
   ThreadSelectionRequest,
   TaskRecord,
-  RunRecord,
-  WorkspaceSelectionResult
+  RunRecord
 } from "../../shared/types";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types";
 import {
@@ -129,8 +127,6 @@ type AppServiceDependencies = {
     Partial<Pick<OracleRunner, "startConsult" | "terminateSession">>;
   chatgptAuthRunner?: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   codexRunner?: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
-  untitledWorkspaceRoot?: string;
-  onSelectedWorkspacePathChange?: (workspacePath: string) => void;
   getAppSettings?: () => Promise<AppSettings>;
 };
 
@@ -233,8 +229,6 @@ export class AppService {
     Partial<Pick<OracleRunner, "startConsult" | "terminateSession">>;
   private readonly chatgptAuthRunner: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   private readonly codexRunner: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
-  private readonly untitledWorkspaceRoot: string;
-  private readonly onSelectedWorkspacePathChange?: (workspacePath: string) => void;
   private readonly getAppSettings: () => Promise<AppSettings>;
 
   constructor(workspacePath: string, dependencies: AppServiceDependencies = {}) {
@@ -245,28 +239,12 @@ export class AppService {
     this.oracleRunner = dependencies.oracleRunner ?? new OracleRunner();
     this.chatgptAuthRunner = dependencies.chatgptAuthRunner ?? new ChatgptAuthRunner();
     this.codexRunner = dependencies.codexRunner ?? new CodexRunner();
-    this.untitledWorkspaceRoot =
-      dependencies.untitledWorkspaceRoot ?? path.join(os.homedir(), "Documents", "Lithium");
-    this.onSelectedWorkspacePathChange = dependencies.onSelectedWorkspacePathChange;
     this.getAppSettings = dependencies.getAppSettings ?? (async () => DEFAULT_APP_SETTINGS);
   }
 
-  setSelectedWorkspacePath(workspacePath: string): WorkspaceSelectionResult {
+  setSelectedWorkspacePath(workspacePath: string) {
     const nextWorkspacePath = workspacePath.trim();
     this.updateSelectedWorkspacePath(nextWorkspacePath);
-    return { selectedWorkspacePath: nextWorkspacePath };
-  }
-
-  async getAppState(input: {
-    platform: string;
-    settings: AppSettings;
-  }): Promise<RuntimeAppState> {
-    const selectedWorkspacePath = this.selectedWorkspacePath;
-
-    return {
-      ...input,
-      selectedWorkspacePath
-    };
   }
 
   async initProject(workspacePath?: string) {
@@ -3015,21 +2993,7 @@ export class AppService {
   }
 
   private async resolveResearchWorkspacePath(workspacePath?: string) {
-    const explicitWorkspacePath = workspacePath?.trim();
-
-    if (explicitWorkspacePath) {
-      return explicitWorkspacePath;
-    }
-
-    const resolved = this.resolveWorkspacePath();
-
-    if (resolved) {
-      return resolved;
-    }
-
-    const createdWorkspacePath = await this.createUntitledWorkspace();
-    this.updateSelectedWorkspacePath(createdWorkspacePath);
-    return createdWorkspacePath;
+    return this.requireWorkspacePath(workspacePath);
   }
 
   private updateSelectedWorkspacePath(workspacePath: string) {
@@ -3045,25 +3009,6 @@ export class AppService {
     }
 
     this.selectedWorkspacePath = normalizedWorkspacePath;
-    this.onSelectedWorkspacePathChange?.(normalizedWorkspacePath);
-  }
-
-  private async createUntitledWorkspace() {
-    await mkdir(this.untitledWorkspaceRoot, { recursive: true });
-
-    for (let index = 1; index <= 999; index += 1) {
-      const candidate = path.join(this.untitledWorkspaceRoot, `Untitled-${index}`);
-
-      try {
-        await access(candidate);
-        continue;
-      } catch {
-        await mkdir(candidate, { recursive: true });
-        return candidate;
-      }
-    }
-
-    throw new Error("Could not allocate an untitled workspace.");
   }
 
   private async readRunFinalMessage(outputPath: string, stdoutPath: string, stderrPath: string) {

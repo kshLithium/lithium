@@ -22,7 +22,6 @@ export const WORKSPACE_INDEX_IGNORED_DIRS = new Set([
   ".git",
   "dist",
   "build",
-  "release",
   "output",
   "tmp",
   "test-results",

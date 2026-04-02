@@ -7,12 +7,6 @@ export type CommandSpec = {
   cwd: string;
 };
 
-export type RuntimeAppState = {
-  platform: string;
-  selectedWorkspacePath: string;
-  settings: AppSettings;
-};
-
 export type AutomationPromptLanguage = "auto" | "ko" | "en";
 export type OracleModel = "gpt-5.4-pro";
 export type OracleThinkingTime = "extended";
@@ -456,10 +450,6 @@ export type WorkspaceFileRecord = {
   name: string;
   kind: WorkspaceFileKind;
   artifactKind?: ArtifactKind;
-};
-
-export type WorkspaceSelectionResult = {
-  selectedWorkspacePath: string;
 };
 
 export type StrategistRequest = {

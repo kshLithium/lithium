@@ -1,6 +1,6 @@
 # Lithium
 
-Lithium is a local-first CLI for running an automation-heavy research loop from one main chat.
+Lithium is a local-first CLI for running an automation-heavy research loop from one terminal chat.
 
 ## Philosophy
 

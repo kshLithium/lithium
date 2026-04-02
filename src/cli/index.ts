@@ -28,11 +28,6 @@ async function main() {
   const controller = new LithiumCliController({
     service: new AppService(initialWorkspacePath, {
       orchestratorRunner: new ResidentOrchestratorRunner(new OrchestratorRunner()),
-      onSelectedWorkspacePathChange: (workspacePath) => {
-        void settingsStore.update({
-          lastWorkspacePath: workspacePath
-        });
-      },
       getAppSettings: () => settingsStore.read()
     }),
     settingsStore,

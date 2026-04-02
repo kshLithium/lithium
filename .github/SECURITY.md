@@ -1,6 +1,6 @@
 # Security
 
-Lithium is a local-first Electron app that can call external models, edit real files, and run shell tasks inside the selected workspace. Treat it like a powerful local developer tool, not a sandbox.
+Lithium is a local-first CLI that can call external models, edit real files, and run shell tasks inside the selected workspace. Treat it like a powerful local developer tool, not a sandbox.
 
 ## Reporting A Vulnerability
 
@@ -25,7 +25,7 @@ Before making the repository public:
 2. Rotate any API keys that may have been used during development.
 3. Keep real secrets in environment variables, not in tracked files.
 4. Keep `.lithium/`, local logs, and test artifacts out of Git.
-5. Review sample workspaces and screenshots for personal paths or private data.
+5. Review sample workspaces and shared transcripts for personal paths or private data.
 6. Enable GitHub secret scanning and push protection where available.
 
 ## Current Project Practices
@@ -34,11 +34,10 @@ The repo is set up so that:
 
 - `.env` files are ignored
 - `.lithium/` is ignored
-- packaged release output is ignored
-- attachments are copied into the active workspace, not hidden inside the app bundle
-- the renderer uses `contextIsolation: true`, `nodeIntegration: false`, and a preload bridge
-- the app denies unexpected permission requests
-- the app blocks untrusted navigation and only opens safe external URLs
+- local build output and test artifacts are ignored
+- attachments are copied into the active workspace, not hidden in a separate app data bundle
+- settings are stored in `~/.lithium/settings.json`
+- the CLI asks for an explicit Chrome sign-in flow before reusing a strategist session
 
 ## Things This Project Does Not Protect You From
 
@@ -49,7 +48,7 @@ The repo is set up so that:
 
 ## Operational Guidance
 
-- use a separate API key for this app
+- use a separate API key for this tool
 - prefer environment variables over checked-in config files
 - do not attach private credentials, SSH keys, or database dumps
 - review the selected workspace before letting automation run unattended

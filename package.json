@@ -15,8 +15,7 @@
     "dev": "tsx src/cli/index.ts",
     "build": "tsup src/cli/index.ts --format cjs --out-dir dist --external node-pty --external playwright-core --clean && node -e \"const fs=require('fs');if(fs.existsSync('dist/index.cjs'))fs.renameSync('dist/index.cjs','dist/cli.cjs')\"",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.scripts.json",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run"
   },
   "dependencies": {
     "@steipete/oracle": "0.9.0",

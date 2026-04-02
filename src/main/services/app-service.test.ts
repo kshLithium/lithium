@@ -800,13 +800,9 @@ describe("AppService automation loop", () => {
       await service.initProject(selectedWorkspacePath);
       await service.initProject(backgroundWorkspacePath);
       await service.getSnapshot(backgroundWorkspacePath);
+      const snapshot = await service.createThread();
 
-      const appState = await service.getAppState({
-        platform: "darwin",
-        settings: DEFAULT_APP_SETTINGS
-      });
-
-      expect(appState.selectedWorkspacePath).toBe(selectedWorkspacePath);
+      expect(snapshot.project?.workspacePath).toBe(selectedWorkspacePath);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
     }

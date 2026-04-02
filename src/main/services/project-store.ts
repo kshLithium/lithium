@@ -2033,7 +2033,7 @@ function renderOutputContract(lane: ContextPackLane) {
   if (lane === "strategist") {
     return [
       "Reply naturally first.",
-      "Then append LITHIUM_HANDOFF with one compact JSON object for the app.",
+      "Then append LITHIUM_HANDOFF with one compact JSON object for Lithium.",
       'Prefer "machine_summary" for the compact internal handoff and use "user_message" only when a shorter user-facing restatement helps.'
     ].join("\n");
   }
@@ -2041,7 +2041,7 @@ function renderOutputContract(lane: ContextPackLane) {
   if (lane === "builder") {
     return [
       "Reply naturally first.",
-      "Then append LITHIUM_STATUS with one compact JSON object for the app.",
+      "Then append LITHIUM_STATUS with one compact JSON object for Lithium.",
       'Prefer "machine_summary" for the compact internal handoff and use "user_message" only when a shorter user-facing restatement helps.',
       "Keep result in success, partial, or failed."
     ].join("\n");
