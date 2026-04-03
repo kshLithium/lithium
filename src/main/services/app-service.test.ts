@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_APP_SETTINGS,
@@ -32,6 +32,47 @@ const ZIP_NOTES_FIXTURE_BASE64 =
 describe("AppService automation loop", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("boots a blank workspace into a recoverable local state", async () => {
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-workspace-boot-"));
+
+    try {
+      const service = new AppService(workspacePath, {
+        getAppSettings: async () => DEFAULT_APP_SETTINGS
+      });
+
+      const snapshot = await service.initProject(workspacePath);
+      const lithiumRoot = path.join(workspacePath, ".lithium");
+      const contextBundlePath = path.join(lithiumRoot, "context", "current-context.md");
+      const projectMemoryPath = path.join(lithiumRoot, "memory", "project-memory.json");
+      const activityLogPath = path.join(lithiumRoot, "activity.log");
+
+      expect(snapshot.project?.workspacePath).toBe(workspacePath);
+      expect(snapshot.activeThread?.title).toBe("Main thread");
+
+      await expect(access(path.join(lithiumRoot, "project.json"))).resolves.toBeUndefined();
+      await expect(access(contextBundlePath)).resolves.toBeUndefined();
+      await expect(access(projectMemoryPath)).resolves.toBeUndefined();
+
+      const contextBundle = await readFile(contextBundlePath, "utf8");
+      const projectMemory = JSON.parse(await readFile(projectMemoryPath, "utf8")) as {
+        researchGoal?: string;
+        constraints?: string[];
+        openQuestions?: string[];
+      };
+      const activityLog = await readFile(activityLogPath, "utf8");
+
+      expect(contextBundle).toContain("## Project Memory");
+      expect(contextBundle).toContain("## Active Thread");
+      expect(contextBundle).toContain("Main thread");
+      expect(projectMemory.researchGoal).toBe("Define the next research outcome this project should produce.");
+      expect(projectMemory.constraints).toEqual(["Local-first", "Single-user", "Prototype-first"]);
+      expect(projectMemory.openQuestions).toContain("What is the next concrete experiment or validation step?");
+      expect(activityLog).toContain("project initialized");
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
   });
 
   it("starts async strategist delegations in the background instead of blocking on consultStrategist", async () => {
