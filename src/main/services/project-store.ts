@@ -11,11 +11,19 @@ import type {
   ConversationEntryRecord,
   ContextPackLane,
   DecisionRecord,
+  EvaluationRecord,
   LithiumHandoff,
   ProjectMemoryLayer,
   ProjectMemoryRecord,
   ProjectRecord,
   ProjectSnapshot,
+  ResearchBranchRecord,
+  ResearchFindingRecord,
+  ResearchHypothesisRecord,
+  ResearchObjectiveRecord,
+  ResearchProjectionRecord,
+  ResearchSourceRecord,
+  ResearchWorkItemRecord,
   RouterTraceRecord,
   ThreadRecord,
   RunRecord,
@@ -33,6 +41,7 @@ import { extractFinalSummary } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
 import { pathExists } from "./fs-utils";
 import { RecordStore } from "./record-store";
+import { ResearchStateStore } from "../research/state-store";
 import {
   buildProjectPaths,
   createArtifactPaths,
@@ -73,6 +82,7 @@ type RuntimeContextOptions = {
 
 export class ProjectStore {
   private readonly records = new RecordStore();
+  private readonly research = new ResearchStateStore();
 
   buildPaths(workspacePath: string): ProjectPaths {
     return buildProjectPaths(workspacePath);
@@ -381,6 +391,7 @@ export class ProjectStore {
       ? extractFinalSummary(latestContextRun.finalMessage)
       : "none";
     const latestCycle = snapshot.latestAutomationCycle ?? null;
+    const latestResearchProjection = snapshot.latestResearchProjection ?? null;
     const latestConversationBody = snapshot.latestConversationEntry?.body?.trim() || "";
     const summaryLanguage = resolveContextLanguage([
       latestConversationBody,
@@ -400,6 +411,9 @@ export class ProjectStore {
       latestContextRun
         ? `Latest research run: ${latestContextRun.id} (${latestContextRun.status}, exit ${latestContextRun.exitCode ?? "unknown"})`
         : "Latest research run: none",
+      latestResearchProjection
+        ? `Research engine: ${latestResearchProjection.status} — ${truncateInline(latestResearchProjection.summary, 220)}`
+        : null,
       latestContextRun ? `Latest builder summary: ${latestContextRunSummary}` : "Latest builder summary: none",
       formatAutomationSessionSummary(snapshot.latestAutomationSession, summaryLanguage),
       formatAutomationCycleSummary(latestCycle, summaryLanguage),
@@ -418,6 +432,7 @@ export class ProjectStore {
           activeStory: snapshot.memory.projectBrief,
           collaborationContract: snapshot.memory.constraints.slice(0, 6),
           currentFocus:
+            latestResearchProjection?.currentFocus ||
             snapshot.latestAutomationSession?.currentStepSummary ||
             snapshot.latestAutomationSession?.displayObjective ||
             snapshot.latestAutomationSession?.objective ||
@@ -430,14 +445,20 @@ export class ProjectStore {
           openQuestions: snapshot.memory.openQuestions,
           activeHypotheses: snapshot.memory.activeHypotheses,
           stableFacts: [snapshot.project.name, snapshot.memory.projectBrief].filter(Boolean),
-          keyDecisions: [latestStrategistSummary, latestContextRunSummary].filter(Boolean),
+          keyDecisions: [
+            latestStrategistSummary,
+            latestContextRunSummary,
+            latestResearchProjection?.summary || ""
+          ].filter(Boolean),
           metrics: [latestContextRun ? `${latestContextRun.id}: ${latestContextRunSummary}` : ""].filter(Boolean),
-          learnedPatterns: [latestCycle?.summary || ""].filter(Boolean)
+          learnedPatterns: [latestCycle?.summary || "", latestResearchProjection?.currentFocus || ""].filter(Boolean)
         },
         executionJournal: {
           sessionSummary,
           activeAutomationSummary:
-            formatAutomationSessionSummary(snapshot.latestAutomationSession, summaryLanguage) || "none",
+            latestResearchProjection?.summary ||
+            formatAutomationSessionSummary(snapshot.latestAutomationSession, summaryLanguage) ||
+            "none",
           recentArtifacts: [
             snapshot.latestDecision?.id || "",
             latestContextRun?.id || "",
@@ -473,7 +494,8 @@ export class ProjectStore {
           summary: [
             latestStrategistSummary ? `Strategist: ${truncateInline(latestStrategistSummary, 140)}` : "",
             latestContextRun ? `${latestContextRun.id}: ${truncateInline(latestContextRunSummary, 140)}` : "",
-            latestCycle ? `${latestCycle.id}: ${truncateInline(latestCycle.summary, 140)}` : ""
+            latestCycle ? `${latestCycle.id}: ${truncateInline(latestCycle.summary, 140)}` : "",
+            latestResearchProjection ? `Research: ${truncateInline(latestResearchProjection.summary, 140)}` : ""
           ]
             .filter(Boolean)
             .join(" | "),
@@ -791,6 +813,7 @@ export class ProjectStore {
     const latestOperationalRun =
       snapshot.latestRun && snapshot.latestRun.id !== latestContextRun?.id ? snapshot.latestRun : null;
     const latestCycle = snapshot.latestAutomationCycle ?? null;
+    const latestResearchProjection = snapshot.latestResearchProjection ?? null;
     const threadAttachments = snapshot.attachments
       .filter((record) => record.threadId === snapshot.activeThreadId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -806,6 +829,9 @@ export class ProjectStore {
         ? [
             `Latest builder status: ${latestContextRun?.status || snapshot.latestRun?.status || "none"}`,
             `Latest builder summary: ${truncateInline(latestRunSummary, 220)}`,
+            latestResearchProjection
+              ? `Research engine summary: ${truncateInline(latestResearchProjection.summary, 220)}`
+              : null,
             latestRunChangedFiles.length
               ? `Latest changed files: ${latestRunChangedFiles.slice(0, 6).join(", ")}`
               : "Latest changed files: none",
@@ -823,6 +849,9 @@ export class ProjectStore {
             `Latest strategist rationale: ${truncateInline(snapshot.latestDecision?.rationale || "none", 220)}`,
             `Latest builder status: ${latestContextRun?.status || snapshot.latestRun?.status || "none"}`,
             `Latest builder summary: ${truncateInline(latestRunSummary, 220)}`,
+            latestResearchProjection
+              ? `Research engine summary: ${truncateInline(latestResearchProjection.summary, 220)}`
+              : null,
             latestRunChangedFiles.length
               ? `Latest changed files: ${latestRunChangedFiles.slice(0, 6).join(", ")}`
               : "Latest changed files: none",
@@ -884,6 +913,7 @@ export class ProjectStore {
             `Constraints: ${memory.constraints.join("; ") || "none"}`,
             `Open Questions: ${memory.openQuestions.join("; ") || "none"}`,
             `Active Hypotheses: ${memory.activeHypotheses.join("; ") || "none"}`,
+            `Research Projection: ${truncateInline(latestResearchProjection?.summary || "none", 220)}`,
             `Strategist Style: ${truncateInline(memory.preferences.strategistStyle || "none", 160)}`,
             `Builder Style: ${truncateInline(memory.preferences.builderStyle || "none", 160)}`,
             `Session Summary: ${truncateInline(memory.sessionSummary || "none", 220)}`,
@@ -965,6 +995,7 @@ export class ProjectStore {
     const latestDecisionReply = extractVisibleStrategistReply(snapshot.latestDecision?.rawOutput || "", 500);
     const latestRunHandoff = deriveRunHandoff(latestContextRun);
     const latestCycle = snapshot.latestAutomationCycle ?? null;
+    const latestResearchProjection = snapshot.latestResearchProjection ?? null;
     const contextLanguage = resolveContextLanguage([
       prompt,
       snapshot.latestConversationEntry?.body || "",
@@ -980,6 +1011,9 @@ export class ProjectStore {
       latestCycle
         ? `Latest automation cycle: ${latestCycle.id} (${latestCycle.phase}) — ${latestCycle.summary || "none"}`
         : "Latest automation cycle: none",
+      latestResearchProjection
+        ? `Research projection: ${latestResearchProjection.summary}`
+        : "Research projection: none",
       threadAttachments.length
         ? `Attachments: ${threadAttachments.slice(0, 8).map((record) => record.relativePath).join(", ")}`
         : "Attachments: none"
@@ -1012,6 +1046,7 @@ export class ProjectStore {
               `Builder Style: ${memory.preferences.builderStyle}`,
               `Open Questions: ${memory.openQuestions.join("; ") || "none"}`,
               `Active Hypotheses: ${memory.activeHypotheses.join("; ") || "none"}`,
+              `Research Projection: ${latestResearchProjection?.summary || "none"}`,
               `Session Summary: ${memory.sessionSummary || "none"}`,
               `Narrative Memory: ${memory.memoryMap.narrative.summary || "none"}`,
               `Knowledge Memory: ${memory.memoryMap.knowledge.summary || "none"}`,
@@ -1178,6 +1213,7 @@ export class ProjectStore {
       .filter((record) => record.threadId === activeThreadId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const logContent = await this.safeRead(paths.activityLog);
+    const researchState = await this.research.readState(workspacePath, activeThreadId);
 
     const logs = logContent
       ? logContent
@@ -1213,6 +1249,18 @@ export class ProjectStore {
       latestAutomationSession: automationSessions[0] ?? null,
       latestAutomationCycle: automationCycles[0] ?? null,
       latestAutomationCheckpoint: automationCheckpoints[0] ?? null,
+      researchObjectives: researchState.objectives,
+      researchBranches: researchState.branches,
+      researchSources: researchState.sources,
+      researchFindings: researchState.findings,
+      researchHypotheses: researchState.hypotheses,
+      researchWorkItems: researchState.workItems,
+      researchEvaluations: researchState.evaluations,
+      latestResearchObjective: researchState.latestObjective,
+      latestResearchBranch: researchState.latestBranch,
+      latestResearchWorkItem: researchState.latestWorkItem,
+      latestResearchEvaluation: researchState.latestEvaluation,
+      latestResearchProjection: researchState.latestProjection,
       logs
     };
   }
@@ -1339,6 +1387,16 @@ export class ProjectStore {
     await mkdir(paths.contextDir, { recursive: true });
     await mkdir(paths.memoryDir, { recursive: true });
     await mkdir(paths.workspaceAttachmentsDir, { recursive: true });
+    await mkdir(paths.researchDir, { recursive: true });
+    await mkdir(paths.researchObjectivesDir, { recursive: true });
+    await mkdir(paths.researchBranchesDir, { recursive: true });
+    await mkdir(paths.researchSourcesDir, { recursive: true });
+    await mkdir(paths.researchFindingsDir, { recursive: true });
+    await mkdir(paths.researchHypothesesDir, { recursive: true });
+    await mkdir(paths.researchWorkItemsDir, { recursive: true });
+    await mkdir(paths.researchEvaluationsDir, { recursive: true });
+    await mkdir(paths.researchProjectionsDir, { recursive: true });
+    await mkdir(paths.worktreesDir, { recursive: true });
 
     for (const directory of projectRuntimeDirectories(paths)) {
       await mkdir(directory, { recursive: true });

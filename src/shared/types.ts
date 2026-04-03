@@ -44,6 +44,7 @@ export type ProjectRecord = {
   workspacePath: string;
   oracleModel: OracleModel;
   codexModel: string;
+  activeObjectiveId?: string;
   defaultThreadId: string;
   activeThreadId: string;
   createdAt: string;
@@ -251,6 +252,226 @@ export type AutomationCheckpointRecord = {
   approvedAt?: string;
 };
 
+export type ResearchObjectiveStatus = "pending" | "active" | "paused" | "completed" | "failed";
+export type ResearchBranchStatus = "candidate" | "active" | "blocked" | "killed" | "pivoted" | "completed";
+export type ResearchSourceKind = "workspace" | "paper" | "repo" | "web" | "decision" | "run" | "conversation";
+export type ResearchFindingKind = "evidence" | "observation" | "claim";
+export type ResearchHypothesisStatus = "open" | "supported" | "unsupported" | "revised";
+export type ResearchWorkItemKind = "planner" | "deep-research" | "code-edit" | "experiment" | "evaluation";
+export type ResearchWorkItemLane = "planner" | "research" | "builder" | "experiment" | "evaluator";
+export type ResearchWorkItemExecutionMode = "sync" | "async" | "isolated";
+export type ResearchWorkItemExecutor =
+  | "oracle-planner"
+  | "oracle-research"
+  | "builder-edit"
+  | "experiment-run"
+  | "evaluator";
+export type ResearchIsolationMode = "none" | "worktree";
+export type ResearchWorkItemStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+export type ResearchEvaluationVerdict = "continue" | "kill" | "pivot" | "complete";
+export type ResearchProjectionStatus = "idle" | "running" | "paused" | "blocked" | "completed";
+export type ResearchRunStatus = "pending" | "active" | "blocked" | "paused" | "completed" | "failed";
+
+export type ResearchPriorityScore = {
+  objectiveAlignment: number;
+  expectedInformationGain: number;
+  feasibility: number;
+  estimatedCost: number;
+  branchFreshness: number;
+  duplicationPenalty: number;
+  reproducibilityPriority: number;
+  total: number;
+};
+
+export type ResearchObjectiveRecord = {
+  id: string;
+  threadId: string;
+  automationSessionId?: string;
+  title: string;
+  objective: string;
+  summary: string;
+  status: ResearchObjectiveStatus;
+  successCriteria: string[];
+  activeBranchId?: string;
+  activeRunId?: string;
+  sourceIds: string[];
+  branchIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchBranchRecord = {
+  id: string;
+  objectiveId: string;
+  threadId: string;
+  title: string;
+  hypothesis: string;
+  status: ResearchBranchStatus;
+  score: number;
+  blocker?: string;
+  nextWorkItemId?: string;
+  lastFailureReason?: string;
+  evidenceIds: string[];
+  sourceIds: string[];
+  findingIds: string[];
+  workItemIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastUpdatedAt: string;
+};
+
+export type ResearchSourceRecord = {
+  id: string;
+  objectiveId: string;
+  threadId: string;
+  branchId?: string;
+  kind: ResearchSourceKind;
+  title: string;
+  locator: string;
+  summary: string;
+  metadata?: Record<string, string | number | boolean | null>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchFindingRecord = {
+  id: string;
+  objectiveId: string;
+  threadId: string;
+  branchId?: string;
+  sourceId?: string;
+  kind: ResearchFindingKind;
+  summary: string;
+  detail?: string;
+  evidence: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchHypothesisRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  threadId: string;
+  statement: string;
+  status: ResearchHypothesisStatus;
+  confidence: number;
+  evidenceIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchWorkItemRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  threadId: string;
+  kind: ResearchWorkItemKind;
+  lane: ResearchWorkItemLane;
+  executor?: ResearchWorkItemExecutor;
+  title: string;
+  prompt: string;
+  status: ResearchWorkItemStatus;
+  executionMode: ResearchWorkItemExecutionMode;
+  isolation?: ResearchIsolationMode;
+  priorityScore: ResearchPriorityScore;
+  sourceIds: string[];
+  dependsOnIds: string[];
+  decisionId?: string;
+  runId?: string;
+  oracleSessionSlug?: string;
+  worktreePath?: string;
+  resultEvaluationId?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
+export type ResearchRunSlotBudget = {
+  codexSlots: number;
+  oracleSlots: number;
+  maxTotalWorkItems: number;
+  completedWorkItems: number;
+};
+
+export type ResearchRunRecord = {
+  id: string;
+  objectiveId: string;
+  threadId: string;
+  status: ResearchRunStatus;
+  blockedReason?: string;
+  stopReason?: string;
+  slotBudget: ResearchRunSlotBudget;
+  activeWorkItemIds: string[];
+  oracleSessionSlugs: string[];
+  worktreeLeases: string[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+
+export type EvaluationRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  threadId: string;
+  workItemId: string;
+  verdict: ResearchEvaluationVerdict;
+  scoreDelta: number;
+  summary: string;
+  rationale: string;
+  followupPrompt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResearchEventRecord = {
+  id: string;
+  threadId: string;
+  objectiveId?: string;
+  branchId?: string;
+  workItemId?: string;
+  type: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type ResearchProjectionRecord = {
+  id: string;
+  threadId: string;
+  objectiveId: string;
+  objectiveTitle: string;
+  status: ResearchProjectionStatus;
+  summary: string;
+  currentFocus: string;
+  activeBranchTitle: string;
+  queueDepth: number;
+  topNextActions: string[];
+  recentEvidence: string[];
+  latestEvaluationSummary?: string;
+  activeRunId?: string;
+  activeRunStatus?: ResearchRunStatus;
+  blockedReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUpdatedAt: string;
+};
+
+export type ActiveWorkerProgressRecord = {
+  runId: string;
+  workItemId: string;
+  objectiveId: string;
+  title: string;
+  executor: ResearchWorkItemExecutor;
+  status: ResearchWorkItemStatus | ResearchRunStatus;
+  summary: string;
+  oracleSessionSlug?: string;
+  worktreePath?: string;
+  updatedAt: string;
+};
+
 export type LithiumHandoff = {
   schemaVersion: "lithium_handoff_v1";
   role: ContextPackLane;
@@ -266,6 +487,18 @@ export type LithiumHandoff = {
   openQuestions: string[];
   automationMode?: "continue" | "checkpoint" | "blocked" | "done";
   proposedSteps?: AutomationProposedStep[];
+  proposedBranches?: Array<{
+    title: string;
+    hypothesis: string;
+  }>;
+  researchWorkItems?: Array<{
+    title: string;
+    prompt: string;
+    kind: ResearchWorkItemKind;
+    executor?: ResearchWorkItemExecutor;
+    isolation?: ResearchIsolationMode;
+    branchTitle?: string;
+  }>;
   needsUserCheckpoint?: boolean;
   confidence?: number;
 };
@@ -368,6 +601,7 @@ export type AttachmentKind = "text" | "json" | "csv" | "document" | "image" | "o
 export type AttachmentRecord = {
   id: string;
   threadId: string;
+  objectiveId?: string;
   name: string;
   relativePath: string;
   sourcePath: string;
@@ -431,6 +665,36 @@ export type ProjectSnapshot = {
   latestAutomationSession?: AutomationSessionRecord | null;
   latestAutomationCycle?: AutomationCycleRecord | null;
   latestAutomationCheckpoint?: AutomationCheckpointRecord | null;
+  researchObjectives?: ResearchObjectiveRecord[];
+  researchBranches?: ResearchBranchRecord[];
+  researchSources?: ResearchSourceRecord[];
+  researchFindings?: ResearchFindingRecord[];
+  researchHypotheses?: ResearchHypothesisRecord[];
+  researchWorkItems?: ResearchWorkItemRecord[];
+  researchEvaluations?: EvaluationRecord[];
+  latestResearchObjective?: ResearchObjectiveRecord | null;
+  latestResearchBranch?: ResearchBranchRecord | null;
+  latestResearchWorkItem?: ResearchWorkItemRecord | null;
+  latestResearchEvaluation?: EvaluationRecord | null;
+  latestResearchProjection?: ResearchProjectionRecord | null;
+  logs: string[];
+};
+
+export type WorkspaceSnapshot = {
+  project: ProjectRecord | null;
+  activeObjectiveId: string | null;
+  activeObjective: ResearchObjectiveRecord | null;
+  objectives: ResearchObjectiveRecord[];
+  activeRun: ResearchRunRecord | null;
+  runs: ResearchRunRecord[];
+  branches: ResearchBranchRecord[];
+  queue: ResearchWorkItemRecord[];
+  recentFindings: ResearchFindingRecord[];
+  latestEvaluation: EvaluationRecord | null;
+  latestProjection: ResearchProjectionRecord | null;
+  latestBuilderRun: RunRecord | null;
+  attachments: AttachmentRecord[];
+  activeWorkerProgress: ActiveWorkerProgressRecord[];
   logs: string[];
 };
 
@@ -470,6 +734,7 @@ export type BuilderRequest = {
   threadId?: string;
   prompt: string;
   displayPrompt?: string;
+  executionWorkspacePath?: string;
   model?: BuilderModel;
   reasoningEffort?: BuilderReasoningEffort;
 };
@@ -515,7 +780,26 @@ export type RouterTraceRecord = {
 export type AttachmentImportRequest = {
   workspacePath?: string;
   threadId?: string;
+  objectiveId?: string;
   filePaths: string[];
+};
+
+export type ObjectiveCreateRequest = {
+  workspacePath?: string;
+  title?: string;
+  objective: string;
+  successCriteria?: string[];
+};
+
+export type ObjectiveSelectionRequest = {
+  workspacePath?: string;
+  objectiveId: string;
+};
+
+export type ObjectiveRunControlRequest = {
+  workspacePath?: string;
+  runId?: string;
+  objectiveId?: string;
 };
 
 export type AttachmentDeleteRequest = {

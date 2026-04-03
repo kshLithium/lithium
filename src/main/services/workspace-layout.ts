@@ -29,6 +29,22 @@ export type ProjectPaths = {
   automationStepsDir: string;
   automationCheckpointsDir: string;
   orchestratorDir: string;
+  researchDir: string;
+  researchObjectivesDir: string;
+  researchBranchesDir: string;
+  researchSourcesDir: string;
+  researchFindingsDir: string;
+  researchHypothesesDir: string;
+  researchWorkItemsDir: string;
+  researchEvaluationsDir: string;
+  researchProjectionsDir: string;
+  researchRunsDir: string;
+  researchOracleSessionsDir: string;
+  researchEventsFile: string;
+  researchCurrentProjectionFile: string;
+  researchCurrentRunFile: string;
+  legacyV2Dir: string;
+  worktreesDir: string;
   contextDir: string;
   memoryDir: string;
   projectFile: string;
@@ -74,6 +90,22 @@ export function buildProjectPaths(workspacePath: string): ProjectPaths {
     automationStepsDir: path.join(root, "automation", "steps"),
     automationCheckpointsDir: path.join(root, "automation", "checkpoints"),
     orchestratorDir: path.join(root, "orchestrator"),
+    researchDir: path.join(root, "research"),
+    researchObjectivesDir: path.join(root, "research", "objectives"),
+    researchBranchesDir: path.join(root, "research", "branches"),
+    researchSourcesDir: path.join(root, "research", "sources"),
+    researchFindingsDir: path.join(root, "research", "findings"),
+    researchHypothesesDir: path.join(root, "research", "hypotheses"),
+    researchWorkItemsDir: path.join(root, "research", "work-items"),
+    researchEvaluationsDir: path.join(root, "research", "evaluations"),
+    researchProjectionsDir: path.join(root, "research", "projections"),
+    researchRunsDir: path.join(root, "research", "runs"),
+    researchOracleSessionsDir: path.join(root, "research", "oracle-sessions"),
+    researchEventsFile: path.join(root, "research", "events.jsonl"),
+    researchCurrentProjectionFile: path.join(root, "research", "projections", "current.json"),
+    researchCurrentRunFile: path.join(root, "research", "runs", "current.json"),
+    legacyV2Dir: path.join(root, "legacy", "v2"),
+    worktreesDir: path.join(root, "research", "worktrees"),
     contextDir: path.join(root, "context"),
     memoryDir: path.join(root, "memory"),
     projectFile: path.join(root, PROJECT_FILE),

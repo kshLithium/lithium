@@ -10,6 +10,8 @@ const INCOMPLETE_STRATEGIST_PREFIX =
 const USER_VISIBLE_SYSTEM_NOISE_PATTERN =
   /^(?:connect econnrefused\b.*|prompt textarea did not appear before timeout\b.*|prompt did not appear in conversation before timeout\b.*|prompt-not-in-composer\b.*|send may have failed\b.*|reconnecting\.\.\.\s*\d+\/\d+\b.*|stream disconnected before comp\b.*|write_stdin failed\b.*|stdin is closed\b.*|chrome window closed before oracle finished\b.*|chrome disconnected before completion\b.*|if the saved chatgpt session expired\b.*|set lithium_oracle_visible=1\b.*|no (?:chatgpt )?cookies were applied\b.*|log in to chatgpt in chrome\b.*|provide inline cookies\b.*|unable to find model option matching\b.*)$/i;
 
+type ParsedResearchWorkItem = NonNullable<LithiumHandoff["researchWorkItems"]>[number];
+
 export function parseOracleOutput(rawOutput: string): LithiumHandoff {
   const parsed = parseMarkedJsonBlock(rawOutput, STRATEGIST_MARKER);
 
@@ -125,13 +127,17 @@ function normalizeStrategistHandoff(value: unknown, rawOutput: string): LithiumH
     readString(candidate.user_message, candidate.userMessage) ||
     extractVisibleStrategistMessage(rawOutput) ||
     undefined;
+  const automationMode = normalizeAutomationMode(readString(candidate.automation_mode, candidate.automationMode));
+  const needsUserCheckpoint = readBoolean(candidate.needs_user_checkpoint, candidate.needsUserCheckpoint);
+  const proposedBranches = readPlannerBranches(candidate.proposed_branches, candidate.proposedBranches);
+  const researchWorkItems = readResearchWorkItems(candidate.research_work_items, candidate.researchWorkItems);
 
   return {
     schemaVersion: "lithium_handoff_v1",
     role: "strategist",
     summary: machineSummary,
     machineSummary,
-    userMessage,
+    ...(userMessage ? { userMessage } : {}),
     rationale:
       readString(candidate.rationale) || "Oracle did not return a structured rationale.",
     files: readStringList(candidate.files),
@@ -139,8 +145,10 @@ function normalizeStrategistHandoff(value: unknown, rawOutput: string): LithiumH
     runActions: readStringList(candidate.run_actions, candidate.runActions),
     successCriteria: readStringList(candidate.success_criteria, candidate.successCriteria),
     openQuestions: readStringList(candidate.open_questions, candidate.openQuestions),
-    automationMode: normalizeAutomationMode(readString(candidate.automation_mode, candidate.automationMode)),
-    needsUserCheckpoint: readBoolean(candidate.needs_user_checkpoint, candidate.needsUserCheckpoint)
+    ...(proposedBranches.length > 0 ? { proposedBranches } : {}),
+    ...(researchWorkItems.length > 0 ? { researchWorkItems } : {}),
+    ...(automationMode ? { automationMode } : {}),
+    ...(typeof needsUserCheckpoint === "boolean" ? { needsUserCheckpoint } : {})
   };
 }
 
@@ -153,21 +161,23 @@ function normalizeBuilderHandoff(value: unknown, finalMessage: string): LithiumH
     readString(candidate.user_message, candidate.userMessage) ||
     extractVisibleBuilderMessage(finalMessage) ||
     undefined;
+  const automationMode = normalizeAutomationMode(readString(candidate.automation_mode, candidate.automationMode));
+  const needsUserCheckpoint = readBoolean(candidate.needs_user_checkpoint, candidate.needsUserCheckpoint);
 
   return {
     schemaVersion: "lithium_handoff_v1",
     role: "builder",
     summary: machineSummary,
     machineSummary,
-    userMessage,
+    ...(userMessage ? { userMessage } : {}),
     result: normalizeResultTag(readString(candidate.result)),
     files: readStringList(candidate.files),
     risks: readStringList(candidate.risks),
     runActions: readStringList(candidate.run_actions, candidate.runActions),
     successCriteria: readStringList(candidate.success_criteria, candidate.successCriteria),
     openQuestions: readStringList(candidate.open_questions, candidate.openQuestions),
-    automationMode: normalizeAutomationMode(readString(candidate.automation_mode, candidate.automationMode)),
-    needsUserCheckpoint: readBoolean(candidate.needs_user_checkpoint, candidate.needsUserCheckpoint)
+    ...(automationMode ? { automationMode } : {}),
+    ...(typeof needsUserCheckpoint === "boolean" ? { needsUserCheckpoint } : {})
   };
 }
 
@@ -515,6 +525,85 @@ function readStringList(...values: unknown[]) {
 
     if (typeof value === "string" && value.trim()) {
       return splitLooseList(value);
+    }
+  }
+
+  return [];
+}
+
+function readPlannerBranches(...values: unknown[]) {
+  for (const value of values) {
+    if (!Array.isArray(value)) {
+      continue;
+    }
+
+    const normalized = value.flatMap((entry) => {
+      const record = toRecord(entry);
+      const title = readString(record.title);
+      const hypothesis = readString(record.hypothesis);
+
+      if (!title || !hypothesis) {
+        return [];
+      }
+
+      return [{ title, hypothesis }];
+    });
+
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+
+  return [];
+}
+
+function readResearchWorkItems(...values: unknown[]) {
+  for (const value of values) {
+    if (!Array.isArray(value)) {
+      continue;
+    }
+
+    const normalized = value.flatMap((entry) => {
+      const record = toRecord(entry);
+      const title = readString(record.title);
+      const prompt = readString(record.prompt);
+      const kind = readString(record.kind);
+      const executor = readString(record.executor);
+      const isolation = readString(record.isolation);
+      const branchTitle = readString(record.branch_title, record.branchTitle);
+
+      if (
+        !title ||
+        !prompt ||
+        !kind ||
+        !/^(planner|deep-research|code-edit|experiment|evaluation)$/.test(kind)
+      ) {
+        return [];
+      }
+
+      const normalizedExecutor =
+        executor && /^(oracle-planner|oracle-research|builder-edit|experiment-run|evaluator)$/.test(executor)
+          ? executor
+          : undefined;
+      const normalizedIsolation =
+        isolation && /^(none|worktree)$/.test(isolation)
+          ? isolation
+          : undefined;
+
+      return [
+        {
+          title,
+          prompt,
+          kind: kind as ParsedResearchWorkItem["kind"],
+          executor: normalizedExecutor as ParsedResearchWorkItem["executor"],
+          isolation: normalizedIsolation as ParsedResearchWorkItem["isolation"],
+          branchTitle: branchTitle || undefined
+        }
+      ];
+    });
+
+    if (normalized.length > 0) {
+      return normalized;
     }
   }
 

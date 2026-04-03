@@ -1,5 +1,4 @@
 import path from "node:path";
-import type { ConversationEntryRecord, ProjectSnapshot, ThreadRecord } from "../shared/types";
 
 export function resolveInitialWorkspacePath(
   argv: string[],
@@ -71,48 +70,6 @@ export function splitShellLikeArguments(input: string) {
   }
 
   return tokens;
-}
-
-export function resolveThreadSelection(target: string, threads: ThreadRecord[]) {
-  const normalizedTarget = target.trim();
-  const numericIndex = Number.parseInt(normalizedTarget, 10);
-
-  if (Number.isFinite(numericIndex) && `${numericIndex}` === normalizedTarget) {
-    const selectedThread = threads[numericIndex - 1];
-
-    if (!selectedThread) {
-      throw new Error(`Thread index out of range: ${normalizedTarget}`);
-    }
-
-    return selectedThread.id;
-  }
-
-  const thread = threads.find((candidate) => candidate.id === normalizedTarget);
-
-  if (!thread) {
-    throw new Error(`Thread not found: ${normalizedTarget}`);
-  }
-
-  return thread.id;
-}
-
-export function resolveConversationAttachmentLabels(
-  entry: ConversationEntryRecord,
-  snapshot: ProjectSnapshot
-) {
-  const attachmentIds = new Set(entry.attachmentIds ?? []);
-  return snapshot.attachments
-    .filter((attachment) => attachmentIds.has(attachment.id))
-    .map((attachment) => attachment.relativePath);
-}
-
-export function summarizeRun(value: string) {
-  const normalized = value
-    .replace(/\n+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return normalized ? normalized.slice(0, 160) : "none";
 }
 
 export function resolveWorkspacePath(value: string, cwd: () => string) {

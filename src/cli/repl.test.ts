@@ -2,110 +2,123 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_APP_SETTINGS,
   PROJECT_SCHEMA_VERSION,
+  type ActiveWorkerProgressRecord,
   type AppSettings,
-  type AttachmentRecord,
-  type ChatProgressInspection,
-  type ConversationEntryRecord,
-  type DecisionRecord,
-  type ProjectSnapshot,
-  type ProjectRecord,
-  type ThreadRecord
+  type ResearchObjectiveRecord,
+  type ResearchRunRecord,
+  type WorkspaceSnapshot
 } from "../shared/types";
 import {
   LithiumCliController,
   resolveInitialWorkspacePath
 } from "./repl";
 
-function buildThread(id: string, title: string): ThreadRecord {
+function buildObjective(id = "RO001", title = "Main objective"): ResearchObjectiveRecord {
   return {
     id,
+    threadId: id,
     title,
-    summary: "",
+    objective: title,
+    summary: title,
+    status: "active",
+    successCriteria: [],
+    activeBranchId: "RB001",
+    activeRunId: "RR001",
+    sourceIds: [],
+    branchIds: ["RB001"],
     createdAt: "2026-04-03T00:00:00.000Z",
     updatedAt: "2026-04-03T00:00:00.000Z"
   };
 }
 
-function buildProject(workspacePath: string, activeThreadId: string): ProjectRecord {
+function buildRun(status: ResearchRunRecord["status"] = "active"): ResearchRunRecord {
   return {
-    id: "project-1",
-    schemaVersion: PROJECT_SCHEMA_VERSION,
-    name: "demo",
-    workspacePath,
-    oracleModel: "gpt-5.4-pro",
-    codexModel: "gpt-5.4",
-    defaultThreadId: activeThreadId,
-    activeThreadId,
+    id: "RR001",
+    objectiveId: "RO001",
+    threadId: "RO001",
+    status,
+    slotBudget: {
+      codexSlots: 1,
+      oracleSlots: 2,
+      maxTotalWorkItems: 12,
+      completedWorkItems: 0
+    },
+    activeWorkItemIds: [],
+    oracleSessionSlugs: [],
+    worktreeLeases: [],
     createdAt: "2026-04-03T00:00:00.000Z",
     updatedAt: "2026-04-03T00:00:00.000Z"
-  };
-}
-
-function buildConversationEntry(
-  id: string,
-  threadId: string,
-  role: ConversationEntryRecord["role"],
-  body: string
-): ConversationEntryRecord {
-  return {
-    id,
-    threadId,
-    role,
-    source: role === "assistant" ? "orchestrator" : "user",
-    body,
-    createdAt: "2026-04-03T00:00:00.000Z"
   };
 }
 
 function buildSnapshot(input: {
   workspacePath?: string;
-  threads?: ThreadRecord[];
-  activeThreadId?: string | null;
-  conversationEntries?: ConversationEntryRecord[];
-  attachments?: AttachmentRecord[];
-  latestDecision?: DecisionRecord | null;
-} = {}): ProjectSnapshot {
-  const threads = input.threads ?? [buildThread("TH001", "Main thread")];
-  const activeThreadId = input.activeThreadId ?? threads[0]?.id ?? null;
+  objective?: ResearchObjectiveRecord | null;
+  run?: ResearchRunRecord | null;
+  activeWorkers?: ActiveWorkerProgressRecord[];
+} = {}): WorkspaceSnapshot {
+  const objective = input.objective ?? buildObjective();
+  const run = input.run ?? buildRun();
   const workspacePath = input.workspacePath ?? "/tmp/demo";
 
   return {
-    project: buildProject(workspacePath, activeThreadId ?? ""),
-    memory: null,
-    threads,
-    activeThreadId,
-    activeThread: threads.find((thread) => thread.id === activeThreadId) ?? null,
-    conversationEntries: input.conversationEntries ?? [],
-    latestConversationEntry: (input.conversationEntries ?? []).at(-1) ?? null,
-    attachments: input.attachments ?? [],
-    activeThreadAttachments: (input.attachments ?? []).filter((attachment) => attachment.threadId === activeThreadId),
-    decisions: input.latestDecision ? [input.latestDecision] : [],
-    tasks: [],
-    runs: [],
-    routerTraces: [],
-    latestDecision: input.latestDecision ?? null,
-    latestTask: null,
-    latestRun: null,
-    latestRouterTrace: null,
-    automationSessions: [],
-    automationCycles: [],
-    automationSteps: [],
-    automationCheckpoints: [],
-    latestAutomationSession: null,
-    latestAutomationCycle: null,
-    latestAutomationCheckpoint: null,
+    project: {
+      id: "project-1",
+      schemaVersion: PROJECT_SCHEMA_VERSION,
+      name: "demo",
+      workspacePath,
+      oracleModel: "gpt-5.4-pro",
+      codexModel: "gpt-5.4",
+      activeObjectiveId: objective?.id ?? undefined,
+      defaultThreadId: "",
+      activeThreadId: "",
+      createdAt: "2026-04-03T00:00:00.000Z",
+      updatedAt: "2026-04-03T00:00:00.000Z"
+    },
+    activeObjectiveId: objective?.id ?? null,
+    activeObjective: objective,
+    objectives: objective ? [objective] : [],
+    activeRun: run,
+    runs: run ? [run] : [],
+    branches: [],
+    queue: [],
+    recentFindings: [],
+    latestEvaluation: null,
+    latestProjection: objective
+      ? {
+          id: "RP001",
+          threadId: objective.id,
+          objectiveId: objective.id,
+          objectiveTitle: objective.title,
+          status: run?.status === "blocked" ? "blocked" : "running",
+          summary: `${objective.title}: next bounded step`,
+          currentFocus: "next bounded step",
+          activeBranchTitle: "Primary branch",
+          queueDepth: 0,
+          topNextActions: [],
+          recentEvidence: [],
+          activeRunId: run?.id,
+          activeRunStatus: run?.status,
+          blockedReason: run?.blockedReason,
+          createdAt: "2026-04-03T00:00:00.000Z",
+          updatedAt: "2026-04-03T00:00:00.000Z",
+          lastUpdatedAt: "2026-04-03T00:00:00.000Z"
+        }
+      : null,
+    latestBuilderRun: null,
+    attachments: [],
+    activeWorkerProgress: input.activeWorkers ?? [],
     logs: []
   };
 }
 
 function createController(options: {
-  initSnapshot?: ProjectSnapshot;
-  getSnapshot?: ProjectSnapshot[];
-  createThreadSnapshot?: ProjectSnapshot;
-  selectThreadSnapshot?: ProjectSnapshot;
-  importAttachmentsSnapshot?: ProjectSnapshot;
-  sendChatSnapshot?: ProjectSnapshot;
-  progress?: ChatProgressInspection | null;
+  initSnapshot?: WorkspaceSnapshot;
+  getSnapshot?: WorkspaceSnapshot[];
+  createObjectiveSnapshot?: WorkspaceSnapshot;
+  selectObjectiveSnapshot?: WorkspaceSnapshot;
+  runSnapshot?: WorkspaceSnapshot;
+  importAttachmentsSnapshot?: WorkspaceSnapshot;
   settings?: AppSettings;
   cwd?: string;
 }) {
@@ -122,14 +135,23 @@ function createController(options: {
   };
   const service = {
     setSelectedWorkspacePath: vi.fn(),
-    initProject: vi.fn().mockResolvedValue(initSnapshot),
-    getSnapshot: vi.fn().mockImplementation(async () => getSnapshotSequence.shift() ?? initSnapshot),
-    createThread: vi.fn().mockResolvedValue(options.createThreadSnapshot ?? initSnapshot),
-    selectThread: vi.fn().mockResolvedValue(options.selectThreadSnapshot ?? initSnapshot),
-    sendChatMessage: vi.fn().mockResolvedValue(options.sendChatSnapshot ?? initSnapshot),
-    inspectChatProgress: vi.fn().mockResolvedValue(options.progress ?? null),
+    initWorkspace: vi.fn().mockResolvedValue(initSnapshot),
+    getWorkspaceSnapshot: vi.fn().mockImplementation(async () => getSnapshotSequence.shift() ?? initSnapshot),
+    createObjective: vi.fn().mockResolvedValue(options.createObjectiveSnapshot ?? initSnapshot),
+    selectObjective: vi.fn().mockResolvedValue(options.selectObjectiveSnapshot ?? initSnapshot),
+    listObjectives: vi.fn().mockResolvedValue(initSnapshot.objectives),
+    startRun: vi.fn().mockResolvedValue(options.runSnapshot ?? initSnapshot),
+    pauseRun: vi.fn().mockResolvedValue(options.runSnapshot ?? initSnapshot),
+    resumeRun: vi.fn().mockResolvedValue(options.runSnapshot ?? initSnapshot),
+    stopRun: vi.fn().mockResolvedValue(options.runSnapshot ?? initSnapshot),
     importAttachments: vi.fn().mockResolvedValue(options.importAttachmentsSnapshot ?? initSnapshot),
-    beginStrategistSignIn: vi.fn().mockResolvedValue(undefined)
+    prepareOracleSignIn: vi.fn().mockResolvedValue(undefined),
+    getQueueView: vi.fn().mockResolvedValue([]),
+    getEvidenceView: vi.fn().mockResolvedValue({
+      findings: [],
+      evaluation: null,
+      projection: initSnapshot.latestProjection
+    })
   };
   const controller = new LithiumCliController({
     service: service as any,
@@ -176,7 +198,7 @@ describe("LithiumCliController", () => {
     });
 
     await controller.initialize("/Users/test/start");
-    service.initProject.mockResolvedValueOnce(nextSnapshot);
+    service.initWorkspace.mockResolvedValueOnce(nextSnapshot);
     await controller.handleLine(":workspace ../next");
 
     expect(service.setSelectedWorkspacePath).toHaveBeenLastCalledWith("/Users/test/next");
@@ -185,61 +207,62 @@ describe("LithiumCliController", () => {
     });
   });
 
-  it("does not persist a workspace switch when initialization fails", async () => {
-    const { controller, service, settingsStore } = createController({
-      initSnapshot: buildSnapshot({
-        workspacePath: "/Users/test/start"
-      })
-    });
-
-    await controller.initialize("/Users/test/start");
-    service.initProject.mockRejectedValueOnce(new Error("workspace init failed"));
-
-    await expect(controller.handleLine(":workspace ../broken")).rejects.toThrow("workspace init failed");
-
-    expect(service.setSelectedWorkspacePath).toHaveBeenCalledTimes(1);
-    expect(settingsStore.update).toHaveBeenCalledTimes(1);
-    expect(service.setSelectedWorkspacePath).not.toHaveBeenCalledWith("/Users/test/broken");
-    expect(settingsStore.update).not.toHaveBeenCalledWith({
-      lastWorkspacePath: "/Users/test/broken"
-    });
-  });
-
-  it("creates and switches threads via CLI commands", async () => {
-    const firstThread = buildThread("TH001", "Main thread");
-    const secondThread = buildThread("TH002", "Experiment");
+  it("creates and selects objectives via CLI commands", async () => {
     const createdSnapshot = buildSnapshot({
-      threads: [secondThread, firstThread],
-      activeThreadId: secondThread.id
+      objective: buildObjective("RO002", "Experiment objective"),
+      run: null
     });
     const switchedSnapshot = buildSnapshot({
-      threads: [secondThread, firstThread],
-      activeThreadId: firstThread.id
+      objective: buildObjective("RO001", "Main objective"),
+      run: null
     });
     const { controller, service } = createController({
       initSnapshot: buildSnapshot({
-        threads: [firstThread],
-        activeThreadId: firstThread.id
+        objective: buildObjective("RO001", "Main objective"),
+        run: null
       }),
-      createThreadSnapshot: createdSnapshot,
-      selectThreadSnapshot: switchedSnapshot
+      createObjectiveSnapshot: createdSnapshot,
+      selectObjectiveSnapshot: switchedSnapshot
     });
 
     await controller.initialize("/tmp/demo");
-    await controller.handleLine(":thread new Experiment");
-    await controller.handleLine(":thread use 2");
+    await controller.handleLine(":objective new Explore evaluation gap");
+    await controller.handleLine(":objective use RO001");
 
-    expect(service.createThread).toHaveBeenCalledWith({
+    expect(service.createObjective).toHaveBeenCalledWith({
       workspacePath: "/tmp/demo",
-      title: "Experiment"
+      objective: "Explore evaluation gap"
     });
-    expect(service.selectThread).toHaveBeenCalledWith({
+    expect(service.selectObjective).toHaveBeenCalledWith({
       workspacePath: "/tmp/demo",
-      threadId: "TH001"
+      objectiveId: "RO001"
     });
   });
 
-  it("imports attachments into the active thread", async () => {
+  it("runs autopilot lifecycle commands", async () => {
+    const runSnapshot = buildSnapshot({
+      run: buildRun("active")
+    });
+    const { controller, service } = createController({
+      initSnapshot: buildSnapshot({
+        run: null
+      }),
+      runSnapshot
+    });
+
+    await controller.initialize("/tmp/demo");
+    await controller.handleLine(":run start");
+    await controller.handleLine(":run pause");
+    await controller.handleLine(":run resume");
+    await controller.handleLine(":run stop");
+
+    expect(service.startRun).toHaveBeenCalledWith({ workspacePath: "/tmp/demo" });
+    expect(service.pauseRun).toHaveBeenCalledWith({ workspacePath: "/tmp/demo" });
+    expect(service.resumeRun).toHaveBeenCalledWith({ workspacePath: "/tmp/demo" });
+    expect(service.stopRun).toHaveBeenCalledWith({ workspacePath: "/tmp/demo" });
+  });
+
+  it("imports attachments into the active objective", async () => {
     const { controller, service } = createController({
       initSnapshot: buildSnapshot({
         workspacePath: "/tmp/demo"
@@ -252,7 +275,7 @@ describe("LithiumCliController", () => {
 
     expect(service.importAttachments).toHaveBeenCalledWith({
       workspacePath: "/tmp/demo",
-      threadId: "TH001",
+      objectiveId: "RO001",
       filePaths: ["/Users/test/current/notes one.md", "/Users/test/current/data.csv"]
     });
   });
@@ -265,105 +288,20 @@ describe("LithiumCliController", () => {
     await controller.initialize("/tmp/demo");
     await controller.handleLine(":signin");
 
-    expect(service.beginStrategistSignIn).toHaveBeenCalledTimes(1);
+    expect(service.prepareOracleSignIn).toHaveBeenCalledTimes(1);
     expect(settingsStore.update).toHaveBeenCalledWith({
       strategistSessionReady: true
     });
   });
 
-  it("passes route override prompts through chat and marks strategist session ready after a decision", async () => {
-    const sendChatSnapshot = buildSnapshot({
-      latestDecision: {
-        id: "D001",
-        threadId: "TH001",
-        prompt: "/research check this",
-        rawOutput: "Research note",
-        summary: "Research note",
-        rationale: "Because",
-        model: "gpt-5.4-pro",
-        engine: "browser",
-        status: "completed",
-        command: {
-          command: "oracle",
-          args: [],
-          cwd: "/tmp/demo"
-        },
-        stdoutPath: "/tmp/demo/stdout.log",
-        stderrPath: "/tmp/demo/stderr.log",
-        outputPath: "/tmp/demo/output.log",
-        createdAt: "2026-04-03T00:00:00.000Z"
-      }
-    });
-    const { controller, service, settingsStore } = createController({
-      initSnapshot: buildSnapshot({
-        workspacePath: "/tmp/demo"
-      }),
-      sendChatSnapshot,
-      settings: {
-        ...DEFAULT_APP_SETTINGS,
-        strategistSessionReady: false
-      }
-    });
-
-    await controller.initialize("/tmp/demo");
-    await controller.handleLine("/research check this");
-    await controller.handleLine("/build fix this");
-
-    expect(service.sendChatMessage).toHaveBeenNthCalledWith(
-      1,
-      {
-        workspacePath: "/tmp/demo",
-        threadId: "TH001",
-        prompt: "/research check this"
-      },
-      {
-        strategistSessionReady: false
-      }
-    );
-    expect(service.sendChatMessage).toHaveBeenNthCalledWith(
-      2,
-      {
-        workspacePath: "/tmp/demo",
-        threadId: "TH001",
-        prompt: "/build fix this"
-      },
-      {
-        strategistSessionReady: false
-      }
-    );
-    expect(settingsStore.update).toHaveBeenCalledWith({
-      strategistSessionReady: true
-    });
-  });
-
-  it("prints live progress and new assistant entries without duplicating identical polls", async () => {
-    const progress: ChatProgressInspection = {
-      active: true,
-      lane: "builder",
-      threadId: "TH001",
-      progressSummary: "Running builder",
-      progressDetails: ["Inspecting workspace"],
-      activeCommand: "codex exec",
-      stdoutTail: "",
-      stderrTail: "",
-      updatedAt: "2026-04-03T00:00:00.000Z"
-    };
-    const snapshotWithReply = buildSnapshot({
-      conversationEntries: [buildConversationEntry("C001", "TH001", "assistant", "Finished the task.")]
-    });
+  it("rejects free-form chat in autopilot-only mode", async () => {
     const { controller, output } = createController({
-      initSnapshot: buildSnapshot({
-        conversationEntries: []
-      }),
-      getSnapshot: [snapshotWithReply, snapshotWithReply],
-      progress
+      initSnapshot: buildSnapshot()
     });
 
     await controller.initialize("/tmp/demo");
-    await controller.pollOnce();
-    await controller.pollOnce();
+    await controller.handleLine("hello there");
 
-    expect(output.filter((line) => line.includes("[progress:builder] Running builder"))).toHaveLength(1);
-    expect(output.filter((line) => line === "Assistant: Finished the task.")).toHaveLength(1);
+    expect(output.some((line) => line.includes("Free-form chat is disabled"))).toBe(true);
   });
 });

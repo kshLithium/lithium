@@ -1,32 +1,30 @@
 import path from "node:path";
 import type { AppSettingsStore } from "../main/services/app-settings-store";
-import type { AppService } from "../main/services/app-service";
+import type { ResearchService } from "../main/services/research-service";
 import type {
+  ActiveWorkerProgressRecord,
   AppSettings,
-  ChatProgressInspection,
-  ConversationEntryRecord,
-  ProjectSnapshot,
-  ThreadRecord
+  ResearchRunRecord,
+  WorkspaceSnapshot
 } from "../shared/types";
-import {
-  resolveConversationAttachmentLabels,
-  resolveThreadSelection,
-  resolveWorkspacePath,
-  splitShellLikeArguments,
-  summarizeRun
-} from "./command-parser";
+import { resolveWorkspacePath, splitShellLikeArguments } from "./command-parser";
 
 type CliService = Pick<
-  AppService,
+  ResearchService,
   | "setSelectedWorkspacePath"
-  | "initProject"
-  | "getSnapshot"
-  | "createThread"
-  | "selectThread"
-  | "sendChatMessage"
-  | "inspectChatProgress"
+  | "initWorkspace"
+  | "getWorkspaceSnapshot"
+  | "createObjective"
+  | "selectObjective"
+  | "listObjectives"
+  | "startRun"
+  | "pauseRun"
+  | "resumeRun"
+  | "stopRun"
   | "importAttachments"
-  | "beginStrategistSignIn"
+  | "prepareOracleSignIn"
+  | "getQueueView"
+  | "getEvidenceView"
 >;
 
 type CliSettingsStore = Pick<AppSettingsStore, "read" | "update">;
@@ -36,23 +34,18 @@ export type CliControllerOptions = {
   settingsStore: CliSettingsStore;
   writeLine: (line?: string) => void;
   cwd?: () => string;
-  historyLimit?: number;
-  maxTrackedConversationEntries?: number;
 };
 
 export type HandleLineResult = "continue" | "exit";
 
 export type CliStatusSnapshot = {
   workspacePath: string;
-  activeThread: ThreadRecord | null;
-  threadCount: number;
-  attachmentCount: number;
-  latestDecisionSummary: string;
-  latestRunStatus: string;
-  latestRunSummary: string;
-  automationStatus: string;
-  automationSummary: string;
-  progress: ChatProgressInspection | null;
+  objectiveTitle: string;
+  runStatus: string;
+  projectionStatus: string;
+  projectionSummary: string;
+  queueDepth: number;
+  activeWorkers: ActiveWorkerProgressRecord[];
 };
 
 export class LithiumCliController {
@@ -60,12 +53,8 @@ export class LithiumCliController {
   private readonly settingsStore: CliSettingsStore;
   private readonly writeLine: (line?: string) => void;
   private readonly cwd: () => string;
-  private readonly historyLimit: number;
-  private readonly maxTrackedConversationEntries: number;
   private currentWorkspacePath = "";
-  private currentSnapshot: ProjectSnapshot | null = null;
-  private readonly printedConversationEntries = new Set<string>();
-  private readonly printedConversationEntryOrder: string[] = [];
+  private currentSnapshot: WorkspaceSnapshot | null = null;
   private lastProgressSignature = "";
 
   constructor(options: CliControllerOptions) {
@@ -73,21 +62,19 @@ export class LithiumCliController {
     this.settingsStore = options.settingsStore;
     this.writeLine = options.writeLine;
     this.cwd = options.cwd ?? (() => process.cwd());
-    this.historyLimit = options.historyLimit ?? 8;
-    this.maxTrackedConversationEntries = options.maxTrackedConversationEntries ?? Math.max(128, this.historyLimit * 16);
   }
 
   async initialize(workspacePath: string) {
     const resolvedWorkspacePath = resolveWorkspacePath(workspacePath, this.cwd);
     this.writeLine("Lithium CLI");
-    this.writeLine("Type :help for commands.");
-    await this.activateWorkspace(resolvedWorkspacePath, "startup");
+    this.writeLine("Objective-first autopilot controller. Type :help for commands.");
+    await this.activateWorkspace(resolvedWorkspacePath);
   }
 
   buildPrompt() {
     const workspaceLabel = this.currentSnapshot?.project?.name?.trim() || path.basename(this.currentWorkspacePath) || "lithium";
-    const threadLabel = this.currentSnapshot?.activeThread?.title?.trim() || "main";
-    return `${workspaceLabel}:${threadLabel}> `;
+    const objectiveLabel = this.currentSnapshot?.activeObjective?.title?.trim() || "no-objective";
+    return `${workspaceLabel}:${objectiveLabel}> `;
   }
 
   async handleLine(rawLine: string): Promise<HandleLineResult> {
@@ -97,12 +84,12 @@ export class LithiumCliController {
       return "continue";
     }
 
-    if (line.startsWith(":")) {
-      return await this.handleCommand(line);
+    if (!line.startsWith(":")) {
+      this.writeLine("Free-form chat is disabled in autopilot mode. Use :objective, :run, :queue, :evidence, or :status.");
+      return "continue";
     }
 
-    await this.runChatTurn(line);
-    return "continue";
+    return await this.handleCommand(line);
   }
 
   async pollOnce() {
@@ -110,42 +97,23 @@ export class LithiumCliController {
       return;
     }
 
-    const [progress, snapshot] = await Promise.all([
-      this.service.inspectChatProgress({
-        workspacePath: this.currentWorkspacePath
-      }),
-      this.service.getSnapshot(this.currentWorkspacePath)
-    ]);
-
-    this.emitProgress(progress);
+    const snapshot = await this.service.getWorkspaceSnapshot(this.currentWorkspacePath);
     this.refreshSnapshot(snapshot);
+    this.emitProgress(snapshot.activeWorkerProgress);
   }
 
   async readStatus(): Promise<CliStatusSnapshot> {
-    if (!this.currentWorkspacePath) {
-      throw new Error("No workspace is selected.");
-    }
-
-    const [progress, snapshot] = await Promise.all([
-      this.service.inspectChatProgress({
-        workspacePath: this.currentWorkspacePath
-      }),
-      this.service.getSnapshot(this.currentWorkspacePath)
-    ]);
-
+    const snapshot = await this.service.getWorkspaceSnapshot(this.requireWorkspacePath());
     this.currentSnapshot = snapshot;
 
     return {
       workspacePath: this.currentWorkspacePath,
-      activeThread: snapshot.activeThread,
-      threadCount: snapshot.threads.length,
-      attachmentCount: snapshot.activeThreadAttachments.length,
-      latestDecisionSummary: snapshot.latestDecision?.summary?.trim() || "none",
-      latestRunStatus: snapshot.latestRun?.status || "none",
-      latestRunSummary: summarizeRun(snapshot.latestRun?.finalMessage || ""),
-      automationStatus: snapshot.latestAutomationSession?.status || "none",
-      automationSummary: snapshot.latestAutomationSession?.currentStepSummary || "none",
-      progress
+      objectiveTitle: snapshot.activeObjective?.title || "none",
+      runStatus: snapshot.activeRun?.status || "none",
+      projectionStatus: snapshot.latestProjection?.status || "none",
+      projectionSummary: snapshot.latestProjection?.summary || "none",
+      queueDepth: snapshot.queue.length,
+      activeWorkers: snapshot.activeWorkerProgress
     };
   }
 
@@ -161,11 +129,11 @@ export class LithiumCliController {
       case "workspace":
         await this.handleWorkspaceCommand(tokens.slice(1));
         return "continue";
-      case "threads":
-        this.printThreads();
+      case "objective":
+        await this.handleObjectiveCommand(tokens.slice(1));
         return "continue";
-      case "thread":
-        await this.handleThreadCommand(tokens.slice(1));
+      case "run":
+        await this.handleRunCommand(tokens.slice(1));
         return "continue";
       case "attach":
         await this.handleAttachCommand(tokens.slice(1));
@@ -175,6 +143,12 @@ export class LithiumCliController {
         return "continue";
       case "status":
         await this.handleStatusCommand();
+        return "continue";
+      case "queue":
+        await this.handleQueueCommand();
+        return "continue";
+      case "evidence":
+        await this.handleEvidenceCommand();
         return "continue";
       case "exit":
       case "quit":
@@ -194,54 +168,91 @@ export class LithiumCliController {
     }
 
     const nextWorkspacePath = resolveWorkspacePath(args.join(" "), this.cwd);
-    await this.activateWorkspace(nextWorkspacePath, "switch");
+    await this.activateWorkspace(nextWorkspacePath);
   }
 
-  private async handleThreadCommand(args: string[]) {
+  private async handleObjectiveCommand(args: string[]) {
     const subcommand = args[0]?.toLowerCase();
 
     if (!subcommand) {
-      throw new Error("Usage: :thread new [title] | :thread use <id|index>");
+      throw new Error("Usage: :objective list | :objective new <goal> | :objective use <id>");
+    }
+
+    if (subcommand === "list") {
+      const objectives = await this.service.listObjectives(this.requireWorkspacePath());
+      if (objectives.length === 0) {
+        this.writeLine("[objective] none");
+        return;
+      }
+
+      objectives.forEach((entry, index) => {
+        this.writeLine(`${index + 1}. ${entry.id} [${entry.status}] ${entry.title}`);
+      });
+      return;
     }
 
     if (subcommand === "new") {
-      const title = args.slice(1).join(" ").trim() || undefined;
-      const snapshot = await this.service.createThread({
+      const goal = args.slice(1).join(" ").trim();
+      if (!goal) {
+        throw new Error("Usage: :objective new <goal>");
+      }
+
+      const snapshot = await this.service.createObjective({
         workspacePath: this.requireWorkspacePath(),
-        title
+        objective: goal
       });
-      this.refreshSnapshot(snapshot, {
-        clearPrintedHistory: true,
-        emitEntries: false
-      });
-      this.writeLine(`[thread] Switched to ${snapshot.activeThread?.title || "new thread"}`);
-      this.printRecentConversation(snapshot);
+      this.refreshSnapshot(snapshot);
+      this.writeLine(`[objective] Created ${snapshot.activeObjective?.id}: ${snapshot.activeObjective?.title}`);
       return;
     }
 
     if (subcommand === "use") {
-      const target = args.slice(1).join(" ").trim();
-
-      if (!target) {
-        throw new Error("Usage: :thread use <id|index>");
+      const objectiveId = args.slice(1).join(" ").trim();
+      if (!objectiveId) {
+        throw new Error("Usage: :objective use <id>");
       }
 
-      const snapshot = this.requireSnapshot();
-      const threadId = resolveThreadSelection(target, snapshot.threads);
-      const nextSnapshot = await this.service.selectThread({
+      const snapshot = await this.service.selectObjective({
         workspacePath: this.requireWorkspacePath(),
-        threadId
+        objectiveId
       });
-      this.refreshSnapshot(nextSnapshot, {
-        clearPrintedHistory: true,
-        emitEntries: false
-      });
-      this.writeLine(`[thread] Switched to ${nextSnapshot.activeThread?.title || threadId}`);
-      this.printRecentConversation(nextSnapshot);
+      this.refreshSnapshot(snapshot);
+      this.writeLine(`[objective] Using ${snapshot.activeObjective?.id}: ${snapshot.activeObjective?.title}`);
       return;
     }
 
-    throw new Error("Usage: :thread new [title] | :thread use <id|index>");
+    throw new Error("Usage: :objective list | :objective new <goal> | :objective use <id>");
+  }
+
+  private async handleRunCommand(args: string[]) {
+    const subcommand = args[0]?.toLowerCase();
+
+    if (!subcommand) {
+      throw new Error("Usage: :run start | :run pause | :run resume | :run stop");
+    }
+
+    const workspacePath = this.requireWorkspacePath();
+    let snapshot: WorkspaceSnapshot;
+
+    switch (subcommand) {
+      case "start":
+        snapshot = await this.service.startRun({ workspacePath });
+        break;
+      case "pause":
+        snapshot = await this.service.pauseRun({ workspacePath });
+        break;
+      case "resume":
+        snapshot = await this.service.resumeRun({ workspacePath });
+        break;
+      case "stop":
+        snapshot = await this.service.stopRun({ workspacePath });
+        break;
+      default:
+        throw new Error("Usage: :run start | :run pause | :run resume | :run stop");
+    }
+
+    this.refreshSnapshot(snapshot);
+    this.writeLine(`[run] ${snapshot.activeRun?.status || "none"}`);
   }
 
   private async handleAttachCommand(args: string[]) {
@@ -249,218 +260,107 @@ export class LithiumCliController {
       throw new Error("Usage: :attach <path...>");
     }
 
-    const snapshot = this.requireSnapshot();
-    if (!snapshot.activeThreadId) {
-      throw new Error("No active thread is available.");
-    }
-
     const filePaths = args.map((value) => resolveWorkspacePath(value, this.cwd));
-    const nextSnapshot = await this.service.importAttachments({
+    const snapshot = await this.service.importAttachments({
       workspacePath: this.requireWorkspacePath(),
-      threadId: snapshot.activeThreadId,
+      objectiveId: this.requireSnapshot().activeObjectiveId ?? undefined,
       filePaths
     });
-    this.refreshSnapshot(nextSnapshot);
-    this.writeLine(`[attach] Imported ${filePaths.length} file${filePaths.length === 1 ? "" : "s"}.`);
+    this.refreshSnapshot(snapshot);
+    this.writeLine(`[attach] Imported ${filePaths.length} file(s).`);
   }
 
   private async handleSignInCommand() {
-    this.writeLine("[signin] Opening Chrome for strategist sign-in...");
-    await this.service.beginStrategistSignIn();
+    await this.service.prepareOracleSignIn();
     await this.settingsStore.update({
       strategistSessionReady: true
-    });
-    this.writeLine("[signin] Strategist session is ready.");
+    } satisfies Partial<AppSettings>);
+    this.writeLine("[signin] Oracle/ChatGPT session is ready.");
   }
 
   private async handleStatusCommand() {
     const status = await this.readStatus();
-    const lines = [
-      `Workspace: ${status.workspacePath}`,
-      `Active Thread: ${status.activeThread?.title || "none"}${status.activeThread ? ` (${status.activeThread.id})` : ""}`,
-      `Threads: ${status.threadCount}`,
-      `Active Attachments: ${status.attachmentCount}`,
-      `Latest Decision: ${status.latestDecisionSummary}`,
-      `Latest Run: ${status.latestRunStatus} — ${status.latestRunSummary}`,
-      `Automation: ${status.automationStatus} — ${status.automationSummary}`,
-      status.progress?.active
-        ? `Progress: ${status.progress.lane} — ${status.progress.progressSummary || "working"}`
-        : "Progress: idle"
-    ];
-
-    for (const line of lines) {
-      this.writeLine(line);
+    this.writeLine(`[workspace] ${status.workspacePath}`);
+    this.writeLine(`[objective] ${status.objectiveTitle}`);
+    this.writeLine(`[run] ${status.runStatus}`);
+    this.writeLine(`[projection] ${status.projectionStatus}: ${status.projectionSummary}`);
+    this.writeLine(`[queue] ${status.queueDepth}`);
+    if (status.activeWorkers.length > 0) {
+      this.writeLine(`[workers] ${status.activeWorkers.map((entry) => `${entry.executor}:${entry.title}`).join(" | ")}`);
     }
   }
 
-  private async runChatTurn(prompt: string) {
-    const workspacePath = this.requireWorkspacePath();
-    const snapshot = this.requireSnapshot();
-    const settings = await this.settingsStore.read();
-    const nextSnapshot = await this.service.sendChatMessage(
-      {
-        workspacePath,
-        threadId: snapshot.activeThreadId || undefined,
-        prompt
-      },
-      {
-        strategistSessionReady: settings.strategistSessionReady
-      }
-    );
+  private async handleQueueCommand() {
+    const queue = await this.service.getQueueView(this.requireWorkspacePath());
 
-    if (!settings.strategistSessionReady && nextSnapshot.latestDecision) {
-      await this.settingsStore.update({
-        strategistSessionReady: true
-      });
+    if (queue.length === 0) {
+      this.writeLine("[queue] empty");
+      return;
     }
 
-    this.refreshSnapshot(nextSnapshot);
+    queue.forEach((entry, index) => {
+      this.writeLine(`${index + 1}. [${entry.status}] ${entry.executor ?? entry.kind} :: ${entry.title}`);
+    });
   }
 
-  private async activateWorkspace(workspacePath: string, reason: "startup" | "switch") {
-    const snapshot = await this.service.initProject(workspacePath);
-    const persistedWorkspacePath = snapshot.project?.workspacePath || workspacePath;
-    this.service.setSelectedWorkspacePath(persistedWorkspacePath);
+  private async handleEvidenceCommand() {
+    const evidence = await this.service.getEvidenceView(this.requireWorkspacePath());
+    this.writeLine(`[evaluation] ${evidence.evaluation?.summary || "none"}`);
+
+    if (evidence.findings.length === 0) {
+      this.writeLine("[findings] none");
+      return;
+    }
+
+    evidence.findings.slice(0, 5).forEach((entry, index) => {
+      this.writeLine(`${index + 1}. ${entry.summary}`);
+    });
+  }
+
+  private async activateWorkspace(workspacePath: string) {
+    this.currentWorkspacePath = workspacePath;
+    this.service.setSelectedWorkspacePath(workspacePath);
+    const snapshot = await this.service.initWorkspace(workspacePath);
+    this.refreshSnapshot(snapshot);
     await this.settingsStore.update({
-      lastWorkspacePath: persistedWorkspacePath
-    });
-    this.refreshSnapshot(snapshot, {
-      clearPrintedHistory: true,
-      emitEntries: false
-    });
+      lastWorkspacePath: workspacePath
+    } satisfies Partial<AppSettings>);
     this.writeLine(`[workspace] ${workspacePath}`);
-    this.writeLine(`[thread] ${snapshot.activeThread?.title || "Main thread"}`);
-    if (reason === "switch") {
-      this.writeLine("Switched workspace.");
-    }
-    this.printRecentConversation(snapshot);
   }
 
-  private printHelp() {
-    const lines = [
-      "Commands:",
-      ":help",
-      ":workspace <path>",
-      ":threads",
-      ":thread new [title]",
-      ":thread use <id|index>",
-      ":attach <path...>",
-      ":signin",
-      ":status",
-      ":exit",
-      "Chat directly with natural language, or use /research, /build, /mixed, /plan."
-    ];
+  private emitProgress(progressEntries: ActiveWorkerProgressRecord[]) {
+    const signature = progressEntries
+      .map((entry) => `${entry.runId}:${entry.workItemId}:${entry.status}:${entry.summary}`)
+      .join("|");
 
-    for (const line of lines) {
-      this.writeLine(line);
-    }
-  }
-
-  private printThreads() {
-    const snapshot = this.requireSnapshot();
-
-    if (!snapshot.threads.length) {
-      this.writeLine("No threads yet.");
-      return;
-    }
-
-    snapshot.threads.forEach((thread, index) => {
-      const activeMark = thread.id === snapshot.activeThreadId ? "*" : " ";
-      const summary = thread.summary?.trim() ? ` — ${thread.summary.trim()}` : "";
-      this.writeLine(`${activeMark} ${index + 1}. ${thread.title} (${thread.id})${summary}`);
-    });
-  }
-
-  private printRecentConversation(snapshot: ProjectSnapshot) {
-    const recentEntries = (snapshot.conversationEntries ?? []).slice(-this.historyLimit);
-
-    if (!recentEntries.length) {
-      return;
-    }
-
-    this.writeLine("Recent conversation:");
-    for (const entry of recentEntries) {
-      this.printConversationEntry(entry, snapshot);
-      this.markConversationEntryPrinted(entry.id);
-    }
-  }
-
-  private refreshSnapshot(
-    snapshot: ProjectSnapshot,
-    options: {
-      clearPrintedHistory?: boolean;
-      emitEntries?: boolean;
-    } = {}
-  ) {
-    this.currentSnapshot = snapshot;
-
-    if (snapshot.project?.workspacePath) {
-      this.currentWorkspacePath = snapshot.project.workspacePath;
-    }
-
-    if (options.clearPrintedHistory) {
-      this.clearPrintedConversationEntries();
-      this.lastProgressSignature = "";
-    }
-
-    if (options.emitEntries === false) {
-      return;
-    }
-
-    for (const entry of snapshot.conversationEntries ?? []) {
-      if (this.wasConversationEntryPrinted(entry.id)) {
-        continue;
-      }
-
-      this.printConversationEntry(entry, snapshot);
-      this.markConversationEntryPrinted(entry.id);
-    }
-  }
-
-  private printConversationEntry(entry: ConversationEntryRecord, snapshot: ProjectSnapshot) {
-    const label =
-      entry.role === "assistant" ? "Assistant" : entry.role === "system" ? "System" : "User";
-    const lines = entry.body.trim() ? entry.body.trimEnd().split("\n") : [""];
-    const attachments = resolveConversationAttachmentLabels(entry, snapshot);
-
-    lines.forEach((line, index) => {
-      this.writeLine(index === 0 ? `${label}: ${line}` : `  ${line}`);
-    });
-
-    if (attachments.length) {
-      this.writeLine(`  Attachments: ${attachments.join(", ")}`);
-    }
-  }
-
-  private emitProgress(progress: ChatProgressInspection | null) {
-    if (!progress?.active) {
-      this.lastProgressSignature = "";
-      return;
-    }
-
-    const signature = JSON.stringify({
-      lane: progress.lane,
-      progressSummary: progress.progressSummary.trim(),
-      progressDetails: progress.progressDetails.map((detail) => detail.trim()),
-      activeCommand: progress.activeCommand?.trim() || ""
-    });
-
-    if (signature === this.lastProgressSignature) {
+    if (!signature || signature === this.lastProgressSignature) {
       return;
     }
 
     this.lastProgressSignature = signature;
-    this.writeLine(
-      `[progress:${progress.lane}] ${progress.progressSummary.trim() || progress.activeCommand?.trim() || "Working..."}`
-    );
+    this.writeLine(`[progress] ${progressEntries.map((entry) => `${entry.executor}:${entry.title}`).join(" | ")}`);
+  }
 
-    for (const detail of progress.progressDetails) {
-      const normalized = detail.trim();
-      if (!normalized || normalized === progress.progressSummary.trim()) {
-        continue;
-      }
-      this.writeLine(`  - ${normalized}`);
-    }
+  private refreshSnapshot(snapshot: WorkspaceSnapshot) {
+    this.currentSnapshot = snapshot;
+  }
+
+  private printHelp() {
+    this.writeLine("Commands:");
+    this.writeLine(":workspace [path]");
+    this.writeLine(":objective list");
+    this.writeLine(":objective new <goal>");
+    this.writeLine(":objective use <id>");
+    this.writeLine(":run start");
+    this.writeLine(":run pause");
+    this.writeLine(":run resume");
+    this.writeLine(":run stop");
+    this.writeLine(":status");
+    this.writeLine(":queue");
+    this.writeLine(":evidence");
+    this.writeLine(":attach <path...>");
+    this.writeLine(":signin");
+    this.writeLine(":exit");
   }
 
   private requireWorkspacePath() {
@@ -473,43 +373,9 @@ export class LithiumCliController {
 
   private requireSnapshot() {
     if (!this.currentSnapshot) {
-      throw new Error("Workspace is not initialized yet.");
+      throw new Error("No workspace snapshot is available.");
     }
 
     return this.currentSnapshot;
-  }
-
-  private markConversationEntryPrinted(entryId: string) {
-    const key = this.conversationEntryKey(entryId);
-
-    if (this.printedConversationEntries.has(key)) {
-      return;
-    }
-
-    this.printedConversationEntries.add(key);
-    this.printedConversationEntryOrder.push(key);
-
-    while (this.printedConversationEntryOrder.length > this.maxTrackedConversationEntries) {
-      const oldestKey = this.printedConversationEntryOrder.shift();
-
-      if (!oldestKey) {
-        break;
-      }
-
-      this.printedConversationEntries.delete(oldestKey);
-    }
-  }
-
-  private wasConversationEntryPrinted(entryId: string) {
-    return this.printedConversationEntries.has(this.conversationEntryKey(entryId));
-  }
-
-  private clearPrintedConversationEntries() {
-    this.printedConversationEntries.clear();
-    this.printedConversationEntryOrder.length = 0;
-  }
-
-  private conversationEntryKey(entryId: string) {
-    return `${this.currentWorkspacePath}::${entryId}`;
   }
 }

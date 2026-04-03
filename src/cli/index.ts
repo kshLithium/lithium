@@ -3,9 +3,7 @@
 import os from "node:os";
 import path from "node:path";
 import { AppSettingsStore } from "../main/services/app-settings-store";
-import { AppService } from "../main/services/app-service";
-import { OrchestratorRunner } from "../main/services/orchestrator-runner";
-import { ResidentOrchestratorRunner } from "../main/services/resident-orchestrator-runner";
+import { ResearchService } from "../main/services/research-service";
 import {
   LithiumCliController,
   resolveInitialWorkspacePath,
@@ -26,8 +24,7 @@ async function main() {
     process.cwd()
   );
   const controller = new LithiumCliController({
-    service: new AppService(initialWorkspacePath, {
-      orchestratorRunner: new ResidentOrchestratorRunner(new OrchestratorRunner()),
+    service: new ResearchService(initialWorkspacePath, {
       getAppSettings: () => settingsStore.read()
     }),
     settingsStore,
