@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AutomationSessionRecord } from "../../shared/types";
+import { PROJECT_SCHEMA_VERSION, type AutomationSessionRecord } from "../../shared/types";
 import { ProjectStore } from "./project-store";
 
 const tempDirs: string[] = [];
@@ -16,13 +16,112 @@ describe("ProjectStore", () => {
     const workspace = await createWorkspace();
     const store = new ProjectStore();
 
-    await store.initProject(workspace);
+    const project = await store.initProject(workspace);
 
     const paths = store.buildPaths(workspace);
+    expect(project.schemaVersion).toBe(PROJECT_SCHEMA_VERSION);
     await expect(access(paths.projectMemoryFile)).resolves.toBeUndefined();
     await expect(access(paths.memoryBriefFile)).resolves.toBeUndefined();
     await expect(access(paths.memoryOpenQuestionsFile)).resolves.toBeUndefined();
     await expect(access(paths.memorySessionSummaryFile)).resolves.toBeUndefined();
+  });
+
+  it("upgrades legacy workspaces by resetting volatile runtime state only", async () => {
+    const workspace = await createWorkspace();
+    const store = new ProjectStore();
+    const paths = store.buildPaths(workspace);
+    const now = "2026-04-03T00:00:00.000Z";
+
+    await mkdir(paths.threadsDir, { recursive: true });
+    await mkdir(paths.conversationEntriesDir, { recursive: true });
+    await mkdir(paths.decisionsDir, { recursive: true });
+    await mkdir(paths.automationSessionsDir, { recursive: true });
+    await mkdir(paths.orchestratorDir, { recursive: true });
+    await writeFile(
+      paths.projectFile,
+      JSON.stringify(
+        {
+          id: "project-legacy",
+          name: "Legacy",
+          workspacePath: workspace,
+          oracleModel: "gpt-5.4-pro",
+          codexModel: "gpt-5.4",
+          defaultThreadId: "TH001",
+          activeThreadId: "TH001",
+          createdAt: now,
+          updatedAt: now
+        },
+        null,
+        2
+      )
+    );
+    await writeFile(
+      path.join(paths.threadsDir, "TH001.json"),
+      JSON.stringify(
+        {
+          id: "TH001",
+          title: "Main thread",
+          summary: "Preserve this thread.",
+          createdAt: now,
+          updatedAt: now
+        },
+        null,
+        2
+      )
+    );
+    await writeFile(
+      path.join(paths.conversationEntriesDir, "M001.json"),
+      JSON.stringify(
+        {
+          id: "M001",
+          threadId: "TH001",
+          role: "user",
+          source: "user",
+          body: "Keep the durable conversation history.",
+          createdAt: now
+        },
+        null,
+        2
+      )
+    );
+    await writeFile(
+      path.join(paths.decisionsDir, "D001.json"),
+      JSON.stringify(
+        {
+          id: "D001",
+          threadId: "TH001",
+          prompt: "Legacy strategist note",
+          displayPrompt: "Legacy strategist note",
+          summary: "Durable strategist record.",
+          rationale: "Preserve durable records.",
+          rawOutput: "Durable strategist record.",
+          model: "gpt-5.4-pro",
+          engine: "browser",
+          status: "completed",
+          command: { command: "npx", args: ["oracle"], cwd: workspace },
+          stdoutPath: path.join(paths.decisionsDir, "D001.stdout.log"),
+          stderrPath: path.join(paths.decisionsDir, "D001.stderr.log"),
+          outputPath: path.join(paths.decisionsDir, "D001.output.txt"),
+          createdAt: now
+        },
+        null,
+        2
+      )
+    );
+    await writeFile(path.join(paths.automationSessionsDir, "AU999.json"), "{\"stale\":true}\n", "utf8");
+    await writeFile(path.join(paths.orchestratorDir, "reply.md"), "stale orchestrator reply\n", "utf8");
+
+    const project = await store.initProject(workspace);
+    const snapshot = await store.getSnapshot(workspace);
+
+    expect(project.schemaVersion).toBe(PROJECT_SCHEMA_VERSION);
+    expect(snapshot.threads.some((thread) => thread.id === "TH001")).toBe(true);
+    expect((snapshot.conversationEntries ?? []).some((entry) => entry.id === "M001")).toBe(true);
+    expect(snapshot.decisions.some((decision) => decision.id === "D001")).toBe(true);
+    await expect(access(path.join(paths.automationSessionsDir, "AU999.json"))).rejects.toThrow();
+    await expect(access(path.join(paths.orchestratorDir, "reply.md"))).rejects.toThrow();
+    await expect(access(paths.automationSessionsDir)).resolves.toBeUndefined();
+    await expect(access(paths.orchestratorDir)).resolves.toBeUndefined();
   });
 
   it("includes project memory in the strategist context bundle", async () => {

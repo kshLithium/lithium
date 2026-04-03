@@ -39,7 +39,8 @@ describe("AppService runtime cleanup", () => {
     });
 
     expect(
-      ((service as unknown as { automationControllers: Map<string, unknown> }).automationControllers.size)
+      ((service as unknown as { runtime: { automationControllers: Map<string, unknown> } }).runtime
+        .automationControllers.size)
     ).toBe(0);
   });
 });

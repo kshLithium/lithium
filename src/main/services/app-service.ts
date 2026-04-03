@@ -81,14 +81,37 @@ import { OrchestratorRunner, type OrchestratorDelegationLane } from "./orchestra
 import { type OrchestratorDelegationDirective } from "./orchestrator-directives";
 import { ChatgptAuthRunner } from "./chatgpt-auth-runner";
 import {
-  containsUserVisibleSystemNoise,
   describeIncompleteStrategistOutput,
   extractVisibleBuilderMessage,
   extractVisibleStrategistMessage,
   parseBuilderOutput,
   parseOracleOutput,
-  stripUserVisibleSystemNoise
 } from "./protocol";
+import {
+  buildAutomationChatFollowupPrompt,
+  buildAutomationCheckpointConversationMessage,
+  buildAutomationEvidence,
+  buildAutomationResumeConversationMessage,
+  buildRunningAutomationChatFollowupPrompt,
+  containsHangul,
+  extractRunSummary,
+  humanizeAutomationUiIssue,
+  humanizeAutomationUiStepSummary,
+  inferAutomationBuilderStepKind,
+  isRetryableStrategistControllerFailure,
+  isStrategistBlockedFailure,
+  isStrategistBrowserBlockedFailure,
+  isStrategistBrowserClosedFailure,
+  isStrategistLoginRequiredFailure,
+  isStrategistSessionExpiredFailure,
+  localizeAutomationStartReply,
+  resolveAutomationPromptLanguage,
+  resolveAutomationUiLanguage,
+  sanitizeAutomationConversationSummary,
+  stripConversationControlFooters,
+  summarizeAutomationNextAction,
+  summarizeInterruptedAutomationSession
+} from "./automation-text";
 import {
   collectGitChangedFiles,
   inferFinalRunStatus,
@@ -118,6 +141,11 @@ import {
   readLiveOracleSessionProgress
 } from "./strategist-progress";
 import { isProcessAlive, readProcessCommand, terminateProcessTree } from "./process-tree";
+import {
+  RuntimeRegistry,
+  type ActiveChatProgress,
+  type AutomationControllerState
+} from "./runtime-registry";
 
 type AppServiceDependencies = {
   store?: ProjectStore;
@@ -128,29 +156,6 @@ type AppServiceDependencies = {
   chatgptAuthRunner?: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   codexRunner?: Pick<CodexRunner, "runTask"> & Partial<Pick<CodexRunner, "buildTaskCommand">>;
   getAppSettings?: () => Promise<AppSettings>;
-};
-
-type ActiveChatProgress = {
-  operationId: string;
-  lane: "orchestrator" | "router" | "strategist" | "builder";
-  threadId: string;
-  promptPreview?: string;
-  progressSummary: string;
-  progressDetails: string[];
-  activeCommand: string | null;
-  oracleSessionSlug?: string;
-  stdoutPath?: string;
-  stderrPath?: string;
-  updatedAt: string;
-};
-
-type AutomationControllerState = {
-  running: boolean;
-  pauseRequested: boolean;
-  stopRequested: boolean;
-  redirectInstruction: string;
-  activeBuilderRuns: Map<string, string>;
-  activeStrategistSessions: Map<string, string>;
 };
 
 type AutomationWorkerDelegation = Extract<
@@ -214,15 +219,10 @@ const STRATEGIST_ARCHIVE_DIGEST_MAX_PREVIEWS = 12;
 const STRATEGIST_ARCHIVE_DIGEST_MAX_PREVIEW_BYTES = 24_000;
 const STRATEGIST_DEFAULT_DIRECT_UPLOAD_MAX_FILES = 2;
 const STRATEGIST_EXPLICIT_DIRECT_UPLOAD_MAX_FILES = 3;
-const MAX_CONVERSATION_LANGUAGE_CACHE_ENTRIES = 256;
 
 export class AppService {
   private selectedWorkspacePath: string;
-  private readonly terminatingRunIds = new Set<string>();
-  private readonly activeChatProgressByWorkspace = new Map<string, ActiveChatProgress>();
-  private readonly conversationLanguageByThread = new Map<string, "ko" | "en">();
-  private readonly automationControllers = new Map<string, AutomationControllerState>();
-  private readonly orchestratorTurnLocks = new Map<string, Promise<void>>();
+  private readonly runtime = new RuntimeRegistry();
   private readonly store: ProjectStore;
   private readonly orchestratorRunner: Pick<OrchestratorRunner, "runTurn"> | null;
   private readonly routerRunner: Pick<RouterRunner, "route">;
@@ -1580,30 +1580,7 @@ export class AppService {
     scopeKey: string,
     task: () => Promise<T>
   ) {
-    const key = `${workspacePath}::${scopeKey}`;
-    const previous = this.orchestratorTurnLocks.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const chained = previous
-      .catch(() => undefined)
-      .then(() => current);
-
-    this.orchestratorTurnLocks.set(key, chained);
-
-    await previous.catch(() => undefined);
-
-    try {
-      return await task();
-    } finally {
-      release();
-      void chained.finally(() => {
-        if (this.orchestratorTurnLocks.get(key) === chained) {
-          this.orchestratorTurnLocks.delete(key);
-        }
-      });
-    }
+    return await this.runtime.runSerialized(workspacePath, scopeKey, task);
   }
 
   private async runOrchestratorWorkerTurn(
@@ -2589,7 +2566,7 @@ export class AppService {
 
     void liveHandle.done
       .then(async (result) => {
-        if (this.terminatingRunIds.has(runPaths.id)) {
+        if (this.runtime.isRunTerminating(runPaths.id)) {
           return;
         }
 
@@ -2609,7 +2586,7 @@ export class AppService {
         );
       })
       .catch(async (error: unknown) => {
-        if (this.terminatingRunIds.has(runPaths.id)) {
+        if (this.runtime.isRunTerminating(runPaths.id)) {
           return;
         }
 
@@ -2802,7 +2779,7 @@ export class AppService {
       return snapshot;
     }
 
-    this.terminatingRunIds.add(run.id);
+    this.runtime.markRunTerminating(run.id);
     const activeHandle = getLiveProcess(workspacePath, run.id);
     const terminatedDetachedProcess =
       !activeHandle && (await this.terminateRecordedBuilderProcess(run));
@@ -2863,7 +2840,7 @@ export class AppService {
         }
       );
     } finally {
-      this.terminatingRunIds.delete(run.id);
+      this.runtime.clearRunTerminating(run.id);
     }
 
     return await this.store.getSnapshot(workspacePath);
@@ -3063,7 +3040,7 @@ export class AppService {
       return;
     }
 
-    const controller = this.automationControllers.get(`${workspacePath}::${session.id}`);
+    const controller = this.runtime.peekAutomationController(workspacePath, session.id);
 
     if (controller?.running) {
       return;
@@ -3978,44 +3955,12 @@ export class AppService {
     return nextSession;
   }
 
-  private automationControllerKey(workspacePath: string, sessionId: string) {
-    return `${workspacePath}::${sessionId}`;
-  }
-
   private getAutomationController(workspacePath: string, sessionId: string) {
-    const key = this.automationControllerKey(workspacePath, sessionId);
-    const existing = this.automationControllers.get(key);
-
-    if (existing) {
-      return existing;
-    }
-
-    const created: AutomationControllerState = {
-      running: false,
-      pauseRequested: false,
-      stopRequested: false,
-      redirectInstruction: "",
-      activeBuilderRuns: new Map(),
-      activeStrategistSessions: new Map()
-    };
-    this.automationControllers.set(key, created);
-    return created;
+    return this.runtime.getAutomationController(workspacePath, sessionId);
   }
 
   private cleanupAutomationController(workspacePath: string, sessionId: string) {
-    const key = this.automationControllerKey(workspacePath, sessionId);
-    const controller = this.automationControllers.get(key);
-
-    if (!controller || controller.running) {
-      return;
-    }
-
-    controller.pauseRequested = false;
-    controller.stopRequested = false;
-    controller.redirectInstruction = "";
-    controller.activeBuilderRuns.clear();
-    controller.activeStrategistSessions.clear();
-    this.automationControllers.delete(key);
+    this.runtime.cleanupAutomationController(workspacePath, sessionId);
   }
 
   private registerActiveAutomationBuilderRun(
@@ -7056,7 +7001,7 @@ export class AppService {
       }
 
       if (inspection.suggestedStatus === "awaiting-finalization" && inspection.run) {
-        this.terminatingRunIds.add(runId);
+        this.runtime.markRunTerminating(runId);
 
         try {
           if (inspection.active) {
@@ -7080,12 +7025,12 @@ export class AppService {
             }
           );
         } finally {
-          this.terminatingRunIds.delete(runId);
+          this.runtime.clearRunTerminating(runId);
         }
       }
 
       if (inspection.suggestedStatus === "hung" && inspection.run) {
-        this.terminatingRunIds.add(runId);
+        this.runtime.markRunTerminating(runId);
 
         try {
           if (inspection.active) {
@@ -7107,7 +7052,7 @@ export class AppService {
             }
           );
         } finally {
-          this.terminatingRunIds.delete(runId);
+          this.runtime.clearRunTerminating(runId);
         }
       }
 
@@ -7347,41 +7292,11 @@ export class AppService {
     workspacePath: string,
     input: Omit<ActiveChatProgress, "updatedAt" | "operationId"> & { operationId?: string }
   ) {
-    const operationId = input.operationId?.trim() || input.lane;
-
-    this.activeChatProgressByWorkspace.set(this.chatProgressKey(workspacePath, input.threadId, operationId), {
-      ...input,
-      operationId,
-      updatedAt: new Date().toISOString()
-    });
+    this.runtime.setChatProgress(workspacePath, input);
   }
 
   private clearChatProgress(workspacePath: string, threadId?: string, operationId?: string) {
-    if (threadId?.trim()) {
-      if (operationId?.trim()) {
-        this.activeChatProgressByWorkspace.delete(
-          this.chatProgressKey(workspacePath, threadId, operationId)
-        );
-        return;
-      }
-
-      const threadPrefix = `${workspacePath}::${threadId}::`;
-
-      for (const key of this.activeChatProgressByWorkspace.keys()) {
-        if (key.startsWith(threadPrefix)) {
-          this.activeChatProgressByWorkspace.delete(key);
-        }
-      }
-      return;
-    }
-
-    const prefix = `${workspacePath}::`;
-
-    for (const key of this.activeChatProgressByWorkspace.keys()) {
-      if (key === workspacePath || key.startsWith(prefix)) {
-        this.activeChatProgressByWorkspace.delete(key);
-      }
-    }
+    this.runtime.clearChatProgress(workspacePath, threadId, operationId);
   }
 
   private clearChatProgressIfCurrentMatches(
@@ -7391,45 +7306,17 @@ export class AppService {
     stdoutPath?: string,
     stderrPath?: string
   ) {
-    const key = this.chatProgressKey(workspacePath, threadId, operationId);
-    const current = this.activeChatProgressByWorkspace.get(key);
-
-    if (!current) {
-      return;
-    }
-
-    if (
-      (stdoutPath && current.stdoutPath && current.stdoutPath !== stdoutPath) ||
-      (stderrPath && current.stderrPath && current.stderrPath !== stderrPath)
-    ) {
-      return;
-    }
-
-    this.activeChatProgressByWorkspace.delete(key);
+    this.runtime.clearChatProgressIfCurrentMatches(
+      workspacePath,
+      threadId,
+      operationId,
+      stdoutPath,
+      stderrPath
+    );
   }
 
   private listChatProgressEntries(workspacePath: string, threadId?: string) {
-    if (threadId?.trim()) {
-      const threadPrefix = `${workspacePath}::${threadId}::`;
-      return Array.from(this.activeChatProgressByWorkspace.entries())
-        .filter(([key]) => key.startsWith(threadPrefix))
-        .map(([, value]) => value)
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    }
-
-    const prefix = `${workspacePath}::`;
-    const candidates = Array.from(this.activeChatProgressByWorkspace.entries())
-      .filter(([key]) => key === workspacePath || key.startsWith(prefix))
-      .map(([, value]) => value)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-
-    const latestThreadId = candidates[0]?.threadId;
-
-    if (!latestThreadId) {
-      return [];
-    }
-
-    return candidates.filter((candidate) => candidate.threadId === latestThreadId);
+    return this.runtime.listChatProgressEntries(workspacePath, threadId);
   }
 
   private getLatestChatProgressEntry(
@@ -7437,28 +7324,15 @@ export class AppService {
     threadId?: string,
     lane?: ActiveChatProgress["lane"]
   ) {
-    const candidates = this.listChatProgressEntries(workspacePath, threadId);
-
-    if (!lane) {
-      return candidates[0] ?? null;
-    }
-
-    return candidates.find((candidate) => candidate.lane === lane) ?? null;
+    return this.runtime.getLatestChatProgressEntry(workspacePath, threadId, lane);
   }
 
   private rememberConversationLanguage(
     workspacePath: string,
     entry: Pick<ConversationEntryRecord, "threadId" | "role" | "body">
   ) {
-    if (entry.role !== "user") {
-      return;
-    }
-
-    setBoundedMapValue(
-      this.conversationLanguageByThread,
-      this.conversationLanguageKey(workspacePath, entry.threadId),
-      resolveConversationLanguageFromBodies([entry.body]),
-      MAX_CONVERSATION_LANGUAGE_CACHE_ENTRIES
+    this.runtime.rememberConversationLanguage(workspacePath, entry, (body) =>
+      resolveConversationLanguageFromBodies([body])
     );
   }
 
@@ -7472,8 +7346,7 @@ export class AppService {
       return "en";
     }
 
-    const cacheKey = this.conversationLanguageKey(workspacePath, normalizedThreadId);
-    const cached = this.conversationLanguageByThread.get(cacheKey);
+    const cached = this.runtime.getConversationLanguage(workspacePath, normalizedThreadId);
 
     if (cached) {
       return cached;
@@ -7481,17 +7354,19 @@ export class AppService {
 
     const entries = await this.store.listConversationEntries(workspacePath).catch(() => []);
     const language = resolveConversationLanguageFromEntries(entries, normalizedThreadId);
-    setBoundedMapValue(
-      this.conversationLanguageByThread,
-      cacheKey,
-      language,
-      MAX_CONVERSATION_LANGUAGE_CACHE_ENTRIES
+    this.runtime.rememberConversationLanguage(
+      workspacePath,
+      {
+        threadId: normalizedThreadId,
+        role: "user",
+        body: entries
+          .filter((entry) => entry.threadId === normalizedThreadId)
+          .map((entry) => entry.body)
+          .join("\n")
+      },
+      () => language
     );
     return language;
-  }
-
-  private conversationLanguageKey(workspacePath: string, threadId: string) {
-    return `${workspacePath}::${threadId}`;
   }
 
   private rememberObservedChatProgress(
@@ -7503,30 +7378,7 @@ export class AppService {
       return;
     }
 
-    const key = this.chatProgressKey(workspacePath, current.threadId, current.operationId);
-    const nextProgress: ActiveChatProgress = {
-      ...current,
-      progressSummary: inspection.progressSummary,
-      progressDetails: inspection.progressDetails,
-      activeCommand: inspection.activeCommand,
-      updatedAt: inspection.updatedAt
-    };
-
-    if (
-      current.progressSummary === nextProgress.progressSummary &&
-      current.activeCommand === nextProgress.activeCommand &&
-      current.updatedAt === nextProgress.updatedAt &&
-      current.progressDetails.length === nextProgress.progressDetails.length &&
-      current.progressDetails.every((detail, index) => detail === nextProgress.progressDetails[index])
-    ) {
-      return;
-    }
-
-    this.activeChatProgressByWorkspace.set(key, nextProgress);
-  }
-
-  private chatProgressKey(workspacePath: string, threadId: string, operationId: string) {
-    return `${workspacePath}::${threadId}::${operationId}`;
+    this.runtime.rememberObservedChatProgress(workspacePath, current, inspection);
   }
 }
 
@@ -7666,314 +7518,6 @@ function resolveAutomationConversationMode(
   return looksLikeExplicitAutomationCheckpointPreference(instruction) ? "checkpoint" : "continuous";
 }
 
-function sanitizeAutomationConversationSummary(summary: string) {
-  const trimmed = stripUserVisibleSystemNoise(summary).trim();
-
-  if (!trimmed) {
-    return "";
-  }
-
-  if (
-    isOperationalAutomationMessage(trimmed) ||
-    /builder run (?:stalled without producing|ended without writing) a final answer|automation is still running|waiting for your direction|latest strategist result:|latest builder result:/i.test(
-      trimmed
-    )
-  ) {
-    return "";
-  }
-
-  if (/^oracle did not return a structured rationale\.?$/i.test(trimmed)) {
-    return "";
-  }
-
-  return trimmed.replace(/\s+/g, " ").trim();
-}
-
-function humanizeAutomationUiIssue(summary: string, language: "ko" | "en") {
-  const sanitized = sanitizeAutomationConversationSummary(summary);
-
-  if (sanitized) {
-    return sanitized;
-  }
-
-  const trimmed = summary.trim();
-
-  if (!trimmed) {
-    return "";
-  }
-
-  if (isStrategistLoginRequiredFailure(trimmed) || isStrategistSessionExpiredFailure(trimmed)) {
-    return language === "ko"
-      ? "strategist 브라우저 단계가 ChatGPT 로그인 또는 세션 준비 문제로 막혔습니다."
-      : "The strategist browser step is blocked on ChatGPT login or session readiness.";
-  }
-
-  if (isStrategistBrowserClosedFailure(trimmed)) {
-    return language === "ko"
-      ? "strategist 브라우저 단계가 창 종료 또는 브라우저 연결 문제로 끝까지 이어지지 못했습니다."
-      : "The strategist browser step did not stay attached through completion.";
-  }
-
-  if (containsUserVisibleSystemNoise(trimmed)) {
-    return language === "ko"
-      ? "strategist/browser 전달 단계에서 일시적인 로컬 연결 문제가 있었습니다."
-      : "The strategist/browser handoff hit a temporary local connection issue.";
-  }
-
-  if (isStrategistBlockedFailure(trimmed)) {
-    return language === "ko"
-      ? "strategist 브라우저 단계에 보조 조치가 필요합니다."
-      : "The strategist browser step needs attention before automation can continue.";
-  }
-
-  return "";
-}
-
-function summarizeAutomationNextAction(nextActions: string[]) {
-  return nextActions
-    .map((action) => action.trim())
-    .find(Boolean) ?? "";
-}
-
-function buildAutomationCheckpointConversationMessage(input: {
-  session: AutomationSessionRecord;
-  checkpoint: AutomationCheckpointRecord;
-}) {
-  const { session, checkpoint } = input;
-  const language = resolveAutomationUiLanguage([
-    session.displayObjective ?? "",
-    session.objective,
-    checkpoint.summary,
-    checkpoint.title
-  ]);
-  const summary = sanitizeAutomationConversationSummary(checkpoint.summary);
-  const nextAction = summarizeAutomationNextAction(checkpoint.nextActions);
-  const blockedStrategistMessage = [
-    checkpoint.title,
-    checkpoint.summary,
-    ...checkpoint.risks,
-    ...checkpoint.nextActions
-  ]
-    .join("\n")
-    .trim();
-
-  if (/^automation blocked on the strategist run$/i.test(checkpoint.title)) {
-    if (language === "ko") {
-      return [
-        isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
-          ? "strategist 브라우저 단계가 ChatGPT 로그인 또는 세션 준비 단계에서 막혀 자동 연구를 잠깐 멈췄습니다."
-          : isRetryableStrategistControllerFailure(blockedStrategistMessage)
-          ? "strategist 브라우저 단계가 비어 있는 응답으로 끝나서 자동 연구를 잠깐 멈췄습니다."
-          : "strategist 브라우저 단계에서 응답을 끝까지 받지 못해 자동 연구를 잠깐 멈췄습니다.",
-        isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
-          ? "Chrome에서 ChatGPT 로그인 상태와 사용 가능한 모델 목록을 먼저 확인해 주세요."
-          : "",
-        isStrategistBrowserClosedFailure(blockedStrategistMessage)
-          ? "strategist Chrome 창은 답변이 끝날 때까지 닫지 말고 그대로 두면 됩니다."
-          : "",
-        !isStrategistLoginRequiredFailure(blockedStrategistMessage) &&
-        !isStrategistSessionExpiredFailure(blockedStrategistMessage) &&
-        !isStrategistBrowserClosedFailure(blockedStrategistMessage) &&
-        nextAction
-          ? `다음으로는 ${nextAction}`
-          : "",
-        "원하면 같은 지점부터 다시 이어서 시도할 수 있습니다."
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    return [
-      isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
-        ? "Automation paused because the strategist browser needs a fresh ChatGPT login/session."
-        : isRetryableStrategistControllerFailure(blockedStrategistMessage)
-        ? "The strategist browser step finished with an empty reply, so automation paused here."
-        : "Automation paused because the strategist browser step did not finish cleanly.",
-      isStrategistLoginRequiredFailure(blockedStrategistMessage) || isStrategistSessionExpiredFailure(blockedStrategistMessage)
-        ? "Please confirm that Chrome is logged into ChatGPT and that the required model is available."
-        : "",
-      isStrategistBrowserClosedFailure(blockedStrategistMessage)
-        ? "Keep the strategist Chrome window open until the answer fully finishes."
-        : "",
-      !isStrategistLoginRequiredFailure(blockedStrategistMessage) &&
-      !isStrategistSessionExpiredFailure(blockedStrategistMessage) &&
-      !isStrategistBrowserClosedFailure(blockedStrategistMessage) &&
-      nextAction
-        ? `Likely next action: ${nextAction}`
-        : "",
-      "If you want, Lithium can retry from the same point."
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (language === "ko") {
-    if (/^automation paused after the latest step$/i.test(checkpoint.title)) {
-      return [
-        "요청대로 현재 단계까지만 마치고 여기서 멈췄습니다.",
-        summary ? `마지막 결과는 ${summary}` : "",
-        nextAction ? `다음으로는 ${nextAction}` : ""
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    if (/^checkpoint ready$/i.test(checkpoint.title)) {
-      return [
-        "한 단계가 끝났고 지금은 여기서 잠시 멈춰 있습니다.",
-        summary ? `마지막 결과는 ${summary}` : "",
-        nextAction ? `다음으로는 ${nextAction}` : "",
-        "이 지점은 사용자 판단이 필요한 분기라고 감지돼 자동으로 멈췄습니다."
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    if (/needs review after a failed run|automation failed/i.test(checkpoint.title)) {
-      return [
-        "직전 단계가 실패해서 여기서 멈췄습니다.",
-        summary ? `현재까지 정리된 요약은 ${summary}` : "",
-        nextAction ? `복구 후보는 ${nextAction}` : "",
-        "방향을 정하면 그 기준으로 바로 이어서 진행하겠습니다."
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    if (/time budget reached/i.test(checkpoint.title)) {
-      return [
-        "설정된 실행 시간 한도에 닿아서 여기서 잠시 멈췄습니다.",
-        summary ? `현재까지 요약은 ${summary}` : "",
-        nextAction ? `다음 후보는 ${nextAction}` : ""
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    if (/step budget reached/i.test(checkpoint.title)) {
-      return [
-        "설정된 단계 수 한도에 닿아서 여기서 잠시 멈췄습니다.",
-        summary ? `현재까지 요약은 ${summary}` : "",
-        nextAction ? `다음 후보는 ${nextAction}` : ""
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    if (/interrupted after app restart/i.test(checkpoint.title)) {
-      return [
-        "앱 재시작 때문에 자동 연구가 잠깐 끊겨 여기서 멈췄습니다.",
-        summary ? `보존된 마지막 상태는 ${summary}` : "",
-        nextAction ? `다음으로는 ${nextAction}` : ""
-      ]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    return [
-      "자동 연구가 여기서 잠시 멈춰 있습니다.",
-      summary ? `현재까지 요약은 ${summary}` : "",
-      nextAction ? `다음 후보는 ${nextAction}` : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (/^automation paused after the latest step$/i.test(checkpoint.title)) {
-    return [
-      "Paused here after finishing the current step, as requested.",
-      summary ? `Latest result: ${summary}` : "",
-      nextAction ? `Likely next action: ${nextAction}` : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (/^checkpoint ready$/i.test(checkpoint.title)) {
-    return [
-      "Finished one bounded step and paused here.",
-      summary ? `Latest result: ${summary}` : "",
-      nextAction ? `Likely next action: ${nextAction}` : "",
-      "Lithium stopped because this point looked like a real decision branch."
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (/needs review after a failed run|automation failed/i.test(checkpoint.title)) {
-    return [
-      "Paused here because the latest step failed.",
-      summary ? `Current summary: ${summary}` : "",
-      nextAction ? `Recovery candidate: ${nextAction}` : "",
-      "Once you steer the direction, Lithium can continue from there."
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (/time budget reached/i.test(checkpoint.title)) {
-    return [
-      "Paused here because the configured runtime budget was exhausted.",
-      summary ? `Current summary: ${summary}` : "",
-      nextAction ? `Likely next action: ${nextAction}` : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (/step budget reached/i.test(checkpoint.title)) {
-    return [
-      "Paused here because the configured step budget was exhausted.",
-      summary ? `Current summary: ${summary}` : "",
-      nextAction ? `Likely next action: ${nextAction}` : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  if (/interrupted after app restart/i.test(checkpoint.title)) {
-    return [
-      "Paused here because the app restarted mid-run.",
-      summary ? `Latest saved state: ${summary}` : "",
-      nextAction ? `Likely next action: ${nextAction}` : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
-
-  return [
-    "Automation is paused here.",
-    summary ? `Current summary: ${summary}` : "",
-    nextAction ? `Likely next action: ${nextAction}` : ""
-  ]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function buildAutomationResumeConversationMessage(input: {
-  session: AutomationSessionRecord;
-  checkpoint: AutomationCheckpointRecord;
-  response?: string;
-  mode: AutomationMode;
-}) {
-  const language = resolveAutomationUiLanguage([
-    input.response ?? "",
-    input.session.displayObjective ?? "",
-    input.session.objective,
-    input.checkpoint.summary
-  ]);
-
-  if (language === "ko") {
-    return input.mode === "continuous"
-      ? "방금 방향을 반영했고 자동 연구를 다시 이어갑니다. 이제 routine step에서는 멈추지 않고, 정말 판단이 필요한 분기에서만 다시 물어보겠습니다."
-      : "방금 방향을 반영했고 자동 연구를 다시 이어갑니다. 다음 체크포인트가 오면 다시 이 채팅에서 바로 알려드리겠습니다.";
-  }
-
-  return input.mode === "continuous"
-    ? "Applied your latest direction and resumed automation. Routine steps will keep going automatically, and Lithium will only stop again at a real decision branch."
-    : "Applied your latest direction and resumed automation. Lithium will report back here again at the next checkpoint.";
-}
-
 function hasMeaningfulChatProgressNarration(summary: string, details: string[]) {
   const normalizedSummary = summary.trim();
   const normalizedDetails = details
@@ -8062,120 +7606,6 @@ function summarizeAutomationInterrupt(input: {
   }
 
   return input.instruction.trim();
-}
-
-function extractRunSummary(finalMessage: string) {
-  const handoff = parseBuilderOutput(finalMessage);
-  const machineSummary = handoffMachineSummary(handoff);
-  if (machineSummary) {
-    return machineSummary;
-  }
-
-  const stripped = stripUserVisibleSystemNoise(stripConversationControlFooters(finalMessage))
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (stripped) {
-    return stripped.slice(0, 180);
-  }
-
-  return humanizeAutomationUiIssue(finalMessage, containsHangul(finalMessage) ? "ko" : "en")
-    .slice(0, 180);
-}
-
-function buildAutomationChatFollowupPrompt(
-  session: AutomationSessionRecord,
-  question: string,
-  checkpoint: AutomationCheckpointRecord
-) {
-  const language = resolveAutomationUiLanguage([
-    question,
-    session.displayObjective ?? "",
-    session.objective,
-    checkpoint.summary
-  ]);
-
-  if (language === "ko") {
-    return [
-      `사용자 질문: ${question.trim()}`,
-      `자동 연구 목표: ${(session.displayObjective ?? session.objective).trim()}`,
-      `현재 자동 연구 상태: 일시 정지. 최신 체크포인트는 "${checkpoint.title}"이며 요약은 "${checkpoint.summary.trim()}" 입니다.`,
-      "이 질문은 새 strategist 재계획으로 보내지 말고, 현재 workspace의 최신 실험 산출물, 로그, 메모, runtime context를 바탕으로 바로 답하세요.",
-      "이미 확인된 수치와 파일이 있으면 그 근거를 우선해서 설명하고, 아직 확정되지 않은 내용은 무엇이 비어 있는지만 짧게 밝히세요.",
-      "답변 끝에 별도의 시스템 문구나 '잠시 멈춘 상태입니다' 같은 운영 문장을 덧붙이지 마세요."
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
-  return [
-    `User question: ${question.trim()}`,
-    `Automation objective: ${(session.displayObjective ?? session.objective).trim()}`,
-    `Automation state: paused. Latest checkpoint: "${checkpoint.title}" — ${checkpoint.summary.trim()}.`,
-    "Answer directly from the current workspace artifacts, logs, notes, and runtime context instead of starting a new strategist replanning step.",
-    "Prefer concrete measured results and file-backed evidence. If something is still unverified, say exactly what is missing.",
-    "Do not append a separate operational status footer after the answer."
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function buildRunningAutomationChatFollowupPrompt(input: {
-  session: AutomationSessionRecord;
-  question: string;
-  snapshot: ProjectSnapshot;
-  builderInspection: BuilderRunInspection | null;
-  chatProgress: ChatProgressInspection | null;
-}) {
-  const latestDecisionSummary = input.snapshot.latestDecision?.summary?.trim() || "";
-  const latestRunSummary =
-    handoffMachineSummary(input.snapshot.latestRun?.handoff) ||
-    extractRunSummary(input.snapshot.latestRun?.finalMessage ?? "");
-  const latestResult = latestRunSummary || latestDecisionSummary;
-  const language = resolveAutomationUiLanguage([
-    input.question,
-    input.session.displayObjective ?? "",
-    input.session.objective,
-    latestRunSummary,
-    latestDecisionSummary
-  ]);
-  const liveStepSummary =
-    input.builderInspection?.progressSummary?.trim() ||
-    input.chatProgress?.progressSummary?.trim() ||
-    input.session.currentStepSummary.trim();
-  const liveFocus = humanizeAutomationUiStepSummary(liveStepSummary, language);
-
-  if (language === "ko") {
-    return [
-      `사용자 질문: ${input.question.trim()}`,
-      `자동 연구 목표: ${(input.session.displayObjective ?? input.session.objective).trim()}`,
-      "현재 자동 연구 상태: 진행 중.",
-      liveFocus ? `현재 포커스: ${liveFocus}` : "",
-      latestResult ? `최근 확정 결과: ${latestResult}` : "",
-      "이 질문은 진행 중인 자동 연구를 끊거나 새 실험을 시작하지 말고, 현재 workspace의 최신 실험 산출물, 로그, 메모, runtime context를 바탕으로 바로 답하세요.",
-      "새 명령 실행, 파일 수정, 코드 변경, 추가 실험은 하지 말고 이미 기록된 근거만 사용하세요.",
-      "답변은 질문에 직접 답하고, 사용자가 빠르게 이해할 수 있게 쉬운 말로 설명하세요.",
-      "아직 확정되지 않은 내용은 무엇이 비어 있는지만 짧게 밝히세요.",
-      "답변 끝에 별도의 운영 상태 문장이나 자동화 제어 문장을 덧붙이지 마세요."
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
-  return [
-    `User question: ${input.question.trim()}`,
-    `Automation objective: ${(input.session.displayObjective ?? input.session.objective).trim()}`,
-    "Automation state: still running.",
-    liveFocus ? `Current focus: ${liveFocus}` : "",
-    latestResult ? `Latest confirmed result: ${latestResult}` : "",
-    "Answer this question directly from the current workspace artifacts, logs, notes, and runtime context without interrupting the in-flight automation or starting a new experiment.",
-    "Do not run new commands, modify files, change code, or launch another worker. Use only evidence that is already recorded.",
-    "Answer the user directly in clear, simple language.",
-    "If something is still unverified, say exactly what is missing.",
-    "Do not append a separate operational status footer after the answer."
-  ]
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 export function buildAutomationContinuationAdvisorPrompt(input: {
@@ -9007,20 +8437,6 @@ function shouldPersistThreadSummary(summary: string) {
   return !isOperationalAutomationMessage(trimmed) && !/^builder run started\.?$/i.test(trimmed);
 }
 
-function resolveAutomationUiLanguage(samples: string[]) {
-  return samples.some(containsHangul) ? "ko" : "en";
-}
-
-function humanizeAutomationUiStepSummary(value: string, language: "ko" | "en") {
-  const trimmed = value.trim();
-
-  if (!trimmed) {
-    return "";
-  }
-
-  return trimmed;
-}
-
 function describeAutomationControllerFailure(message: string) {
   const trimmed = message.trim() || "Automation failed.";
 
@@ -9052,38 +8468,6 @@ function describeAutomationControllerFailure(message: string) {
     currentStepSummary: "Automation stopped with an issue. Waiting for your direction.",
     nextActions: ["Inspect the latest checkpoint, logs, and run artifacts before resuming."]
   };
-}
-
-function isStrategistBlockedFailure(message: string) {
-  return /oracle strategist run completed without producing output|chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired|no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/i.test(
-    message
-  );
-}
-
-function isRetryableStrategistControllerFailure(message: string) {
-  return /oracle strategist run completed without producing output|oracle strategist output looked truncated or non-final/i.test(
-    message
-  );
-}
-
-function isStrategistBrowserClosedFailure(message: string) {
-  return /chrome window closed before oracle finished/i.test(message);
-}
-
-function isStrategistSessionExpiredFailure(message: string) {
-  return /saved chatgpt session expired|chatgpt session expired/i.test(message);
-}
-
-function isStrategistLoginRequiredFailure(message: string) {
-  return /no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/i.test(
-    message
-  );
-}
-
-function isStrategistBrowserBlockedFailure(message: string) {
-  return /chrome window closed before oracle finished|lithium_oracle_visible=1|saved chatgpt session expired|chatgpt session expired|no (?:chatgpt )?cookies were applied|log in to chatgpt in chrome|provide inline cookies|unable to find model option matching/i.test(
-    message
-  );
 }
 
 type ActiveOracleProcess = {
@@ -9547,13 +8931,6 @@ function sanitizeConversationBody(value: string) {
   return dedupeNormalizedParagraphs(sanitized);
 }
 
-function stripConversationControlFooters(value: string) {
-  return value
-    .replace(/\n*LITHIUM_STATUS(?:\s*\n|\s+)?[\s\S]*$/i, "")
-    .replace(/\n*LITHIUM_HANDOFF(?:\s*\n|\s+)?[\s\S]*$/i, "")
-    .trim();
-}
-
 function summarizeWorkerSnapshotForConversation(
   lane: OrchestratorDelegationLane,
   snapshot: ProjectSnapshot
@@ -9774,14 +9151,6 @@ function summarizeLiveWorkerStartForConversation(
   return summarizeWorkerSnapshotForConversation("builder", snapshot);
 }
 
-function localizeAutomationStartReply(prompt: string) {
-  if (containsHangul(prompt)) {
-    return "이 목표로 자동 연구를 시작하겠습니다. 진행하면서 필요한 상태와 결과를 채팅으로 이어서 보고하겠습니다.";
-  }
-
-  return "I’ll start the automation from this goal and continue the status updates here in chat.";
-}
-
 function extractVisibleStrategistReply(rawOutput: string, maxChars = 2400) {
   const stripped = extractVisibleStrategistMessage(rawOutput)
     .replace(/\n\s*[*_`>~-]*입니다\.?[*_`>~-]*\s*(?=\n|$)/g, "")
@@ -9899,21 +9268,6 @@ function isRedundantBuilderContext(summary: string, answer: string) {
   return Boolean(normalizedSummary && normalizedAnswer && normalizedAnswer.includes(normalizedSummary));
 }
 
-function resolveAutomationPromptLanguage(
-  preference: AppSettings["autopilotPromptLanguage"],
-  samples: string[]
-): "ko" | "en" {
-  if (preference === "ko" || preference === "en") {
-    return preference;
-  }
-
-  return samples.some(containsHangul) ? "ko" : "en";
-}
-
-function containsHangul(value: string) {
-  return /[\u3131-\u318E\uAC00-\uD7A3]/.test(value);
-}
-
 function combineParallelChatProgressInspections(
   inspections: ChatProgressInspection[]
 ): ChatProgressInspection {
@@ -10028,41 +9382,6 @@ function truncateWorkerRawEvidence(value: string, maxChars: number) {
 
 function formatPromptList(label: string, values: string[]) {
   return `${label}:\n${values.map((value) => `- ${value}`).join("\n")}`;
-}
-
-function inferAutomationBuilderStepKind(builderPrompt: string): AutomationStepKind {
-  const normalized = builderPrompt.toLowerCase();
-
-  if (/\b(run|train|evaluate|benchmark|ablation|experiment|sweep)\b/.test(normalized)) {
-    return "experiment-run";
-  }
-
-  if (/\b(analy[sz]e|inspect|summari[sz]e|plot|csv|metric|result|figure|table)\b/.test(normalized)) {
-    return "result-analysis";
-  }
-
-  if (/\b(literature|literature search|related work|citation|survey|search)\b/.test(normalized)) {
-    return "literature-search";
-  }
-
-  return "code-edit";
-}
-
-function buildAutomationEvidence(run?: RunRecord | null) {
-  if (!run) {
-    return [];
-  }
-
-  return Array.from(
-    new Set(
-      [
-        run.id,
-        `status:${run.status}`,
-        handoffMachineSummary(run.handoff),
-        ...run.changedFiles.slice(0, 8)
-      ].filter(Boolean)
-    )
-  );
 }
 
 function resolveBuilderModel(candidate: BuilderRequest["model"], fallback?: string): BuilderModel {
@@ -10366,25 +9685,6 @@ function isIgnorableBuilderWarning(value: string) {
   return /codex_core::shell_snapshot: Failed to delete shell snapshot .*No such file or directory/i.test(
     value.trim()
   );
-}
-
-function summarizeInterruptedAutomationSession(
-  step: AutomationStepRecord | null,
-  run: RunRecord | null
-) {
-  if (run?.status === "completed") {
-    return "The latest builder run finished, but automation stopped when the app restarted before it could continue.";
-  }
-
-  if (step?.lane === "strategist") {
-    return "Automation stopped when the app restarted during the strategist step.";
-  }
-
-  if (step?.lane === "builder") {
-    return "Automation stopped when the app restarted during the builder step.";
-  }
-
-  return "Automation stopped when the app restarted before the latest step finished.";
 }
 
 function createSyntheticBuilderFinalMessage(summary: string, result: "success" | "partial" | "failed") {

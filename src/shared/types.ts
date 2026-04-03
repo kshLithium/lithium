@@ -25,6 +25,7 @@ export type AppSettings = {
 export type AppSettingsUpdate = Partial<AppSettings>;
 
 export const DEFAULT_PROJECT_RESEARCH_GOAL = "Define the next research outcome this project should produce.";
+export const PROJECT_SCHEMA_VERSION = 2;
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   autopilotPromptLanguage: "auto",
@@ -38,6 +39,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 
 export type ProjectRecord = {
   id: string;
+  schemaVersion: number;
   name: string;
   workspacePath: string;
   oracleModel: OracleModel;

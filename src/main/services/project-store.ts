@@ -1,4 +1,4 @@
-import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type {
@@ -22,7 +22,7 @@ import type {
   TaskRecord,
   WorkspaceFileRecord
 } from "../../shared/types";
-import { DEFAULT_PROJECT_RESEARCH_GOAL } from "../../shared/types";
+import { DEFAULT_PROJECT_RESEARCH_GOAL, PROJECT_SCHEMA_VERSION } from "../../shared/types";
 import {
   handoffMachineSummary,
   handoffUserMessage,
@@ -32,14 +32,15 @@ import {
 import { extractFinalSummary } from "./run-artifacts";
 import { parseOracleOutput } from "./protocol";
 import { pathExists } from "./fs-utils";
+import { RecordStore } from "./record-store";
+import {
+  buildProjectPaths,
+  createArtifactPaths,
+  projectRuntimeDirectories,
+  type ArtifactPaths,
+  type ProjectPaths
+} from "./workspace-layout";
 import { classifyWorkspaceFile, walkWorkspaceIndex } from "./workspace-index";
-
-const LITHIUM_DIR = ".lithium";
-const PROJECT_FILE = "project.json";
-const ACTIVITY_LOG = "activity.log";
-const PROMPT_LOG = "prompt-log.jsonl";
-const WORKER_HISTORY_LOG = "worker-history.jsonl";
-const RECORD_READ_BATCH_SIZE = 32;
 const DOCUMENT_ATTACHMENT_EXCERPT =
   "Document attachment. Reference the file path directly when asking the model to inspect it.";
 const DOCUMENT_EXTENSIONS = new Set([
@@ -56,47 +57,6 @@ const DOCUMENT_EXTENSIONS = new Set([
   ".odp"
 ]);
 
-type ProjectPaths = {
-  root: string;
-  threadsDir: string;
-  conversationEntriesDir: string;
-  attachmentRecordsDir: string;
-  decisionsDir: string;
-  tasksDir: string;
-  runsDir: string;
-  routesDir: string;
-  automationDir: string;
-  automationSessionsDir: string;
-  automationCyclesDir: string;
-  automationStepsDir: string;
-  automationCheckpointsDir: string;
-  contextDir: string;
-  memoryDir: string;
-  projectFile: string;
-  activityLog: string;
-  promptLog: string;
-  workerHistoryLog: string;
-  contextBundle: string;
-  projectMemoryFile: string;
-  memoryBriefFile: string;
-  memoryOpenQuestionsFile: string;
-  memorySessionSummaryFile: string;
-  memoryDurableContextFile: string;
-  memoryWorkingContextFile: string;
-  memoryEvidenceContextFile: string;
-  memoryPreferencesFile: string;
-  workspaceAttachmentsDir: string;
-};
-
-type ArtifactPaths = {
-  id: string;
-  jsonPath: string;
-  stdoutPath: string;
-  stderrPath: string;
-  outputPath: string;
-  transcriptPath: string;
-};
-
 type ContextPackOptions = {
   lane?: ContextPackLane;
   artifactId?: string;
@@ -112,69 +72,23 @@ type RuntimeContextOptions = {
 };
 
 export class ProjectStore {
-  private readonly allocationQueues = new Map<string, Promise<void>>();
+  private readonly records = new RecordStore();
 
   buildPaths(workspacePath: string): ProjectPaths {
-    const root = path.join(workspacePath, LITHIUM_DIR);
-
-    return {
-      root,
-      threadsDir: path.join(root, "threads"),
-      conversationEntriesDir: path.join(root, "conversation"),
-      attachmentRecordsDir: path.join(root, "attachments"),
-      decisionsDir: path.join(root, "decisions"),
-      tasksDir: path.join(root, "tasks"),
-      runsDir: path.join(root, "runs"),
-      routesDir: path.join(root, "routes"),
-      automationDir: path.join(root, "automation"),
-      automationSessionsDir: path.join(root, "automation", "sessions"),
-      automationCyclesDir: path.join(root, "automation", "cycles"),
-      automationStepsDir: path.join(root, "automation", "steps"),
-      automationCheckpointsDir: path.join(root, "automation", "checkpoints"),
-      contextDir: path.join(root, "context"),
-      memoryDir: path.join(root, "memory"),
-      projectFile: path.join(root, PROJECT_FILE),
-      activityLog: path.join(root, ACTIVITY_LOG),
-      promptLog: path.join(root, PROMPT_LOG),
-      workerHistoryLog: path.join(root, WORKER_HISTORY_LOG),
-      contextBundle: path.join(root, "context", "current-context.md"),
-      projectMemoryFile: path.join(root, "memory", "project-memory.json"),
-      memoryBriefFile: path.join(root, "memory", "brief.md"),
-      memoryOpenQuestionsFile: path.join(root, "memory", "open-questions.md"),
-      memorySessionSummaryFile: path.join(root, "memory", "session-summary.md"),
-      memoryDurableContextFile: path.join(root, "memory", "durable-context.md"),
-      memoryWorkingContextFile: path.join(root, "memory", "working-context.md"),
-      memoryEvidenceContextFile: path.join(root, "memory", "evidence-context.md"),
-      memoryPreferencesFile: path.join(root, "memory", "preferences.json"),
-      workspaceAttachmentsDir: path.join(workspacePath, "attachments")
-    };
+    return buildProjectPaths(workspacePath);
   }
 
   async initProject(workspacePath: string, projectPatch: Partial<ProjectRecord> = {}) {
     const paths = this.buildPaths(workspacePath);
-
-    await mkdir(paths.decisionsDir, { recursive: true });
-    await mkdir(paths.threadsDir, { recursive: true });
-    await mkdir(paths.conversationEntriesDir, { recursive: true });
-    await mkdir(paths.attachmentRecordsDir, { recursive: true });
-    await mkdir(paths.tasksDir, { recursive: true });
-    await mkdir(paths.runsDir, { recursive: true });
-    await mkdir(paths.routesDir, { recursive: true });
-    await mkdir(paths.automationDir, { recursive: true });
-    await mkdir(paths.automationSessionsDir, { recursive: true });
-    await mkdir(paths.automationCyclesDir, { recursive: true });
-    await mkdir(paths.automationStepsDir, { recursive: true });
-    await mkdir(paths.automationCheckpointsDir, { recursive: true });
-    await mkdir(paths.contextDir, { recursive: true });
-    await mkdir(paths.memoryDir, { recursive: true });
-    await mkdir(paths.workspaceAttachmentsDir, { recursive: true });
-
     const existing = await this.readProject(workspacePath);
+    const didUpgradeWorkspace = await this.upgradeWorkspaceLayout(paths, existing);
+    await this.ensureWorkspaceLayout(paths);
     const createdFresh = !existing;
     const now = new Date().toISOString();
 
     const project: ProjectRecord = existing ?? {
       id: `project-${randomUUID()}`,
+      schemaVersion: PROJECT_SCHEMA_VERSION,
       name: path.basename(workspacePath),
       workspacePath,
       oracleModel: "gpt-5.4-pro",
@@ -202,6 +116,7 @@ export class ProjectStore {
     const merged: ProjectRecord = {
       ...project,
       ...projectPatch,
+      schemaVersion: PROJECT_SCHEMA_VERSION,
       workspacePath,
       defaultThreadId: projectPatch.defaultThreadId ?? defaultThread.id,
       activeThreadId: projectPatch.activeThreadId ?? activeThread.id,
@@ -214,6 +129,11 @@ export class ProjectStore {
 
     if (createdFresh) {
       await this.appendActivity(workspacePath, `project initialized at ${workspacePath}`);
+    } else if (didUpgradeWorkspace) {
+      await this.appendActivity(
+        workspacePath,
+        `workspace runtime state reset during schema upgrade to v${PROJECT_SCHEMA_VERSION}`
+      );
     }
 
     return merged;
@@ -1408,6 +1328,37 @@ export class ProjectStore {
     return thread;
   }
 
+  private async ensureWorkspaceLayout(paths: ProjectPaths) {
+    await mkdir(paths.decisionsDir, { recursive: true });
+    await mkdir(paths.threadsDir, { recursive: true });
+    await mkdir(paths.conversationEntriesDir, { recursive: true });
+    await mkdir(paths.attachmentRecordsDir, { recursive: true });
+    await mkdir(paths.tasksDir, { recursive: true });
+    await mkdir(paths.runsDir, { recursive: true });
+    await mkdir(paths.routesDir, { recursive: true });
+    await mkdir(paths.contextDir, { recursive: true });
+    await mkdir(paths.memoryDir, { recursive: true });
+    await mkdir(paths.workspaceAttachmentsDir, { recursive: true });
+
+    for (const directory of projectRuntimeDirectories(paths)) {
+      await mkdir(directory, { recursive: true });
+    }
+  }
+
+  private async upgradeWorkspaceLayout(paths: ProjectPaths, project: ProjectRecord | null) {
+    const needsUpgrade = project?.schemaVersion !== PROJECT_SCHEMA_VERSION;
+
+    if (!needsUpgrade) {
+      return false;
+    }
+
+    for (const directory of projectRuntimeDirectories(paths)) {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    return true;
+  }
+
   private async ensureThreadIds(workspacePath: string, defaultThreadId: string) {
     const paths = this.buildPaths(workspacePath);
 
@@ -1442,112 +1393,23 @@ export class ProjectStore {
     directory: string
   ): Promise<ArtifactPaths> {
     const id = await this.nextId(directory, prefix);
-
-    return {
-      id,
-      jsonPath: path.join(directory, `${id}.json`),
-      stdoutPath: path.join(directory, `${id}.stdout.log`),
-      stderrPath: path.join(directory, `${id}.stderr.log`),
-      outputPath: path.join(directory, `${id}.output.txt`),
-      transcriptPath: path.join(directory, `${id}.transcript.log`)
-    };
+    return createArtifactPaths(directory, id);
   }
 
   private async nextId(directory: string, prefix: string) {
-    return await this.withAllocationLock(`${directory}::${prefix}`, async () => {
-      await mkdir(directory, { recursive: true });
-      const entries = await readdir(directory);
-      const counterPath = path.join(directory, `.${prefix}.next-id`);
-      const existingNext =
-        entries
-          .map((entry) => {
-            const match = entry.match(new RegExp(`^${prefix}(\\d+)(?:\\.|$)`));
-            return match ? Number(match[1]) : 0;
-          })
-          .reduce((max, value) => Math.max(max, value), 0) + 1;
-      const storedNext = Number.parseInt((await readFile(counterPath, "utf8").catch(() => "")).trim(), 10);
-      const next =
-        Number.isFinite(storedNext) && storedNext > 0
-          ? Math.max(existingNext, storedNext)
-          : existingNext;
-
-      await writeFile(counterPath, String(next + 1), "utf8");
-
-      return `${prefix}${String(next).padStart(3, "0")}`;
-    });
-  }
-
-  private async withAllocationLock<T>(key: string, work: () => Promise<T>) {
-    const previous = this.allocationQueues.get(key) ?? Promise.resolve();
-    let releaseCurrent!: () => void;
-    const current = new Promise<void>((resolve) => {
-      releaseCurrent = resolve;
-    });
-    this.allocationQueues.set(
-      key,
-      previous.catch(() => undefined).then(() => current)
-    );
-    await previous.catch(() => undefined);
-
-    try {
-      return await work();
-    } finally {
-      releaseCurrent();
-
-      if (this.allocationQueues.get(key) === current) {
-        this.allocationQueues.delete(key);
-      }
-    }
+    return await this.records.nextId(directory, prefix);
   }
 
   private async readRecordDirectory<T>(directory: string) {
-    if (!(await this.exists(directory))) {
-      return [] as T[];
-    }
-
-    const entries = (await readdir(directory).catch(() => [] as string[]))
-      .filter((entry) => entry.endsWith(".json"))
-      .sort(compareRecordFiles)
-      .reverse();
-    const records: T[] = [];
-
-    for (let index = 0; index < entries.length; index += RECORD_READ_BATCH_SIZE) {
-      const batch = entries.slice(index, index + RECORD_READ_BATCH_SIZE);
-      const batchRecords = await Promise.all(
-        batch.map(async (entry) => {
-          try {
-            const content = await readFile(path.join(directory, entry), "utf8");
-            return JSON.parse(content) as T;
-          } catch {
-            return null;
-          }
-        })
-      );
-
-      for (const record of batchRecords) {
-        if (record !== null) {
-          records.push(record);
-        }
-      }
-    }
-
-    return records;
+    return await this.records.readRecordDirectory<T>(directory);
   }
 
   private async readJson<T>(filePath: string) {
-    if (!(await this.exists(filePath))) {
-      return null;
-    }
-
-    const content = await readFile(filePath, "utf8");
-    return JSON.parse(content) as T;
+    return await this.records.readJson<T>(filePath);
   }
 
   private async writeJson(filePath: string, value: unknown) {
-    await mkdir(path.dirname(filePath), { recursive: true });
-    const tempPath = `${filePath}.${randomUUID()}.tmp`;
-    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await rename(tempPath, filePath);
+    await this.records.writeJson(filePath, value);
   }
 
   private async removeFileIfExists(filePath: string) {

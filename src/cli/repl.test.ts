@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_APP_SETTINGS,
+  PROJECT_SCHEMA_VERSION,
   type AppSettings,
   type AttachmentRecord,
   type ChatProgressInspection,
@@ -28,6 +29,7 @@ function buildThread(id: string, title: string): ThreadRecord {
 function buildProject(workspacePath: string, activeThreadId: string): ProjectRecord {
   return {
     id: "project-1",
+    schemaVersion: PROJECT_SCHEMA_VERSION,
     name: "demo",
     workspacePath,
     oracleModel: "gpt-5.4-pro",
