@@ -172,14 +172,34 @@ describe("LithiumCliController", () => {
         workspacePath: "/Users/test/start"
       })
     });
-    service.initProject.mockResolvedValueOnce(nextSnapshot);
 
     await controller.initialize("/Users/test/start");
+    service.initProject.mockResolvedValueOnce(nextSnapshot);
     await controller.handleLine(":workspace ../next");
 
     expect(service.setSelectedWorkspacePath).toHaveBeenLastCalledWith("/Users/test/next");
     expect(settingsStore.update).toHaveBeenCalledWith({
       lastWorkspacePath: "/Users/test/next"
+    });
+  });
+
+  it("does not persist a workspace switch when initialization fails", async () => {
+    const { controller, service, settingsStore } = createController({
+      initSnapshot: buildSnapshot({
+        workspacePath: "/Users/test/start"
+      })
+    });
+
+    await controller.initialize("/Users/test/start");
+    service.initProject.mockRejectedValueOnce(new Error("workspace init failed"));
+
+    await expect(controller.handleLine(":workspace ../broken")).rejects.toThrow("workspace init failed");
+
+    expect(service.setSelectedWorkspacePath).toHaveBeenCalledTimes(1);
+    expect(settingsStore.update).toHaveBeenCalledTimes(1);
+    expect(service.setSelectedWorkspacePath).not.toHaveBeenCalledWith("/Users/test/broken");
+    expect(settingsStore.update).not.toHaveBeenCalledWith({
+      lastWorkspacePath: "/Users/test/broken"
     });
   });
 

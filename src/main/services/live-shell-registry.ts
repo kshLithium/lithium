@@ -6,6 +6,7 @@ import type { RecordStatus } from "../../shared/types";
 import { buildLiveResourceKey } from "./live-resource-key";
 import { prepareInteractiveShellLaunch } from "./interactive-shell-launch";
 import { stripShellOutputMarkers } from "./shell-output-markers";
+import { endWriteStream } from "./fs-utils";
 
 type StartLiveShellOptions = {
   id: string;
@@ -156,7 +157,7 @@ export function stopAllLiveShells() {
 
 async function finalizeLiveShell(state: LiveShellState) {
   activeShells.delete(buildLiveResourceKey(state.workspacePath, state.id));
-  state.transcriptStream.end();
+  await endWriteStream(state.transcriptStream).catch(() => undefined);
   await state.cleanupShellLaunch().catch(() => undefined);
 }
 

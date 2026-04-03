@@ -214,6 +214,7 @@ const STRATEGIST_ARCHIVE_DIGEST_MAX_PREVIEWS = 12;
 const STRATEGIST_ARCHIVE_DIGEST_MAX_PREVIEW_BYTES = 24_000;
 const STRATEGIST_DEFAULT_DIRECT_UPLOAD_MAX_FILES = 2;
 const STRATEGIST_EXPLICIT_DIRECT_UPLOAD_MAX_FILES = 3;
+const MAX_CONVERSATION_LANGUAGE_CACHE_ENTRIES = 256;
 
 export class AppService {
   private selectedWorkspacePath: string;
@@ -512,6 +513,7 @@ export class AppService {
         updatedAt: stoppedAt,
         endedAt: stoppedAt
       });
+      this.cleanupAutomationController(workspacePath, session.id);
       await this.store.appendPromptLog(workspacePath, {
         kind: "automation.interrupt",
         threadId: session.threadId,
@@ -3976,8 +3978,12 @@ export class AppService {
     return nextSession;
   }
 
+  private automationControllerKey(workspacePath: string, sessionId: string) {
+    return `${workspacePath}::${sessionId}`;
+  }
+
   private getAutomationController(workspacePath: string, sessionId: string) {
-    const key = `${workspacePath}::${sessionId}`;
+    const key = this.automationControllerKey(workspacePath, sessionId);
     const existing = this.automationControllers.get(key);
 
     if (existing) {
@@ -3994,6 +4000,22 @@ export class AppService {
     };
     this.automationControllers.set(key, created);
     return created;
+  }
+
+  private cleanupAutomationController(workspacePath: string, sessionId: string) {
+    const key = this.automationControllerKey(workspacePath, sessionId);
+    const controller = this.automationControllers.get(key);
+
+    if (!controller || controller.running) {
+      return;
+    }
+
+    controller.pauseRequested = false;
+    controller.stopRequested = false;
+    controller.redirectInstruction = "";
+    controller.activeBuilderRuns.clear();
+    controller.activeStrategistSessions.clear();
+    this.automationControllers.delete(key);
   }
 
   private registerActiveAutomationBuilderRun(
@@ -6433,6 +6455,7 @@ export class AppService {
       endedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
+    this.cleanupAutomationController(workspacePath, input.session.id);
     await this.appendAutomationStatusEntry(workspacePath, {
       session: input.session,
       checkpoint,
@@ -6994,6 +7017,12 @@ export class AppService {
       controller.running = false;
       controller.activeBuilderRuns.clear();
       controller.activeStrategistSessions.clear();
+      const latestSession = await this.store.readAutomationSession(workspacePath, sessionId).catch(() => null);
+
+      if (!shouldRestartAfterFailure && latestSession?.status !== "running") {
+        this.cleanupAutomationController(workspacePath, sessionId);
+      }
+
       if (shouldRestartAfterFailure) {
         this.scheduleAutomationLoop(workspacePath, sessionId);
       }
@@ -7425,9 +7454,11 @@ export class AppService {
       return;
     }
 
-    this.conversationLanguageByThread.set(
+    setBoundedMapValue(
+      this.conversationLanguageByThread,
       this.conversationLanguageKey(workspacePath, entry.threadId),
-      resolveConversationLanguageFromBodies([entry.body])
+      resolveConversationLanguageFromBodies([entry.body]),
+      MAX_CONVERSATION_LANGUAGE_CACHE_ENTRIES
     );
   }
 
@@ -7450,7 +7481,12 @@ export class AppService {
 
     const entries = await this.store.listConversationEntries(workspacePath).catch(() => []);
     const language = resolveConversationLanguageFromEntries(entries, normalizedThreadId);
-    this.conversationLanguageByThread.set(cacheKey, language);
+    setBoundedMapValue(
+      this.conversationLanguageByThread,
+      cacheKey,
+      language,
+      MAX_CONVERSATION_LANGUAGE_CACHE_ENTRIES
+    );
     return language;
   }
 
@@ -10367,6 +10403,24 @@ function createSyntheticBuilderFinalMessage(summary: string, result: "success" |
       open_questions: []
     })
   ].join("\n");
+}
+
+function setBoundedMapValue<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number) {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+
+  map.set(key, value);
+
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+
+    if (oldestKey === undefined) {
+      break;
+    }
+
+    map.delete(oldestKey);
+  }
 }
 
 function sleep(ms: number) {

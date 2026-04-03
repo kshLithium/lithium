@@ -95,60 +95,64 @@ export class ResidentOrchestratorRunner {
       "stdin"
     );
 
-    await mkdir(turnDir, { recursive: true });
-    await Promise.all([
-      writeFile(promptPath, composedPrompt, "utf8"),
-      writeFile(
-        scriptPath,
-        buildResidentShellScript({
-          command,
-          promptPath,
-          stdoutPath: options.stdoutPath,
-          stderrPath: options.stderrPath,
+    try {
+      await mkdir(turnDir, { recursive: true });
+      await Promise.all([
+        writeFile(promptPath, composedPrompt, "utf8"),
+        writeFile(
+          scriptPath,
+          buildResidentShellScript({
+            command,
+            promptPath,
+            stdoutPath: options.stdoutPath,
+            stderrPath: options.stderrPath,
+            exitPath
+          }),
+          {
+            encoding: "utf8",
+            mode: 0o700
+          }
+        ),
+        resetOrchestratorTurnFiles(options.requestPaths, [
+          options.stdoutPath,
+          options.stderrPath,
+          options.outputPath,
           exitPath
-        }),
-        {
-          encoding: "utf8",
-          mode: 0o700
-        }
-      ),
-      resetOrchestratorTurnFiles(options.requestPaths, [
-        options.stdoutPath,
-        options.stderrPath,
-        options.outputPath,
-        exitPath
-      ])
-    ]);
-    const shellCommand = buildResidentShellCommand(scriptPath);
+        ])
+      ]);
+      const shellCommand = buildResidentShellCommand(scriptPath);
 
-    if (!writeToLiveShell(options.workspacePath, host.id, `${shellCommand}\r`)) {
-      throw new Error("Resident orchestrator shell is unavailable.");
+      if (!writeToLiveShell(options.workspacePath, host.id, `${shellCommand}\r`)) {
+        throw new Error("Resident orchestrator shell is unavailable.");
+      }
+
+      const exitCode = await this.waitForExitCode(options.workspacePath, options.hostKey, host.id, exitPath);
+      const stdout = await readMaybe(options.stdoutPath);
+      const stderr = await readMaybe(options.stderrPath);
+      const finalMessage =
+        (await readMaybe(options.outputPath)).trim() ||
+        [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").trim();
+      const delegations = await readOrchestratorDelegationRequests(options.requestPaths);
+      const primaryDelegation = delegations[0] ?? null;
+
+      return {
+        command,
+        startedAt,
+        endedAt: new Date().toISOString(),
+        exitCode,
+        timedOut: false,
+        stdout,
+        stderr,
+        finalMessage,
+        sessionId: parseCodexThreadId(stdout) || options.sessionId || null,
+        requestedLane: primaryDelegation?.lane ?? null,
+        delegatedPrompt: primaryDelegation?.prompt ?? "",
+        delegation: primaryDelegation,
+        delegations
+      };
+    } finally {
+      await rm(turnDir, { recursive: true, force: true }).catch(() => undefined);
     }
-
-    const exitCode = await this.waitForExitCode(options.workspacePath, options.hostKey, host.id, exitPath);
-    const stdout = await readMaybe(options.stdoutPath);
-    const stderr = await readMaybe(options.stderrPath);
-    const finalMessage =
-      (await readMaybe(options.outputPath)).trim() ||
-      [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").trim();
-    const delegations = await readOrchestratorDelegationRequests(options.requestPaths);
-    const primaryDelegation = delegations[0] ?? null;
-
-    return {
-      command,
-      startedAt,
-      endedAt: new Date().toISOString(),
-      exitCode,
-      timedOut: false,
-      stdout,
-      stderr,
-      finalMessage,
-      sessionId: parseCodexThreadId(stdout) || options.sessionId || null,
-      requestedLane: primaryDelegation?.lane ?? null,
-      delegatedPrompt: primaryDelegation?.prompt ?? "",
-      delegation: primaryDelegation,
-      delegations
-    };
   }
 
   private async ensureHost(workspacePath: string, hostKey?: string): Promise<HostSession> {

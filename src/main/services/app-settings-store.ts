@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   isBuilderModel,
@@ -18,26 +18,34 @@ import {
 } from "../../shared/types";
 
 export class AppSettingsStore {
+  private writeQueue = Promise.resolve();
+
   constructor(private readonly filePath: string) {}
 
   async read(): Promise<AppSettings> {
-    const current = await this.readFromPath(this.filePath);
-
-    if (current) {
-      return current;
-    }
-
-    return DEFAULT_APP_SETTINGS;
+    await this.writeQueue.catch(() => undefined);
+    return await this.readCurrent();
   }
 
   async update(update: AppSettingsUpdate): Promise<AppSettings> {
-    const nextSettings = sanitizeAppSettings({
-      ...(await this.read()),
-      ...update
+    let nextSettings = DEFAULT_APP_SETTINGS;
+
+    this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
+      nextSettings = sanitizeAppSettings({
+        ...(await this.readCurrent()),
+        ...update
+      });
+
+      await this.write(nextSettings);
     });
 
-    await this.write(nextSettings);
+    await this.writeQueue;
     return nextSettings;
+  }
+
+  private async readCurrent(): Promise<AppSettings> {
+    const current = await this.readFromPath(this.filePath);
+    return current ?? DEFAULT_APP_SETTINGS;
   }
 
   private async readFromPath(filePath: string): Promise<AppSettings | null> {
@@ -50,8 +58,21 @@ export class AppSettingsStore {
   }
 
   private async write(settings: AppSettings) {
-    await mkdir(path.dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, JSON.stringify(settings, null, 2));
+    const directory = path.dirname(this.filePath);
+    const tempPath = path.join(
+      directory,
+      `${path.basename(this.filePath)}.${process.pid}.${Date.now()}.tmp`
+    );
+
+    await mkdir(directory, { recursive: true });
+
+    try {
+      await writeFile(tempPath, JSON.stringify(settings, null, 2), "utf8");
+      await rename(tempPath, this.filePath);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 }
 

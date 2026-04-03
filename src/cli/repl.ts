@@ -33,6 +33,7 @@ type CliControllerOptions = {
   writeLine: (line?: string) => void;
   cwd?: () => string;
   historyLimit?: number;
+  maxTrackedConversationEntries?: number;
 };
 
 type HandleLineResult = "continue" | "exit";
@@ -63,9 +64,11 @@ export class LithiumCliController {
   private readonly writeLine: (line?: string) => void;
   private readonly cwd: () => string;
   private readonly historyLimit: number;
+  private readonly maxTrackedConversationEntries: number;
   private currentWorkspacePath = "";
   private currentSnapshot: ProjectSnapshot | null = null;
   private readonly printedConversationEntries = new Set<string>();
+  private readonly printedConversationEntryOrder: string[] = [];
   private lastProgressSignature = "";
 
   constructor(options: CliControllerOptions) {
@@ -74,6 +77,7 @@ export class LithiumCliController {
     this.writeLine = options.writeLine;
     this.cwd = options.cwd ?? (() => process.cwd());
     this.historyLimit = options.historyLimit ?? 8;
+    this.maxTrackedConversationEntries = options.maxTrackedConversationEntries ?? Math.max(128, this.historyLimit * 16);
   }
 
   async initialize(workspacePath: string) {
@@ -317,11 +321,12 @@ export class LithiumCliController {
   }
 
   private async activateWorkspace(workspacePath: string, reason: "startup" | "switch") {
-    this.service.setSelectedWorkspacePath(workspacePath);
-    await this.settingsStore.update({
-      lastWorkspacePath: workspacePath
-    });
     const snapshot = await this.service.initProject(workspacePath);
+    const persistedWorkspacePath = snapshot.project?.workspacePath || workspacePath;
+    this.service.setSelectedWorkspacePath(persistedWorkspacePath);
+    await this.settingsStore.update({
+      lastWorkspacePath: persistedWorkspacePath
+    });
     this.refreshSnapshot(snapshot, {
       clearPrintedHistory: true,
       emitEntries: false
@@ -478,7 +483,24 @@ export class LithiumCliController {
   }
 
   private markConversationEntryPrinted(entryId: string) {
-    this.printedConversationEntries.add(this.conversationEntryKey(entryId));
+    const key = this.conversationEntryKey(entryId);
+
+    if (this.printedConversationEntries.has(key)) {
+      return;
+    }
+
+    this.printedConversationEntries.add(key);
+    this.printedConversationEntryOrder.push(key);
+
+    while (this.printedConversationEntryOrder.length > this.maxTrackedConversationEntries) {
+      const oldestKey = this.printedConversationEntryOrder.shift();
+
+      if (!oldestKey) {
+        break;
+      }
+
+      this.printedConversationEntries.delete(oldestKey);
+    }
   }
 
   private wasConversationEntryPrinted(entryId: string) {
@@ -487,6 +509,7 @@ export class LithiumCliController {
 
   private clearPrintedConversationEntries() {
     this.printedConversationEntries.clear();
+    this.printedConversationEntryOrder.length = 0;
   }
 
   private conversationEntryKey(entryId: string) {

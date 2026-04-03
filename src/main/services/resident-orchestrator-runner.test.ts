@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -117,5 +117,6 @@ describe("ResidentOrchestratorRunner", () => {
       reasoningEffort: "xhigh"
     });
     expect(result.finalMessage).toContain("상주 오케스트레이터");
+    await expect(readdir(path.join(requestDir, "resident-turns"))).resolves.toEqual([]);
   });
 });
