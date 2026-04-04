@@ -1,84 +1,113 @@
 import type {
-  LithiumHandoff,
-  ResearchIsolationMode,
-  ResearchWorkItemExecutor,
-  ResearchWorkItemKind
+  DiscoveredSourceSpec,
+  PlannerProposal,
+  SynthesizedFindingSpec,
+  TaskProposal
 } from "../../shared/types";
+import { clamp01, normalizeWhitespace } from "../lithium/utils";
 
-const PLANNER_MARKER = "LITHIUM_HANDOFF";
-const BUILDER_MARKER = "LITHIUM_STATUS";
-const INCOMPLETE_PLANNER_PREFIX =
-  /^(?:i['’]?m|let me|sure|certainly|okay|ok|alright|based on|here(?:'s| is)?|pulling|reviewing|comparing|synthesizing)\b/i;
-const USER_VISIBLE_RUNTIME_NOISE_PATTERN =
-  /^(?:connect econnrefused\b.*|prompt textarea did not appear before timeout\b.*|prompt did not appear before timeout\b.*|prompt-not-in-composer\b.*|send may have failed\b.*|reconnecting\.\.\.\s*\d+\/\d+\b.*|stream disconnected before comp\b.*|write_stdin failed\b.*|stdin is closed\b.*|chrome window closed before oracle finished\b.*|chrome disconnected before completion\b.*|if the saved chatgpt session expired\b.*|set lithium_oracle_visible=1\b.*|no (?:chatgpt )?cookies were applied\b.*|log in to chatgpt in chrome\b.*|provide inline cookies\b.*|unable to find model option matching\b.*)$/i;
+export const LITHIUM_PLAN_MARKER = "LITHIUM_PLAN";
+export const LITHIUM_DISCOVER_MARKER = "LITHIUM_DISCOVER";
+export const LITHIUM_READ_MARKER = "LITHIUM_READ";
+export const LITHIUM_STATUS_MARKER = "LITHIUM_STATUS";
 
-type ParsedResearchWorkItem = NonNullable<LithiumHandoff["researchWorkItems"]>[number];
+type BuilderStatusPayload = {
+  machineSummary: string;
+  result: "success" | "partial" | "failed";
+  files: string[];
+  risks: string[];
+  runActions: string[];
+  successCriteria: string[];
+  openQuestions: string[];
+};
 
-export function parseOracleOutput(rawOutput: string): LithiumHandoff {
-  const parsed = parseMarkedJsonPayload(rawOutput, PLANNER_MARKER);
-
-  if (parsed) {
-    return normalizePlannerHandoff(parsed, rawOutput);
+export function parsePlannerOutput(rawOutput: string): PlannerProposal {
+  const parsed = parseMarkedJsonPayload(rawOutput, LITHIUM_PLAN_MARKER);
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      summary: fallbackSummary(rawOutput, LITHIUM_PLAN_MARKER),
+      rationale: "Planner output was not valid structured JSON.",
+      proposedBranches: [],
+      proposedTasks: []
+    };
   }
 
-  const summary = extractFallbackSummary(rawOutput, PLANNER_MARKER);
-  return createEmptyHandoff("planner", summary, "Oracle did not return a structured planning rationale.");
+  const record = parsed as Record<string, unknown>;
+  return {
+    summary: readString(record.summary) || fallbackSummary(rawOutput, LITHIUM_PLAN_MARKER),
+    rationale: readString(record.rationale) || "No planner rationale was returned.",
+    proposedBranches: readPlannerBranches(record.proposed_branches, record.proposedBranches),
+    proposedTasks: readTaskProposals(record.proposed_tasks, record.proposedTasks)
+  };
 }
 
-export function parseBuilderOutput(finalMessage: string): LithiumHandoff {
-  const parsed = parseMarkedJsonPayload(finalMessage, BUILDER_MARKER);
+export function parseDiscoverOutput(rawOutput: string) {
+  const parsed = parseMarkedJsonPayload(rawOutput, LITHIUM_DISCOVER_MARKER);
+  const record = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  return {
+    summary: readString(record.summary) || fallbackSummary(rawOutput, LITHIUM_DISCOVER_MARKER),
+    sources: readDiscoveredSources(record.sources)
+  };
+}
 
-  if (parsed) {
-    return normalizeBuilderHandoff(parsed, finalMessage);
+export function parseReadOutput(rawOutput: string) {
+  const parsed = parseMarkedJsonPayload(rawOutput, LITHIUM_READ_MARKER);
+  const record = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  return {
+    summary: readString(record.summary) || fallbackSummary(rawOutput, LITHIUM_READ_MARKER),
+    findings: readFindings(record.findings)
+  };
+}
+
+export function parseBuilderStatus(rawOutput: string): BuilderStatusPayload {
+  const parsed = parseMarkedJsonPayload(rawOutput, LITHIUM_STATUS_MARKER);
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      machineSummary: fallbackSummary(rawOutput, LITHIUM_STATUS_MARKER),
+      result: "partial",
+      files: [],
+      risks: [],
+      runActions: [],
+      successCriteria: [],
+      openQuestions: []
+    };
   }
 
-  const summary = extractFallbackSummary(finalMessage, BUILDER_MARKER);
-  return createEmptyHandoff("builder", summary, "Builder did not return a structured result rationale.");
+  const record = parsed as Record<string, unknown>;
+  return {
+    machineSummary: readString(record.machine_summary, record.machineSummary, record.summary) || "Task completed.",
+    result: readResult(record.result),
+    files: readStringList(record.files),
+    risks: readStringList(record.risks),
+    runActions: readStringList(record.run_actions, record.runActions),
+    successCriteria: readStringList(record.success_criteria, record.successCriteria),
+    openQuestions: readStringList(record.open_questions, record.openQuestions)
+  };
 }
 
 export function describeIncompletePlannerOutput(rawOutput: string) {
   const trimmed = rawOutput.trim();
-
   if (!trimmed) {
-    return "Oracle planner run completed without producing output.";
+    return "Strategist output was empty.";
   }
-
-  if (trimmed.includes(PLANNER_MARKER)) {
+  if (trimmed.includes(LITHIUM_PLAN_MARKER)) {
     return null;
   }
-
-  const normalized = trimmed.replace(/\s+/g, " ").trim();
-  const wordCount = normalized.split(" ").filter(Boolean).length;
-
-  if (normalized.length < 8 || wordCount <= 2) {
-    return `Oracle planner output looked truncated or non-final: ${normalized}`;
+  const summary = normalizeWhitespace(trimmed);
+  if (summary.length < 24 || !/[.?!}]$/.test(summary)) {
+    return `Strategist output looked incomplete: ${summary}`;
   }
-
-  if (normalized.endsWith(":") && wordCount <= 8) {
-    return `Oracle planner output looked truncated or non-final: ${normalized}`;
-  }
-
-  if (INCOMPLETE_PLANNER_PREFIX.test(normalized) && !/[.?!]$/.test(normalized)) {
-    return `Oracle planner output looked truncated or non-final: ${normalized}`;
-  }
-
-  if (wordCount <= 4 && normalized.length < 32 && !/[.?!:]$/.test(normalized)) {
-    return `Oracle planner output looked truncated or non-final: ${normalized}`;
-  }
-
   return null;
 }
 
 export function parseMarkedJsonPayload(rawText: string, marker: string) {
   const markerIndex = rawText.lastIndexOf(marker);
-
   if (markerIndex < 0) {
     return null;
   }
 
   const rawBlock = rawText.slice(markerIndex + marker.length).trim();
   const normalized = extractJsonObjectBlock(stripCodeFence(rawBlock));
-
   if (!normalized) {
     return null;
   }
@@ -90,65 +119,16 @@ export function parseMarkedJsonPayload(rawText: string, marker: string) {
   }
 }
 
-function normalizePlannerHandoff(value: unknown, rawOutput: string): LithiumHandoff {
-  const candidate = toRecord(value);
-  const machineSummary =
-    readString(candidate.machine_summary, candidate.machineSummary, candidate.summary) ||
-    extractFallbackSummary(rawOutput, PLANNER_MARKER);
-  const proposedBranches = readPlannerBranches(candidate.proposed_branches, candidate.proposedBranches);
-  const researchWorkItems = readResearchWorkItems(candidate.research_work_items, candidate.researchWorkItems);
-
-  return {
-    ...createEmptyHandoff(
-      "planner",
-      machineSummary,
-      readString(candidate.rationale) || "Oracle did not return a structured planning rationale."
-    ),
-    files: readStringList(candidate.files),
-    risks: readStringList(candidate.risks),
-    runActions: readStringList(candidate.run_actions, candidate.runActions),
-    successCriteria: readStringList(candidate.success_criteria, candidate.successCriteria),
-    openQuestions: readStringList(candidate.open_questions, candidate.openQuestions),
-    ...(proposedBranches.length > 0 ? { proposedBranches } : {}),
-    ...(researchWorkItems.length > 0 ? { researchWorkItems } : {}),
-    ...(typeof candidate.confidence === "number" ? { confidence: clamp01(candidate.confidence) } : {})
-  };
-}
-
-function normalizeBuilderHandoff(value: unknown, finalMessage: string): LithiumHandoff {
-  const candidate = toRecord(value);
-  const machineSummary =
-    readString(candidate.machine_summary, candidate.machineSummary, candidate.summary) ||
-    extractFallbackSummary(finalMessage, BUILDER_MARKER);
-
-  return {
-    ...createEmptyHandoff(
-      "builder",
-      machineSummary,
-      readString(candidate.rationale) || "Builder did not return a structured result rationale."
-    ),
-    result: normalizeResultTag(readString(candidate.result)),
-    files: readStringList(candidate.files),
-    risks: readStringList(candidate.risks),
-    runActions: readStringList(candidate.run_actions, candidate.runActions),
-    successCriteria: readStringList(candidate.success_criteria, candidate.successCriteria),
-    openQuestions: readStringList(candidate.open_questions, candidate.openQuestions)
-  };
-}
-
-function createEmptyHandoff(role: LithiumHandoff["role"], summary: string, rationale: string): LithiumHandoff {
-  return {
-    schemaVersion: "lithium_handoff_v1",
-    role,
-    summary,
-    machineSummary: summary,
-    rationale,
-    files: [],
-    risks: [],
-    runActions: [],
-    successCriteria: [],
-    openQuestions: []
-  };
+export function fallbackSummary(rawText: string, marker: string) {
+  const stripped = rawText.replace(new RegExp(`\\n*${escapeRegExp(marker)}[\\s\\S]*$`, "i"), "").trim();
+  if (!stripped) {
+    return "";
+  }
+  const paragraph = stripped
+    .split(/\n\s*\n/)
+    .map((entry) => normalizeWhitespace(entry))
+    .find(Boolean);
+  return paragraph ?? normalizeWhitespace(stripped);
 }
 
 function stripCodeFence(value: string) {
@@ -156,39 +136,53 @@ function stripCodeFence(value: string) {
   return fenced?.[1]?.trim() ?? value.trim();
 }
 
-function stripMarkedBlock(rawText: string, marker: string) {
-  return rawText.replace(new RegExp(`\\n*${escapeRegExp(marker)}(?:\\s*\\n|\\s+)?[\\s\\S]*$`, "i"), "").trim();
+function extractJsonObjectBlock(value: string) {
+  const start = value.indexOf("{");
+  const end = value.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    return null;
+  }
+  return value.slice(start, end + 1);
 }
 
-function extractFallbackSummary(rawText: string, marker: string) {
-  const stripped = stripRuntimeNoise(stripMarkedBlock(rawText, marker)).trim();
-  if (!stripped) {
-    return "";
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function readTaskProposals(...values: unknown[]): TaskProposal[] {
+  const entries = values.find(Array.isArray);
+  if (!entries) {
+    return [];
   }
 
-  const paragraphs = stripped
-    .split(/\n\s*\n/)
-    .map((entry) => entry.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-
-  return paragraphs[0] ?? stripped.replace(/\s+/g, " ").trim();
-}
-
-function stripRuntimeNoise(value: string) {
-  return value
-    .split("\n")
-    .filter((line) => !USER_VISIBLE_RUNTIME_NOISE_PATTERN.test(normalizePotentialRuntimeNoiseLine(line)))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function normalizePotentialRuntimeNoiseLine(value: string) {
-  return value.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function normalizeResultTag(value: string | null) {
-  return value === "success" || value === "partial" || value === "failed" ? value : undefined;
+  const proposals: TaskProposal[] = [];
+  for (const entry of entries) {
+    const record = toRecord(entry);
+    const title = readString(record.title);
+    const prompt = readString(record.prompt);
+    const kind = readTaskKind(record.kind);
+    if (!title || !prompt || !kind) {
+      continue;
+    }
+    proposals.push({
+      title,
+      prompt,
+      kind,
+      branchTitle: readString(record.branch_title, record.branchTitle) || undefined,
+      expectedInfoGain: clamp01(readNumber(record.expected_info_gain, record.expectedInfoGain, 0.5)),
+      estimatedCost: clamp01(readNumber(record.estimated_cost, record.estimatedCost, 0.5)),
+      evidenceNeeded: readStringList(record.evidence_needed, record.evidenceNeeded),
+      successRubric: readStringList(record.success_rubric, record.successRubric),
+      stopCondition: readString(record.stop_condition, record.stopCondition) || "Stop when the task no longer yields new evidence.",
+      dependencyMode: readDependencyMode(record.dependency_mode, record.dependencyMode),
+      branchUpdateIntent: readBranchIntent(record.branch_update_intent, record.branchUpdateIntent),
+      sourceIds: readStringList(record.source_ids, record.sourceIds),
+      verificationCommands: readStringList(record.verification_commands, record.verificationCommands),
+      questions: readStringList(record.questions),
+      commands: readStringList(record.commands)
+    });
+  }
+  return proposals;
 }
 
 function readPlannerBranches(...values: unknown[]) {
@@ -196,53 +190,71 @@ function readPlannerBranches(...values: unknown[]) {
   if (!entries) {
     return [];
   }
-
   return entries
     .map((entry) => {
-      const candidate = toRecord(entry);
-      const title = readString(candidate.title);
-      const hypothesis = readString(candidate.hypothesis);
+      const record = toRecord(entry);
+      const title = readString(record.title);
+      const hypothesis = readString(record.hypothesis);
       if (!title || !hypothesis) {
         return null;
       }
       return { title, hypothesis };
     })
-    .filter((entry): entry is NonNullable<LithiumHandoff["proposedBranches"]>[number] => Boolean(entry));
+    .filter((entry): entry is PlannerProposal["proposedBranches"][number] => Boolean(entry));
 }
 
-function readResearchWorkItems(...values: unknown[]): ParsedResearchWorkItem[] {
-  const entries = values.find(Array.isArray);
-  if (!entries) {
+function readDiscoveredSources(value: unknown): DiscoveredSourceSpec[] {
+  if (!Array.isArray(value)) {
     return [];
   }
-
-  return entries
-    .map((entry) => {
-      const candidate = toRecord(entry);
-      const title = readString(candidate.title);
-      const prompt = readString(candidate.prompt);
-      const kind = readTaskKind(candidate.kind);
-      const executor = readTaskExecutor(candidate.executor);
-      const isolation = readIsolation(candidate.isolation);
-      const branchTitle = readString(candidate.branch_title, candidate.branchTitle);
-
-      if (!title || !prompt || !kind) {
-        return null;
-      }
-
-      return {
-        title,
-        prompt,
-        kind,
-        ...(executor ? { executor } : {}),
-        ...(isolation ? { isolation } : {}),
-        ...(branchTitle ? { branchTitle } : {})
-      };
-    })
-    .filter((entry): entry is ParsedResearchWorkItem => Boolean(entry));
+  const sources: DiscoveredSourceSpec[] = [];
+  for (const entry of value) {
+    const record = toRecord(entry);
+    const locator = readString(record.locator);
+    const title = readString(record.title);
+    const kind = readSourceKind(record.kind);
+    if (!locator || !title || !kind) {
+      continue;
+    }
+    sources.push({
+      locator,
+      title,
+      kind,
+      summary: readString(record.summary) || title,
+      excerpt: readString(record.excerpt) || undefined,
+      branchTitle: readString(record.branch_title, record.branchTitle) || undefined
+    });
+  }
+  return sources;
 }
 
-function readTaskKind(value: unknown): ParsedResearchWorkItem["kind"] | null {
+function readFindings(value: unknown): SynthesizedFindingSpec[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const findings: SynthesizedFindingSpec[] = [];
+  for (const entry of value) {
+    const record = toRecord(entry);
+    const summary = readString(record.summary);
+    const sourceLocator = readString(record.source_locator, record.sourceLocator);
+    if (!summary || !sourceLocator) {
+      continue;
+    }
+    findings.push({
+      summary,
+      detail: readString(record.detail) || undefined,
+      sourceLocator,
+      citationText: readString(record.citation_text, record.citationText) || undefined
+    });
+  }
+  return findings;
+}
+
+function readResult(value: unknown): BuilderStatusPayload["result"] {
+  return value === "success" || value === "partial" || value === "failed" ? value : "partial";
+}
+
+function readTaskKind(value: unknown): TaskProposal["kind"] | null {
   return value === "discover" ||
     value === "read_synthesize" ||
     value === "build_change" ||
@@ -252,93 +264,51 @@ function readTaskKind(value: unknown): ParsedResearchWorkItem["kind"] | null {
     : null;
 }
 
-function readTaskExecutor(value: unknown): ParsedResearchWorkItem["executor"] | undefined {
-  return value === "discoverer" ||
-    value === "reader-synthesizer" ||
-    value === "builder" ||
-    value === "experimenter" ||
-    value === "evaluator"
-    ? value
-    : undefined;
+function readDependencyMode(value: unknown, fallback: unknown): TaskProposal["dependencyMode"] {
+  const candidate = typeof value === "string" ? value : typeof fallback === "string" ? fallback : "";
+  return candidate === "success" || candidate === "failed" || candidate === "terminal" ? candidate : "success";
 }
 
-function readIsolation(value: unknown): ResearchIsolationMode | undefined {
-  return value === "none" || value === "worktree" ? value : undefined;
+function readBranchIntent(value: unknown, fallback: unknown): TaskProposal["branchUpdateIntent"] {
+  const candidate = typeof value === "string" ? value : typeof fallback === "string" ? fallback : "";
+  return candidate === "advance" || candidate === "branch" || candidate === "verify" || candidate === "kill"
+    ? candidate
+    : "advance";
+}
+
+function readSourceKind(value: unknown): DiscoveredSourceSpec["kind"] | null {
+  return value === "web" || value === "repo" || value === "paper" ? value : null;
 }
 
 function readString(...values: unknown[]) {
   for (const value of values) {
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (trimmed) {
-        return trimmed;
-      }
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
     }
   }
-  return null;
+  return "";
 }
 
 function readStringList(...values: unknown[]) {
-  const items = values.find(Array.isArray);
-  if (!items) {
+  const array = values.find(Array.isArray);
+  if (!array) {
     return [];
   }
-
-  return items
-    .flatMap((entry) => (typeof entry === "string" ? [entry.trim()] : []))
+  return array
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
     .filter(Boolean);
 }
 
+function readNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return 0;
+}
+
 function toRecord(value: unknown) {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
-function extractJsonObjectBlock(value: string) {
-  const start = value.indexOf("{");
-  if (start < 0) {
-    return null;
-  }
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = start; index < value.length; index += 1) {
-    const char = value[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === "\"") {
-      inString = true;
-      continue;
-    }
-    if (char === "{") {
-      depth += 1;
-      continue;
-    }
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return value.slice(start, index + 1);
-      }
-    }
-  }
-
-  return null;
-}
-
-function clamp01(value: number) {
-  return Math.max(0, Math.min(1, value));
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }

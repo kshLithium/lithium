@@ -1,67 +1,52 @@
 # Lithium
 
-Lithium is a local-first CLI for running an objective-first research engine from one terminal.
+Lithium is a local-first autonomous research engine with a workspace-scoped daemon, event log, projection store, artifact memory, and provider-backed execution pipeline.
 
-## Philosophy
+## V4 Highlights
 
-- Objectives, branches, work items, evidence, and evaluations are the source of truth.
-- Workspace state should live with the workspace.
-- Research, execution, evidence capture, and evaluation should feel like one loop.
-- Builder edits and experiments should run in isolated worktrees whenever possible.
+- `lithiumd`-style runtime through `lithium daemon start|stop|status`
+- workspace-local RPC over `.lithium/runtime/daemon.sock`
+- append-only event log with projection tables in `.lithium/state/research.db`
+- retrieval-oriented source ingest with chunk indexing under `.lithium/index`
+- builder, experimenter, evaluator, and browser-backed strategist providers behind task contracts
+- reducer-driven branch evaluation and patch promotion without an `arbitrate_branch` task
 
-## Usage
+## CLI
 
 ```bash
 npm install
 npm run build
-node dist/cli.cjs [workspacePath]
+node dist/cli.cjs daemon start --workspace /path/to/workspace
 ```
 
-Or run the interactive CLI directly in dev mode:
-
-```bash
-npm run dev -- [workspacePath]
-```
-
-If no workspace path is provided, Lithium uses the last workspace from `~/.lithium/settings.json`, and falls back to the current directory.
-
-## CLI Commands
-
-Lithium runs in objective-first autopilot mode. Free-form chat is disabled.
+Core commands:
 
 ```text
-:help
-:workspace <path>
-:objective list
-:objective new <goal>
-:objective use <id>
-:run start
-:run pause
-:run resume
-:run stop
-:attach <path...>
-:signin
-:status
-:queue
-:evidence
-:exit
+lithium daemon start|stop|status [--workspace <path>] [--foreground]
+lithium objective create <goal> [--workspace <path>] [--title <title>] [--success <criterion> ...]
+lithium objective list|show [objectiveId] [--workspace <path>]
+lithium run start|pause|resume|stop [--workspace <path>] [--objective <id>]
+lithium run watch [--workspace <path>] [--interval <ms>]
+lithium source add <path-or-url...> [--workspace <path>] [--objective <id>] [--branch <id>]
+lithium status [--workspace <path>] [--json]
+lithium workspace reset|archive [--workspace <path>]
 ```
+
+## Workspace Layout
+
+Lithium stores all state inside `.lithium/` in the selected workspace:
+
+- `.lithium/state/research.db`
+- `.lithium/runtime/*`
+- `.lithium/artifacts/*`
+- `.lithium/index/*`
+
+Legacy V3 workspaces are intentionally not migrated in place. Use `lithium workspace archive` or `lithium workspace reset` before starting the daemon in an older workspace.
 
 ## Development
 
 ```bash
-npm test
 npm run typecheck
+npm test
 npm run build
 ```
-
-## Notes
-
-- Lithium stores workspace state in `.lithium/` inside the selected folder.
-- Active research state lives under `.lithium/research/`.
-- CLI settings live in `~/.lithium/settings.json`.
-- `:signin` prepares the reusable strategist browser session for Oracle-backed planner and research work.
-
-## License
-
-MIT

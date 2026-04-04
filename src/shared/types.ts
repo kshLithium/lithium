@@ -1,17 +1,12 @@
-export type RecordStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
-export type RunFinalizationMode = "auto" | "manual" | "terminated";
-
-export type CommandSpec = {
-  command: string;
-  args: string[];
-  cwd: string;
-};
+export const PROJECT_SCHEMA_VERSION = 4;
 
 export type PromptLanguage = "auto" | "ko" | "en";
 export type OracleModel = "gpt-5.4-pro";
 export type OracleThinkingTime = "extended";
 export type BuilderModel = "gpt-5.4" | "gpt-5.3-codex";
 export type BuilderReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type RecordStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type RunFinalizationMode = "auto" | "manual" | "terminated";
 
 export type AppSettings = {
   promptLanguage: PromptLanguage;
@@ -25,9 +20,6 @@ export type AppSettings = {
 
 export type AppSettingsUpdate = Partial<AppSettings>;
 
-export const DEFAULT_PROJECT_RESEARCH_GOAL = "Define the next research outcome this project should produce.";
-export const PROJECT_SCHEMA_VERSION = 3;
-
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   promptLanguage: "auto",
   oracleSessionReady: false,
@@ -35,178 +27,344 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   oracleModel: "gpt-5.4-pro",
   oracleThinkingTime: "extended",
   builderModel: "gpt-5.4",
-  builderReasoningEffort: "xhigh"
+  builderReasoningEffort: "high"
 };
 
-export type ProjectRecord = {
+export type CommandSpec = {
+  command: string;
+  args: string[];
+  cwd: string;
+};
+
+export type WorkspaceRecord = {
   id: string;
   schemaVersion: number;
-  name: string;
   workspacePath: string;
-  oracleModel: OracleModel;
-  codexModel: string;
-  activeObjectiveId?: string;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
 };
 
-export type ResearchObjectiveStatus = "pending" | "active" | "paused" | "completed" | "failed";
-export type ResearchBranchStatus = "candidate" | "active" | "blocked" | "killed" | "pivoted" | "completed";
-export type ResearchSourceKind = "workspace" | "paper" | "repo" | "web" | "attachment";
-export type ResearchFindingKind = "evidence" | "observation" | "claim";
-export type ResearchHypothesisStatus = "open" | "supported" | "unsupported" | "revised";
-export type ResearchWorkItemKind =
+export type ProjectRecord = WorkspaceRecord;
+
+export type ObjectiveStatus = "draft" | "active" | "completed" | "failed" | "archived";
+export type BranchStatus = "candidate" | "active" | "completed" | "killed" | "pivoted";
+export type ResearchTaskKind =
   | "plan"
   | "discover"
   | "read_synthesize"
   | "build_change"
   | "run_experiment"
-  | "evaluate_branch"
-  | "arbitrate_branch";
-export type ResearchWorkItemLane =
-  | "plan"
-  | "discover"
-  | "synthesis"
-  | "build"
-  | "experiment"
-  | "evaluate"
-  | "arbiter";
-export type ResearchWorkItemExecutionMode = "sync" | "async" | "isolated";
-export type ResearchWorkItemExecutor =
-  | "planner"
-  | "discoverer"
-  | "reader-synthesizer"
-  | "builder"
-  | "experimenter"
-  | "evaluator"
-  | "arbiter";
-export type ResearchIsolationMode = "none" | "worktree";
-export type ResearchWorkItemStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "cancelled";
-export type ResearchEvaluationVerdict = "continue" | "kill" | "pivot" | "complete";
-export type ResearchProjectionStatus = "idle" | "running" | "paused" | "blocked" | "completed";
-export type ResearchRunStatus = "pending" | "active" | "blocked" | "paused" | "completed" | "failed";
-export type ResearchPatchPromotionStatus = "pending" | "promoted" | "skipped" | "failed";
-export type ResearchWorktreeLeaseCleanupStatus = "active" | "released" | "failed";
+  | "evaluate_branch";
+export type TaskExecutor = "strategist" | "builder" | "experimenter" | "evaluator";
+export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "needs-human";
+export type TaskTerminalStatus = Extract<TaskStatus, "completed" | "failed" | "cancelled" | "needs-human">;
+export type RunStatus = "idle" | "active" | "paused" | "completed" | "failed" | "stopped" | "needs-human";
+export type RecoveryAction = "reattach" | "retryable" | "needs-human";
+export type EvaluationVerdict = "continue" | "kill" | "pivot" | "complete";
+export type DependencyCondition = "success" | "failed" | "terminal";
+export type SourceKind = "file" | "web" | "repo" | "paper" | "attachment";
+export type ArtifactKind =
+  | "patch"
+  | "stdout"
+  | "stderr"
+  | "output"
+  | "manifest"
+  | "source-body"
+  | "source-text"
+  | "source-chunk"
+  | "attachment"
+  | "daemon-log";
+export type WorkerProvider = "strategist" | "builder" | "experimenter" | "evaluator";
 
-export type ResearchPriorityScore = {
+export type RunBudget = {
+  planning: number;
+  discovery: number;
+  build: number;
+  experiment: number;
+  evaluation: number;
+  wallClockMs: number;
+  maxBranches: number;
+  maxCostUsd?: number;
+};
+
+export type RunBudgetUsage = {
+  planning: number;
+  discovery: number;
+  build: number;
+  experiment: number;
+  evaluation: number;
+  totalCostUsd?: number;
+  startedAt: string;
+};
+
+export type TaskBudgetBucket = "planning" | "discovery" | "build" | "experiment" | "evaluation";
+
+export type TaskDependency = {
+  taskId: string;
+  on: DependencyCondition;
+};
+
+export type PriorityScore = {
   objectiveAlignment: number;
-  expectedInformationGain: number;
+  expectedInfoGain: number;
   feasibility: number;
   estimatedCost: number;
-  branchFreshness: number;
+  evidenceStrength: number;
   duplicationPenalty: number;
-  reproducibilityPriority: number;
   total: number;
 };
 
-export type ResearchObjectiveRecord = {
+export type ObjectiveRecord = {
   id: string;
   title: string;
   objective: string;
   summary: string;
-  status: ResearchObjectiveStatus;
+  status: ObjectiveStatus;
   successCriteria: string[];
+  branchIds: string[];
   activeBranchId?: string;
   activeRunId?: string;
-  sourceIds: string[];
-  branchIds: string[];
   createdAt: string;
   updatedAt: string;
 };
 
-export type ResearchBranchRecord = {
+export type BranchRecord = {
   id: string;
   objectiveId: string;
   title: string;
   hypothesis: string;
-  status: ResearchBranchStatus;
+  status: BranchStatus;
   score: number;
   baseCommit?: string;
   gitRef?: string;
   headCommit?: string;
   worktreePath?: string;
   promotionHeadCommit?: string;
-  blocker?: string;
-  nextWorkItemId?: string;
-  lastFailureReason?: string;
-  evidenceIds: string[];
   sourceIds: string[];
   findingIds: string[];
-  workItemIds: string[];
+  taskIds: string[];
+  latestEvaluationId?: string;
+  lastFailureReason?: string;
   createdAt: string;
   updatedAt: string;
-  lastUpdatedAt: string;
 };
 
-export type ResearchSourceRecord = {
+export type ArtifactRef = {
+  id: string;
+  kind: ArtifactKind;
+  path: string;
+  hash?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  createdAt: string;
+};
+
+export type SourceRecord = {
   id: string;
   objectiveId: string;
   branchId?: string;
-  kind: ResearchSourceKind;
+  kind: SourceKind;
   title: string;
   locator: string;
-  provenance: string;
+  canonicalLocator: string;
   summary: string;
-  excerpt?: string;
-  attachmentId?: string;
-  artifactPath?: string;
-  artifactHash?: string;
-  citationStart?: number;
-  citationEnd?: number;
-  readAt?: string;
-  oracleSessionSlug?: string;
-  sourceArtifactId?: string;
+  bodyArtifactRef?: ArtifactRef;
+  textArtifactRef?: ArtifactRef;
+  contentHash?: string;
   metadata?: Record<string, string | number | boolean | null>;
   createdAt: string;
   updatedAt: string;
 };
 
-export type SourceArtifactRecord = {
+export type SourceChunkRecord = {
   id: string;
-  objectiveId: string;
   sourceId: string;
-  path: string;
+  objectiveId: string;
+  branchId?: string;
+  chunkIndex: number;
+  text: string;
+  textArtifactRef?: ArtifactRef;
   hash: string;
-  contentType?: string;
-  sizeBytes: number;
   createdAt: string;
   updatedAt: string;
 };
 
-export type ResearchFindingRecord = {
+export type FindingRecord = {
   id: string;
   objectiveId: string;
-  branchId?: string;
+  branchId: string;
   sourceId?: string;
-  sourceArtifactId?: string;
-  kind: ResearchFindingKind;
+  sourceChunkIds: string[];
   summary: string;
   detail?: string;
-  citationStart?: number;
-  citationEnd?: number;
   evidence: string[];
   createdAt: string;
   updatedAt: string;
 };
 
-export type ResearchTaskDependency = {
+export type MetricExpectation = {
+  name: string;
+  value?: number;
+  min?: number;
+  max?: number;
+  baselineDelta?: number;
+};
+
+export type MetricMeasurement = {
+  name: string;
+  value: number;
+  unit?: string;
+};
+
+export type ExperimentManifest = {
+  commands: string[];
+  exitCode: number | null;
+  status: TaskTerminalStatus;
+  stdoutPath?: string;
+  stderrPath?: string;
+  outputPath?: string;
+  artifacts: string[];
+  metrics: MetricMeasurement[];
+  expectations: MetricExpectation[];
+  baselineCompare?: Record<string, number>;
+};
+
+export type ExperimentRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
   taskId: string;
-  reason: string;
+  status: TaskTerminalStatus;
+  summary: string;
+  manifestRef?: ArtifactRef;
+  stdoutRef?: ArtifactRef;
+  stderrRef?: ArtifactRef;
+  patchArtifactRef?: ArtifactRef;
+  changedFiles: string[];
+  metrics: MetricMeasurement[];
+  createdAt: string;
+  updatedAt: string;
 };
 
-export type ResearchTaskTimeoutPolicy = {
-  wallMs: number;
-  silenceMs?: number;
+export type MetricRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  taskId: string;
+  experimentId: string;
+  name: string;
+  value: number;
+  unit?: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
-export type DiscoverSourceSpec = {
+export type EvaluationRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  taskId: string;
+  verdict: EvaluationVerdict;
+  scoreDelta: number;
+  summary: string;
+  rationale: string;
+  followupPrompt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RunRecord = {
+  id: string;
+  objectiveId: string;
+  status: RunStatus;
+  budget: RunBudget;
+  budgetUsage: RunBudgetUsage;
+  activeTaskIds: string[];
+  stopReason?: string;
+  blockedReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+
+export type WorktreeLeaseRecord = {
+  id: string;
+  taskId: string;
+  branchId: string;
+  worktreePath: string;
+  tempDir: string;
+  status: "active" | "released" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  releasedAt?: string;
+  cleanupError?: string;
+};
+
+export type TaskProposal = {
+  title: string;
+  prompt: string;
+  kind: Exclude<ResearchTaskKind, "evaluate_branch"> | "evaluate_branch";
+  branchTitle?: string;
+  expectedInfoGain: number;
+  estimatedCost: number;
+  evidenceNeeded: string[];
+  successRubric: string[];
+  stopCondition: string;
+  dependencyMode: DependencyCondition;
+  branchUpdateIntent: "advance" | "branch" | "verify" | "kill";
+  sourceIds?: string[];
+  verificationCommands?: string[];
+  questions?: string[];
+  commands?: string[];
+};
+
+export type PlannerProposal = {
+  summary: string;
+  rationale: string;
+  proposedBranches: Array<{
+    title: string;
+    hypothesis: string;
+  }>;
+  proposedTasks: TaskProposal[];
+};
+
+export type DiscoveredSourceSpec = {
   locator: string;
   title: string;
-  kind: Extract<ResearchSourceKind, "paper" | "repo" | "web">;
+  kind: Extract<SourceKind, "web" | "repo" | "paper">;
   summary: string;
   excerpt?: string;
-  citationText?: string;
   branchTitle?: string;
+};
+
+export type SynthesizedFindingSpec = {
+  summary: string;
+  detail?: string;
+  sourceLocator: string;
+  citationText?: string;
+};
+
+export type EvaluationInput = {
+  branchId: string;
+  subjectTaskId: string;
+  subjectTaskStatus: TaskTerminalStatus;
+  workerRunId?: string;
+  patchArtifactRef?: ArtifactRef;
+  changedFiles: string[];
+  experimentResultIds: string[];
+  metricRefs: string[];
+  sourceRefs: string[];
+  successCriteria: string[];
+  baselineRefs: string[];
+  focus: string;
+};
+
+export type PlanTaskPayload = {
+  objectiveId: string;
+  activeBranchId: string;
+  goal: string;
 };
 
 export type DiscoverTaskPayload = {
@@ -216,13 +374,13 @@ export type DiscoverTaskPayload = {
   domains?: string[];
 };
 
-export type ReadSynthesizeTaskPayload = {
+export type ReadTaskPayload = {
   branchId: string;
   sourceIds: string[];
   questions: string[];
 };
 
-export type BuildChangeTaskPayload = {
+export type BuildTaskPayload = {
   branchId: string;
   goal: string;
   constraints: string[];
@@ -230,371 +388,180 @@ export type BuildChangeTaskPayload = {
   successCriteria: string[];
 };
 
-export type ExperimentMetricExpectation = {
-  name: string;
-  value?: number;
-  min?: number;
-  max?: number;
-  baselineDelta?: number;
-};
-
-export type RunExperimentTaskPayload = {
+export type ExperimentTaskPayload = {
   branchId: string;
   commands: string[];
   timeoutMs: number;
-  expectedMetrics: ExperimentMetricExpectation[];
+  expectedMetrics: MetricExpectation[];
 };
 
-export type EvaluateBranchTaskPayload = {
-  branchId: string;
-  compareToBranchId?: string;
-  focus: string;
-};
+export type EvaluateTaskPayload = EvaluationInput;
 
-export type ArbitrateBranchTaskPayload = {
-  branchId: string;
-  evaluationId: string;
-  candidateTaskId?: string;
-};
-
-export type PlannerTaskPayload = {
-  objectiveId: string;
-  activeBranchId: string;
-  goal: string;
-};
-
-export type ResearchTaskPayload =
-  | PlannerTaskPayload
+export type TaskPayload =
+  | PlanTaskPayload
   | DiscoverTaskPayload
-  | ReadSynthesizeTaskPayload
-  | BuildChangeTaskPayload
-  | RunExperimentTaskPayload
-  | EvaluateBranchTaskPayload
-  | ArbitrateBranchTaskPayload;
+  | ReadTaskPayload
+  | BuildTaskPayload
+  | ExperimentTaskPayload
+  | EvaluateTaskPayload;
 
-export type ResearchHypothesisRecord = {
+export type TaskRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  statement: string;
-  status: ResearchHypothesisStatus;
-  confidence: number;
-  evidenceIds: string[];
-  lastEvaluationId?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ResearchWorktreeLeaseRecord = {
-  id: string;
-  workItemId: string;
-  worktreePath: string;
-  cleanupStatus: ResearchWorktreeLeaseCleanupStatus;
-  createdAt: string;
-  updatedAt: string;
-  releasedAt?: string;
-  cleanupError?: string;
-};
-
-export type ResearchWorkItemRecord = {
-  id: string;
-  objectiveId: string;
-  branchId: string;
-  kind: ResearchWorkItemKind;
-  lane: ResearchWorkItemLane;
-  executor?: ResearchWorkItemExecutor;
+  runId: string;
+  kind: ResearchTaskKind;
+  executor: TaskExecutor;
+  status: TaskStatus;
   title: string;
   prompt: string;
-  status: ResearchWorkItemStatus;
-  executionMode: ResearchWorkItemExecutionMode;
-  isolation?: ResearchIsolationMode;
-  priorityScore: ResearchPriorityScore;
-  sourceIds: string[];
-  dependsOnIds: string[];
-  dependencyRefs?: ResearchTaskDependency[];
-  payload?: ResearchTaskPayload;
-  timeoutPolicy?: ResearchTaskTimeoutPolicy;
-  maxAttempts?: number;
-  attemptCount?: number;
-  runId?: string;
-  oracleSessionSlug?: string;
-  worktreePath?: string;
-  resultEvaluationId?: string;
-  leaseId?: string;
-  patchArtifactPath?: string;
-  promotionStatus?: ResearchPatchPromotionStatus;
-  promotionError?: string;
+  payload: TaskPayload;
+  dependencies: TaskDependency[];
+  priority: PriorityScore;
+  attemptCount: number;
+  maxAttempts: number;
+  workerRunId?: string;
+  evaluationId?: string;
+  recoveryAction?: RecoveryAction;
+  summary?: string;
+  changedFiles?: string[];
+  artifactRefs?: ArtifactRef[];
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
   completedAt?: string;
 };
 
-export type ResearchRunSlotBudget = {
-  codexSlots: number;
-  oracleSlots: number;
-  maxTotalWorkItems: number;
-  completedWorkItems: number;
-};
-
-export type ResearchRunRecord = {
-  id: string;
-  objectiveId: string;
-  status: ResearchRunStatus;
-  blockedReason?: string;
-  stopReason?: string;
-  slotBudget: ResearchRunSlotBudget;
-  activeWorkItemIds: string[];
-  oracleSessionSlugs: string[];
-  worktreeLeases: ResearchWorktreeLeaseRecord[];
-  dispatchPaused?: boolean;
-  lastPlanTaskId?: string;
-  lastPlanAt?: string;
-  lastPlanSourceCount?: number;
-  lastPlanCompletedCount?: number;
-  lastPlanBranchScore?: number;
-  createdAt: string;
-  updatedAt: string;
-  startedAt?: string;
-  endedAt?: string;
-};
-
-export type EvaluationRecord = {
-  id: string;
-  objectiveId: string;
-  branchId: string;
-  workItemId: string;
-  verdict: ResearchEvaluationVerdict;
-  scoreDelta: number;
-  summary: string;
-  rationale: string;
-  followupPrompt?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ExperimentSpecRecord = {
-  id: string;
-  objectiveId: string;
-  branchId: string;
-  workItemId: string;
-  title: string;
-  prompt: string;
-  executor: Extract<ResearchWorkItemExecutor, "experimenter">;
-  isolation: ResearchIsolationMode;
-  worktreePath?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ExperimentManifest = {
-  commands: string[];
-  exitCode: number | null;
-  status: "completed" | "failed" | "cancelled";
-  stdoutPath?: string;
-  stderrPath?: string;
-  outputPath?: string;
-  artifacts: string[];
-  metrics: Array<{
-    name: string;
-    value: number;
-    unit?: string;
-  }>;
-  baselineCompare?: Record<string, number>;
-  expectations?: ExperimentMetricExpectation[];
-};
-
-export type ExperimentResultRecord = {
-  id: string;
-  objectiveId: string;
-  branchId: string;
-  workItemId: string;
-  experimentSpecId: string;
-  runId?: string;
-  status: "completed" | "failed" | "cancelled";
-  summary: string;
-  command?: string;
-  stdoutPath?: string;
-  stderrPath?: string;
-  outputPath?: string;
-  worktreePath?: string;
-  changedFiles: string[];
-  patchArtifactPath?: string;
-  manifestPath?: string;
-  manifest?: ExperimentManifest;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type MetricRecord = {
-  id: string;
-  objectiveId: string;
-  branchId: string;
-  workItemId: string;
-  experimentResultId: string;
-  name: string;
-  value: number;
-  unit?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ResearchEventRecord = {
-  id: string;
-  objectiveId?: string;
-  branchId?: string;
-  workItemId?: string;
-  type: string;
-  payload: Record<string, unknown>;
-  createdAt: string;
-};
-
-export type ResearchProjectionRecord = {
-  id: string;
-  objectiveId: string;
-  objectiveTitle: string;
-  status: ResearchProjectionStatus;
-  summary: string;
-  currentFocus: string;
-  activeBranchTitle: string;
-  queueDepth: number;
-  topNextActions: string[];
-  recentEvidence: string[];
-  latestEvaluationSummary?: string;
-  activeRunId?: string;
-  activeRunStatus?: ResearchRunStatus;
-  blockedReason?: string;
-  activeSlots: string[];
-  lastBranchSwitch?: string;
-  lastPatchPromotion?: string;
-  createdAt: string;
-  updatedAt: string;
-  lastUpdatedAt: string;
-};
-
-export type ActiveWorkerProgressRecord = {
-  runId: string;
-  workItemId: string;
-  objectiveId: string;
-  title: string;
-  executor: ResearchWorkItemExecutor;
-  status: ResearchWorkItemStatus | ResearchRunStatus;
-  summary: string;
-  oracleSessionSlug?: string;
-  worktreePath?: string;
-  updatedAt: string;
-};
-
-export type LithiumHandoff = {
-  schemaVersion: "lithium_handoff_v1";
-  role: "planner" | "builder";
-  summary: string;
-  machineSummary?: string;
-  rationale?: string;
-  result?: "success" | "partial" | "failed";
-  files: string[];
-  risks: string[];
-  runActions: string[];
-  successCriteria: string[];
-  openQuestions: string[];
-  proposedBranches?: Array<{
-    title: string;
-    hypothesis: string;
-  }>;
-  researchWorkItems?: Array<{
-    title: string;
-    prompt: string;
-    kind: Exclude<ResearchWorkItemKind, "plan" | "arbitrate_branch">;
-    executor?: Exclude<ResearchWorkItemExecutor, "planner" | "arbiter">;
-    isolation?: ResearchIsolationMode;
-    branchTitle?: string;
-  }>;
-  confidence?: number;
-};
-
 export type WorkerRunRecord = {
   id: string;
-  objectiveId: string;
-  branchId?: string;
   taskId: string;
-  prompt: string;
-  displayPrompt?: string;
-  model: string;
-  status: RecordStatus;
-  exitCode: number | null;
-  pid: number | null;
+  runId: string;
+  objectiveId: string;
+  branchId: string;
+  provider: WorkerProvider;
   command: CommandSpec;
+  status: "running" | TaskTerminalStatus;
+  pid: number | null;
+  model?: string;
   stdoutPath: string;
   stderrPath: string;
-  finalMessagePath: string;
-  finalMessage: string;
-  handoff?: LithiumHandoff | null;
-  changedFiles: string[];
-  finalization: RunFinalizationMode | null;
+  outputPath?: string;
+  worktreePath?: string;
+  tempDir?: string;
+  metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
   startedAt: string;
   endedAt?: string;
 };
 
-export type AttachmentKind = "text" | "json" | "csv" | "document" | "image" | "other";
+export type TaskOutcome = {
+  status: TaskTerminalStatus;
+  summary: string;
+  failureReason?: string;
+  retryability: RecoveryAction;
+  artifactRefs: ArtifactRef[];
+  changedFiles: string[];
+  metrics: MetricMeasurement[];
+  providerMetadata?: Record<string, unknown>;
+  plan?: PlannerProposal;
+  discoveredSources?: DiscoveredSourceSpec[];
+  findings?: SynthesizedFindingSpec[];
+  evaluation?: Omit<EvaluationRecord, "id" | "objectiveId" | "branchId" | "taskId" | "createdAt" | "updatedAt">;
+  experimentManifest?: ExperimentManifest;
+};
 
-export type AttachmentRecord = {
+export type EventRecord<T extends Record<string, unknown> = Record<string, unknown>> = {
+  sequence?: number;
   id: string;
+  type: string;
   objectiveId?: string;
-  name: string;
-  relativePath: string;
-  sourcePath: string;
-  kind: AttachmentKind;
-  sizeBytes: number;
-  excerpt: string;
-  importedAt: string;
-  updatedAt: string;
-  consumedAt?: string;
+  branchId?: string;
   runId?: string;
+  taskId?: string;
+  createdAt: string;
+  payload: T;
 };
 
-export type WorkspaceSnapshot = {
-  project: ProjectRecord | null;
-  activeObjectiveId: string | null;
-  activeObjective: ResearchObjectiveRecord | null;
-  objectives: ResearchObjectiveRecord[];
-  activeRun: ResearchRunRecord | null;
-  runs: ResearchRunRecord[];
-  branches: ResearchBranchRecord[];
-  queue: ResearchWorkItemRecord[];
-  recentFindings: ResearchFindingRecord[];
-  recentSources: ResearchSourceRecord[];
-  recentExperiments: ExperimentResultRecord[];
-  latestEvaluation: EvaluationRecord | null;
-  latestProjection: ResearchProjectionRecord | null;
-  latestWorkerRun: WorkerRunRecord | null;
-  blockedReason?: string;
-  attachments: AttachmentRecord[];
-  activeWorkerProgress: ActiveWorkerProgressRecord[];
-  logs: string[];
+export type WorkspaceProjection = {
+  workspace: WorkspaceRecord | null;
+  objectives: ObjectiveRecord[];
+  activeObjective: ObjectiveRecord | null;
+  branches: BranchRecord[];
+  tasks: TaskRecord[];
+  runs: RunRecord[];
+  sources: SourceRecord[];
+  sourceChunks: SourceChunkRecord[];
+  findings: FindingRecord[];
+  evaluations: EvaluationRecord[];
+  experiments: ExperimentRecord[];
+  metrics: MetricRecord[];
+  workerRuns: WorkerRunRecord[];
+  leases: WorktreeLeaseRecord[];
 };
 
-export type AttachmentImportRequest = {
-  workspacePath?: string;
-  objectiveId?: string;
-  filePaths: string[];
+export type StatusSnapshot = {
+  workspacePath: string;
+  schemaVersion: number;
+  daemon: {
+    running: boolean;
+    pid?: number;
+    socketPath: string;
+  };
+  activeObjective: ObjectiveRecord | null;
+  activeRun: RunRecord | null;
+  branches: BranchRecord[];
+  queue: TaskRecord[];
+  activeTasks: TaskRecord[];
+  recentEvaluations: EvaluationRecord[];
+  recentFindings: FindingRecord[];
 };
 
-export type ObjectiveCreateRequest = {
-  workspacePath?: string;
+export type RpcMethod =
+  | "daemon.status"
+  | "daemon.stop"
+  | "status.snapshot"
+  | "objective.create"
+  | "objective.list"
+  | "objective.show"
+  | "run.start"
+  | "run.pause"
+  | "run.resume"
+  | "run.stop"
+  | "source.add";
+
+export type RpcRequest = {
+  id: string;
+  method: RpcMethod;
+  params?: Record<string, unknown>;
+};
+
+export type RpcResponse = {
+  id: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+};
+
+export type ObjectiveCreateInput = {
   title?: string;
   objective: string;
   successCriteria?: string[];
 };
 
-export type ObjectiveSelectionRequest = {
-  workspacePath?: string;
-  objectiveId: string;
+export type SourceAddInput = {
+  objectiveId?: string;
+  branchId?: string;
+  inputs: string[];
 };
 
-export type ObjectiveRunControlRequest = {
-  workspacePath?: string;
-  runId?: string;
-  objectiveId?: string;
+export type DaemonStatus = {
+  running: boolean;
+  pid?: number;
+  socketPath: string;
+  workspacePath: string;
+};
+
+export type WorkspaceArchiveResult = {
+  archivedPath: string;
 };

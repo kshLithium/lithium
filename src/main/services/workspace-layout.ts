@@ -2,94 +2,94 @@ import path from "node:path";
 import { PROJECT_SCHEMA_VERSION } from "../../shared/types";
 
 export const LITHIUM_DIR = ".lithium";
-export const PROJECT_FILE = "project.json";
-export const ACTIVITY_LOG = "activity.log";
-export const PROMPT_LOG = "prompt-log.jsonl";
-export const WORKER_HISTORY_LOG = "worker-history.jsonl";
 
-export const PROJECT_VOLATILE_RUNTIME_DIRECTORIES = ["artifacts", "logs"] as const;
-
-export const LEGACY_LITHIUM_SENTINELS = [
+export const LEGACY_LITHIUM_ROOT_ITEMS = [
   "project.json",
-  "research/objectives",
-  "research/branches",
-  "research/sources",
-  "research/work-items",
-  "research/runs",
+  "research.db",
+  "activity.log",
+  "prompt-log.jsonl",
+  "worker-history.jsonl",
   "threads",
-  ["convers", "ation"].join(""),
-  ["autom", "ation"].join(""),
-  ["orchestr", "ator"].join(""),
-  "decisions",
-  "tasks",
-  "routes"
+  "conversation",
+  "automation"
 ] as const;
 
 export type ProjectPaths = {
+  workspacePath: string;
   root: string;
-  projectFile: string;
+  stateDir: string;
+  runtimeDir: string;
+  artifactsDir: string;
+  indexDir: string;
   researchDbFile: string;
-  artifactRoot: string;
-  logsDir: string;
+  socketPath: string;
+  pidFile: string;
+  daemonLogFile: string;
+  leasesDir: string;
+  tempEnvDir: string;
   workerRunsDir: string;
-  oracleSessionsDir: string;
-  evaluatorDir: string;
-  experimentManifestDir: string;
-  sourceArtifactsDir: string;
-  researchPatchesDir: string;
+  strategistRunsDir: string;
+  evaluatorRunsDir: string;
+  sourceBodiesDir: string;
+  sourceTextsDir: string;
+  sourceChunksDir: string;
+  experimentDir: string;
+  patchesDir: string;
+  attachmentsDir: string;
   worktreesDir: string;
-  activityLog: string;
-  promptLog: string;
-  workerHistoryLog: string;
-  workspaceAttachmentsDir: string;
+  legacyResearchDbFile: string;
 };
 
 export type ArtifactPaths = {
   id: string;
-  jsonPath: string;
+  basePath: string;
   stdoutPath: string;
   stderrPath: string;
   outputPath: string;
-  transcriptPath: string;
 };
 
 export function buildProjectPaths(workspacePath: string): ProjectPaths {
   const root = path.join(workspacePath, LITHIUM_DIR);
-  const artifactRoot = path.join(root, "artifacts");
-  const logsDir = path.join(root, "logs");
+  const stateDir = path.join(root, "state");
+  const runtimeDir = path.join(root, "runtime");
+  const artifactsDir = path.join(root, "artifacts");
+  const indexDir = path.join(root, "index");
 
   return {
+    workspacePath,
     root,
-    projectFile: path.join(root, PROJECT_FILE),
-    researchDbFile: path.join(root, "research.db"),
-    artifactRoot,
-    logsDir,
-    workerRunsDir: path.join(artifactRoot, "worker-runs"),
-    oracleSessionsDir: path.join(artifactRoot, "oracle-sessions"),
-    evaluatorDir: path.join(artifactRoot, "evaluator"),
-    experimentManifestDir: path.join(artifactRoot, "experiment-manifests"),
-    sourceArtifactsDir: path.join(artifactRoot, "source-artifacts"),
-    researchPatchesDir: path.join(artifactRoot, "patches"),
-    worktreesDir: path.join(artifactRoot, "worktrees"),
-    activityLog: path.join(logsDir, ACTIVITY_LOG),
-    promptLog: path.join(logsDir, PROMPT_LOG),
-    workerHistoryLog: path.join(logsDir, WORKER_HISTORY_LOG),
-    workspaceAttachmentsDir: path.join(workspacePath, "attachments")
+    stateDir,
+    runtimeDir,
+    artifactsDir,
+    indexDir,
+    researchDbFile: path.join(stateDir, "research.db"),
+    socketPath: path.join(runtimeDir, "daemon.sock"),
+    pidFile: path.join(runtimeDir, "daemon.pid"),
+    daemonLogFile: path.join(runtimeDir, "daemon.log"),
+    leasesDir: path.join(runtimeDir, "leases"),
+    tempEnvDir: path.join(runtimeDir, "temp-envs"),
+    workerRunsDir: path.join(artifactsDir, "worker-runs"),
+    strategistRunsDir: path.join(artifactsDir, "strategist"),
+    evaluatorRunsDir: path.join(artifactsDir, "evaluator"),
+    sourceBodiesDir: path.join(artifactsDir, "source-bodies"),
+    sourceTextsDir: path.join(artifactsDir, "source-texts"),
+    sourceChunksDir: path.join(indexDir, "source-chunks"),
+    experimentDir: path.join(artifactsDir, "experiments"),
+    patchesDir: path.join(artifactsDir, "patches"),
+    attachmentsDir: path.join(artifactsDir, "attachments"),
+    worktreesDir: path.join(artifactsDir, "worktrees"),
+    legacyResearchDbFile: path.join(root, "research.db")
   };
 }
 
-export function projectRuntimeDirectories(paths: ProjectPaths) {
-  return [paths.artifactRoot, paths.logsDir, paths.worktreesDir];
-}
-
 export function createArtifactPaths(directory: string, id: string): ArtifactPaths {
+  const basePath = path.join(directory, id);
   return {
     id,
-    jsonPath: path.join(directory, `${id}.json`),
-    stdoutPath: path.join(directory, `${id}.stdout.log`),
-    stderrPath: path.join(directory, `${id}.stderr.log`),
-    outputPath: path.join(directory, `${id}.output.txt`),
-    transcriptPath: path.join(directory, `${id}.transcript.log`)
+    basePath,
+    stdoutPath: `${basePath}.stdout.log`,
+    stderrPath: `${basePath}.stderr.log`,
+    outputPath: `${basePath}.output.txt`
   };
 }
 
