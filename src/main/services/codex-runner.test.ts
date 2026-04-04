@@ -50,8 +50,8 @@ describe("CodexRunner", () => {
       "ko"
     );
 
-    expect(prompt).toContain("당신은 현재 저장소 안에서 작업하는 자동화 실행 에이전트입니다.");
+    expect(prompt).toContain("당신은 현재 저장소 안에서 작업하는 연구 실행 에이전트입니다.");
     expect(prompt).toContain("JSON 앞뒤에 마크다운 코드 펜스를 쓰지 마세요.");
-    expect(prompt).not.toContain("You are the automation execution agent working inside the active repository.");
+    expect(prompt).not.toContain("You are the research execution agent working inside the active repository.");
   });
 });

@@ -6,64 +6,41 @@ export const PROJECT_FILE = "project.json";
 export const ACTIVITY_LOG = "activity.log";
 export const PROMPT_LOG = "prompt-log.jsonl";
 export const WORKER_HISTORY_LOG = "worker-history.jsonl";
-export const PROJECT_VOLATILE_RUNTIME_DIRECTORIES = [
-  "automation/sessions",
-  "automation/cycles",
-  "automation/steps",
-  "automation/checkpoints",
-  "orchestrator"
+
+export const PROJECT_VOLATILE_RUNTIME_DIRECTORIES = ["artifacts", "logs"] as const;
+
+export const LEGACY_LITHIUM_SENTINELS = [
+  "project.json",
+  "research/objectives",
+  "research/branches",
+  "research/sources",
+  "research/work-items",
+  "research/runs",
+  "threads",
+  ["convers", "ation"].join(""),
+  ["autom", "ation"].join(""),
+  ["orchestr", "ator"].join(""),
+  "decisions",
+  "tasks",
+  "routes"
 ] as const;
 
 export type ProjectPaths = {
   root: string;
-  threadsDir: string;
-  conversationEntriesDir: string;
-  attachmentRecordsDir: string;
-  decisionsDir: string;
-  tasksDir: string;
-  runsDir: string;
-  routesDir: string;
-  automationDir: string;
-  automationSessionsDir: string;
-  automationCyclesDir: string;
-  automationStepsDir: string;
-  automationCheckpointsDir: string;
-  orchestratorDir: string;
-  researchDir: string;
-  researchObjectivesDir: string;
-  researchBranchesDir: string;
-  researchSourcesDir: string;
-  researchFindingsDir: string;
-  researchHypothesesDir: string;
-  researchWorkItemsDir: string;
-  researchEvaluationsDir: string;
-  researchProjectionsDir: string;
-  researchRunsDir: string;
-  researchOracleSessionsDir: string;
-  researchExperimentSpecsDir: string;
-  researchExperimentResultsDir: string;
-  researchMetricsDir: string;
-  researchPatchesDir: string;
-  researchEventsFile: string;
-  researchCurrentProjectionFile: string;
-  researchCurrentRunFile: string;
-  legacyV2Dir: string;
-  worktreesDir: string;
-  contextDir: string;
-  memoryDir: string;
   projectFile: string;
+  researchDbFile: string;
+  artifactRoot: string;
+  logsDir: string;
+  workerRunsDir: string;
+  oracleSessionsDir: string;
+  evaluatorDir: string;
+  experimentManifestDir: string;
+  sourceArtifactsDir: string;
+  researchPatchesDir: string;
+  worktreesDir: string;
   activityLog: string;
   promptLog: string;
   workerHistoryLog: string;
-  contextBundle: string;
-  projectMemoryFile: string;
-  memoryBriefFile: string;
-  memoryOpenQuestionsFile: string;
-  memorySessionSummaryFile: string;
-  memoryDurableContextFile: string;
-  memoryWorkingContextFile: string;
-  memoryEvidenceContextFile: string;
-  memoryPreferencesFile: string;
   workspaceAttachmentsDir: string;
 };
 
@@ -78,70 +55,31 @@ export type ArtifactPaths = {
 
 export function buildProjectPaths(workspacePath: string): ProjectPaths {
   const root = path.join(workspacePath, LITHIUM_DIR);
+  const artifactRoot = path.join(root, "artifacts");
+  const logsDir = path.join(root, "logs");
 
   return {
     root,
-    threadsDir: path.join(root, "threads"),
-    conversationEntriesDir: path.join(root, "conversation"),
-    attachmentRecordsDir: path.join(root, "attachments"),
-    decisionsDir: path.join(root, "decisions"),
-    tasksDir: path.join(root, "tasks"),
-    runsDir: path.join(root, "runs"),
-    routesDir: path.join(root, "routes"),
-    automationDir: path.join(root, "automation"),
-    automationSessionsDir: path.join(root, "automation", "sessions"),
-    automationCyclesDir: path.join(root, "automation", "cycles"),
-    automationStepsDir: path.join(root, "automation", "steps"),
-    automationCheckpointsDir: path.join(root, "automation", "checkpoints"),
-    orchestratorDir: path.join(root, "orchestrator"),
-    researchDir: path.join(root, "research"),
-    researchObjectivesDir: path.join(root, "research", "objectives"),
-    researchBranchesDir: path.join(root, "research", "branches"),
-    researchSourcesDir: path.join(root, "research", "sources"),
-    researchFindingsDir: path.join(root, "research", "findings"),
-    researchHypothesesDir: path.join(root, "research", "hypotheses"),
-    researchWorkItemsDir: path.join(root, "research", "work-items"),
-    researchEvaluationsDir: path.join(root, "research", "evaluations"),
-    researchProjectionsDir: path.join(root, "research", "projections"),
-    researchRunsDir: path.join(root, "research", "runs"),
-    researchOracleSessionsDir: path.join(root, "research", "oracle-sessions"),
-    researchExperimentSpecsDir: path.join(root, "research", "experiment-specs"),
-    researchExperimentResultsDir: path.join(root, "research", "experiment-results"),
-    researchMetricsDir: path.join(root, "research", "metrics"),
-    researchPatchesDir: path.join(root, "research", "patches"),
-    researchEventsFile: path.join(root, "research", "events.jsonl"),
-    researchCurrentProjectionFile: path.join(root, "research", "projections", "current.json"),
-    researchCurrentRunFile: path.join(root, "research", "runs", "current.json"),
-    legacyV2Dir: path.join(root, "legacy", "v2"),
-    worktreesDir: path.join(root, "research", "worktrees"),
-    contextDir: path.join(root, "context"),
-    memoryDir: path.join(root, "memory"),
     projectFile: path.join(root, PROJECT_FILE),
-    activityLog: path.join(root, ACTIVITY_LOG),
-    promptLog: path.join(root, PROMPT_LOG),
-    workerHistoryLog: path.join(root, WORKER_HISTORY_LOG),
-    contextBundle: path.join(root, "context", "current-context.md"),
-    projectMemoryFile: path.join(root, "memory", "project-memory.json"),
-    memoryBriefFile: path.join(root, "memory", "brief.md"),
-    memoryOpenQuestionsFile: path.join(root, "memory", "open-questions.md"),
-    memorySessionSummaryFile: path.join(root, "memory", "session-summary.md"),
-    memoryDurableContextFile: path.join(root, "memory", "durable-context.md"),
-    memoryWorkingContextFile: path.join(root, "memory", "working-context.md"),
-    memoryEvidenceContextFile: path.join(root, "memory", "evidence-context.md"),
-    memoryPreferencesFile: path.join(root, "memory", "preferences.json"),
+    researchDbFile: path.join(root, "research.db"),
+    artifactRoot,
+    logsDir,
+    workerRunsDir: path.join(artifactRoot, "worker-runs"),
+    oracleSessionsDir: path.join(artifactRoot, "oracle-sessions"),
+    evaluatorDir: path.join(artifactRoot, "evaluator"),
+    experimentManifestDir: path.join(artifactRoot, "experiment-manifests"),
+    sourceArtifactsDir: path.join(artifactRoot, "source-artifacts"),
+    researchPatchesDir: path.join(artifactRoot, "patches"),
+    worktreesDir: path.join(artifactRoot, "worktrees"),
+    activityLog: path.join(logsDir, ACTIVITY_LOG),
+    promptLog: path.join(logsDir, PROMPT_LOG),
+    workerHistoryLog: path.join(logsDir, WORKER_HISTORY_LOG),
     workspaceAttachmentsDir: path.join(workspacePath, "attachments")
   };
 }
 
 export function projectRuntimeDirectories(paths: ProjectPaths) {
-  return [
-    paths.automationDir,
-    paths.automationSessionsDir,
-    paths.automationCyclesDir,
-    paths.automationStepsDir,
-    paths.automationCheckpointsDir,
-    paths.orchestratorDir
-  ];
+  return [paths.artifactRoot, paths.logsDir, paths.worktreesDir];
 }
 
 export function createArtifactPaths(directory: string, id: string): ArtifactPaths {

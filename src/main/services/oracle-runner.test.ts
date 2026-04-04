@@ -6,14 +6,14 @@ import {
   buildLocalOracleBinCandidates,
   clearOracleBrowserSessionRestoreState,
   classifyInteractiveSessionRecovery,
-  extractReusableChatgptConversationUrl,
+  extractReusableChatgptSessionUrl,
   findOracleBrowserPids,
   normalizeOracleSessionId,
   OracleRunner,
   readOracleSessionError,
   resolveOracleLaunchOptions,
   resolveOracleSessionLogPath,
-  shouldReuseSavedChatgptConversation,
+  shouldReuseSavedChatgptSessionUrl,
   shouldAutoRecoverInteractiveSession,
   shouldCleanupOracleBrowserAfterSuccess,
   shouldRetryInteractiveSessionRecovery
@@ -38,31 +38,31 @@ describe("OracleRunner", () => {
   });
 
   it("opens the first browser run visibly so the user can sign in once", () => {
-    expect(resolveOracleLaunchOptions({}, { strategistSessionReady: false })).toEqual({
+    expect(resolveOracleLaunchOptions({}, { oracleSessionReady: false })).toEqual({
       browserVisible: true,
       browserHeadless: false,
       keepBrowser: true,
       manualLogin: true,
-      strategistSessionReady: false,
+      oracleSessionReady: false,
       chatgptUrl: undefined
     });
   });
 
   it("runs later browser calls headlessly once the strategist session is ready", () => {
-    expect(resolveOracleLaunchOptions({}, { strategistSessionReady: true })).toEqual({
+    expect(resolveOracleLaunchOptions({}, { oracleSessionReady: true })).toEqual({
       browserVisible: false,
       browserHeadless: false,
       keepBrowser: false,
       manualLogin: true,
-      strategistSessionReady: true,
+      oracleSessionReady: true,
       chatgptUrl: undefined
     });
   });
 
   it("keeps saved ChatGPT conversation reuse disabled unless explicitly requested", () => {
-    expect(shouldReuseSavedChatgptConversation({})).toBe(false);
+    expect(shouldReuseSavedChatgptSessionUrl({})).toBe(false);
     expect(
-      shouldReuseSavedChatgptConversation({
+      shouldReuseSavedChatgptSessionUrl({
         LITHIUM_ORACLE_REUSE_CHATGPT_URL: "1"
       })
     ).toBe(true);
@@ -70,7 +70,7 @@ describe("OracleRunner", () => {
 
   it("extracts a reusable conversation URL from session metadata", () => {
     expect(
-      extractReusableChatgptConversationUrl(
+      extractReusableChatgptSessionUrl(
         JSON.stringify({
           browser: {
             runtime: {
@@ -82,7 +82,7 @@ describe("OracleRunner", () => {
     ).toBe("https://chatgpt.com/c/abc123");
 
     expect(
-      extractReusableChatgptConversationUrl(
+      extractReusableChatgptSessionUrl(
         JSON.stringify({
           browser: {
             runtime: {
@@ -94,7 +94,7 @@ describe("OracleRunner", () => {
     ).toBe("https://chatgpt.com/c/xyz789");
 
     expect(
-      extractReusableChatgptConversationUrl(
+      extractReusableChatgptSessionUrl(
         JSON.stringify({
           browser: {
             runtime: {
@@ -187,14 +187,14 @@ describe("OracleRunner", () => {
         {
           LITHIUM_ORACLE_HEADLESS: "1"
         },
-        { strategistSessionReady: true }
+        { oracleSessionReady: true }
       )
     ).toEqual({
       browserVisible: false,
       browserHeadless: true,
       keepBrowser: false,
       manualLogin: true,
-      strategistSessionReady: true,
+      oracleSessionReady: true,
       chatgptUrl: undefined
     });
   });
@@ -240,7 +240,7 @@ describe("OracleRunner", () => {
         browserHeadless: false,
         keepBrowser: false,
         manualLogin: true,
-        strategistSessionReady: true,
+        oracleSessionReady: true,
         chatgptUrl: "https://chatgpt.com/g/example/project"
       },
       files: ["/tmp/context.md"]
@@ -279,7 +279,7 @@ describe("OracleRunner", () => {
         browserHeadless: true,
         keepBrowser: false,
         manualLogin: true,
-        strategistSessionReady: true,
+        oracleSessionReady: true,
         chatgptUrl: undefined
       },
       files: ["/tmp/context.md"]
@@ -310,7 +310,7 @@ describe("OracleRunner", () => {
         browserHeadless: false,
         keepBrowser: true,
         manualLogin: true,
-        strategistSessionReady: false,
+        oracleSessionReady: false,
         chatgptUrl: undefined
       },
       files: ["/tmp/context.md"]
@@ -341,7 +341,7 @@ describe("OracleRunner", () => {
         browserHeadless: false,
         keepBrowser: true,
         manualLogin: true,
-        strategistSessionReady: false,
+        oracleSessionReady: false,
         chatgptUrl: undefined
       },
       files: ["/tmp/context.md"]
@@ -371,7 +371,7 @@ describe("OracleRunner", () => {
           browserHeadless: false,
           keepBrowser: false,
           manualLogin: true,
-          strategistSessionReady: true,
+          oracleSessionReady: true,
           chatgptUrl: undefined
         }
       )
@@ -385,7 +385,7 @@ describe("OracleRunner", () => {
           browserHeadless: false,
           keepBrowser: true,
           manualLogin: true,
-          strategistSessionReady: false,
+          oracleSessionReady: false,
           chatgptUrl: undefined
         }
       )
@@ -401,7 +401,7 @@ describe("OracleRunner", () => {
           browserHeadless: false,
           keepBrowser: false,
           manualLogin: true,
-          strategistSessionReady: true,
+          oracleSessionReady: true,
           chatgptUrl: undefined
         }
       )
@@ -415,7 +415,7 @@ describe("OracleRunner", () => {
         browserHeadless: true,
         keepBrowser: false,
         manualLogin: true,
-        strategistSessionReady: true,
+        oracleSessionReady: true,
         chatgptUrl: undefined
       })
     ).toBe("fresh-browser");
@@ -426,7 +426,7 @@ describe("OracleRunner", () => {
         browserHeadless: true,
         keepBrowser: false,
         manualLogin: true,
-        strategistSessionReady: true,
+        oracleSessionReady: true,
         chatgptUrl: undefined
       })
     ).toBe("fresh-browser");
@@ -439,7 +439,7 @@ describe("OracleRunner", () => {
           browserHeadless: true,
           keepBrowser: false,
           manualLogin: true,
-          strategistSessionReady: true,
+          oracleSessionReady: true,
           chatgptUrl: undefined
         }
       )
@@ -448,12 +448,12 @@ describe("OracleRunner", () => {
 
   it("classifies truncated strategist outputs for a fresh chat recovery", () => {
     expect(
-      classifyInteractiveSessionRecovery("Oracle strategist output looked truncated or non-final: I’m", {
+      classifyInteractiveSessionRecovery("Oracle planner output looked truncated or non-final: I’m", {
         browserVisible: false,
         browserHeadless: true,
         keepBrowser: false,
         manualLogin: true,
-        strategistSessionReady: true,
+        oracleSessionReady: true,
         chatgptUrl: "https://chatgpt.com/c/example"
       })
     ).toBe("fresh-chat");
@@ -467,7 +467,7 @@ describe("OracleRunner", () => {
           browserHeadless: false,
           keepBrowser: true,
           manualLogin: true,
-          strategistSessionReady: false,
+          oracleSessionReady: false,
           chatgptUrl: undefined
         },
         {}
@@ -481,7 +481,7 @@ describe("OracleRunner", () => {
           browserHeadless: false,
           keepBrowser: true,
           manualLogin: true,
-          strategistSessionReady: false,
+          oracleSessionReady: false,
           chatgptUrl: undefined
         },
         {
@@ -497,7 +497,7 @@ describe("OracleRunner", () => {
           browserHeadless: false,
           keepBrowser: false,
           manualLogin: true,
-          strategistSessionReady: true,
+          oracleSessionReady: true,
           chatgptUrl: undefined
         },
         {}
@@ -534,7 +534,7 @@ describe("OracleRunner", () => {
       browserHeadless: false,
       keepBrowser: false,
       manualLogin: true,
-      strategistSessionReady: true,
+      oracleSessionReady: true,
       chatgptUrl: undefined
     };
 

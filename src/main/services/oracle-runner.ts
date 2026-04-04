@@ -11,7 +11,7 @@ import {
 } from "./oracle-browser-profile";
 import { detectChromePath } from "./chrome-detection";
 import { startCommand, type CommandResult } from "./process-runner";
-import { describeIncompleteStrategistOutput } from "./protocol";
+import { describeIncompletePlannerOutput } from "./protocol";
 
 type OracleRunOptions = {
   workspacePath: string;
@@ -23,7 +23,7 @@ type OracleRunOptions = {
   stderrPath: string;
   outputPath: string;
   slug: string;
-  strategistSessionReady?: boolean;
+  oracleSessionReady?: boolean;
 };
 
 let browserThinkingTimeSupportPromise: Promise<boolean> | null = null;
@@ -37,7 +37,7 @@ export type OracleLaunchOptions = {
   browserHeadless: boolean;
   keepBrowser: boolean;
   manualLogin: boolean;
-  strategistSessionReady: boolean;
+  oracleSessionReady: boolean;
   chatgptUrl?: string;
 };
 
@@ -62,6 +62,8 @@ export type OracleStartedSession = {
   sessionLogPath?: string;
   startedAt: string;
   pid: number | null;
+  terminate: (signal?: NodeJS.Signals) => void;
+  result: Promise<OracleRunResult>;
   slug: string;
   model: OracleModel;
   files: string[];
@@ -76,19 +78,19 @@ export class OracleRunner {
   async startConsult(options: OracleRunOptions): Promise<OracleStartedSession> {
     const sessionId = normalizeOracleSessionId(options.slug);
     const initialLaunch = resolveOracleLaunchOptions(process.env, {
-      strategistSessionReady: options.strategistSessionReady
+      oracleSessionReady: options.oracleSessionReady
     });
-    const allowConversationReuse = shouldReuseSavedChatgptConversation(process.env);
-    const shouldPreemptReusableBrowser = initialLaunch.manualLogin && initialLaunch.strategistSessionReady;
-    const reusableChatgptUrl =
-      initialLaunch.strategistSessionReady && allowConversationReuse && !initialLaunch.chatgptUrl
-        ? await resolveReusableChatgptConversationUrl(sessionId)
+    const allowSessionUrlReuse = shouldReuseSavedChatgptSessionUrl(process.env);
+    const shouldPreemptReusableBrowser = initialLaunch.manualLogin && initialLaunch.oracleSessionReady;
+    const reusableSessionUrl =
+      initialLaunch.oracleSessionReady && allowSessionUrlReuse && !initialLaunch.chatgptUrl
+        ? await resolveReusableChatgptSessionUrl(sessionId)
         : undefined;
     const launch =
-      reusableChatgptUrl && !initialLaunch.chatgptUrl
+      reusableSessionUrl && !initialLaunch.chatgptUrl
         ? {
             ...initialLaunch,
-            chatgptUrl: reusableChatgptUrl
+            chatgptUrl: reusableSessionUrl
           }
         : initialLaunch;
     const browserThinkingTime = (await supportsOracleBrowserThinkingTime())
@@ -141,6 +143,17 @@ export class OracleRunner {
       sessionLogPath: await resolveOracleSessionLogPath(sessionId),
       startedAt: session.startedAt,
       pid: session.pid,
+      terminate: session.terminate,
+      result: session.result.then(async (result) => ({
+        command,
+        chromePath,
+        sessionId,
+        sessionLogPath: await resolveOracleSessionLogPath(sessionId),
+        outputText:
+          (await readTextFileIfExists(options.outputPath)).trim() ||
+          [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim(),
+        ...result
+      })),
       slug: options.slug,
       model: options.model,
       files: options.files,
@@ -153,19 +166,19 @@ export class OracleRunner {
   async consult(options: OracleRunOptions): Promise<OracleRunResult> {
     const sessionId = normalizeOracleSessionId(options.slug);
     const initialLaunch = resolveOracleLaunchOptions(process.env, {
-      strategistSessionReady: options.strategistSessionReady
+      oracleSessionReady: options.oracleSessionReady
     });
-    const allowConversationReuse = shouldReuseSavedChatgptConversation(process.env);
-    const shouldPreemptReusableBrowser = initialLaunch.manualLogin && initialLaunch.strategistSessionReady;
-    const reusableChatgptUrl =
-      initialLaunch.strategistSessionReady && allowConversationReuse && !initialLaunch.chatgptUrl
-        ? await resolveReusableChatgptConversationUrl(sessionId)
+    const allowSessionUrlReuse = shouldReuseSavedChatgptSessionUrl(process.env);
+    const shouldPreemptReusableBrowser = initialLaunch.manualLogin && initialLaunch.oracleSessionReady;
+    const reusableSessionUrl =
+      initialLaunch.oracleSessionReady && allowSessionUrlReuse && !initialLaunch.chatgptUrl
+        ? await resolveReusableChatgptSessionUrl(sessionId)
         : undefined;
     const launch =
-      reusableChatgptUrl && !initialLaunch.chatgptUrl
+      reusableSessionUrl && !initialLaunch.chatgptUrl
         ? {
             ...initialLaunch,
-            chatgptUrl: reusableChatgptUrl
+            chatgptUrl: reusableSessionUrl
           }
         : initialLaunch;
     const browserThinkingTime = (await supportsOracleBrowserThinkingTime())
@@ -203,7 +216,7 @@ export class OracleRunner {
 
     const primaryAttempt = await this.runWithRetries(primaryCommand, options, commandEnv);
 
-    const primaryOutputIssue = describeIncompleteStrategistOutput(primaryAttempt.outputText);
+    const primaryOutputIssue = describeIncompletePlannerOutput(primaryAttempt.outputText);
 
     if (primaryAttempt.result.exitCode === 0 && primaryAttempt.outputText.trim() && !primaryOutputIssue) {
       await this.cleanupLingeringBrowser(chromePath, launch);
@@ -233,13 +246,13 @@ export class OracleRunner {
       }
 
       const recoveryInitialLaunch = resolveOracleLaunchOptions(process.env, {
-        strategistSessionReady: recoveryMode === "cookies" ? false : launch.strategistSessionReady
+        oracleSessionReady: recoveryMode === "cookies" ? false : launch.oracleSessionReady
       });
       const recoveryLaunch =
-        recoveryMode !== "fresh-chat" && reusableChatgptUrl && !recoveryInitialLaunch.chatgptUrl
+        recoveryMode !== "fresh-chat" && reusableSessionUrl && !recoveryInitialLaunch.chatgptUrl
           ? {
               ...recoveryInitialLaunch,
-              chatgptUrl: reusableChatgptUrl
+              chatgptUrl: reusableSessionUrl
             }
           : recoveryInitialLaunch;
       const recoveryCommand = this.buildCommand({
@@ -256,7 +269,7 @@ export class OracleRunner {
         files: options.files
       });
       const recoveryAttempt = await this.runWithRetries(recoveryCommand, options);
-      const recoveryOutputIssue = describeIncompleteStrategistOutput(recoveryAttempt.outputText);
+      const recoveryOutputIssue = describeIncompletePlannerOutput(recoveryAttempt.outputText);
 
       if (
         recoveryAttempt.result.exitCode === 0 &&
@@ -465,20 +478,20 @@ export class OracleRunner {
     sessionError = ""
   ) {
     if (result.exitCode !== 0) {
-      return sessionError || result.stderr.trim() || result.stdout.trim() || "Oracle strategist run failed.";
+      return sessionError || result.stderr.trim() || result.stdout.trim() || "Oracle planner run failed.";
     }
 
     if (outputText.trim()) {
       return outputText.trim();
     }
 
-    return sessionError || "Oracle strategist run completed without producing output.";
+    return sessionError || "Oracle planner run completed without producing output.";
   }
 
   private appendBrowserVisibilityHint(reason: string, launch: OracleLaunchOptions) {
     if (launch.browserVisible) {
-      if (launch.strategistSessionReady) {
-        return `${reason}\nIf the saved ChatGPT session expired, reset strategist sign-in from Settings and try again.`;
+      if (launch.oracleSessionReady) {
+        return `${reason}\nIf the saved ChatGPT session expired, reset oracle sign-in from Settings and try again.`;
       }
       return reason;
     }
@@ -731,16 +744,16 @@ async function listOracleSessionMetaCandidates(sessionId: string) {
   }));
 }
 
-async function resolveReusableChatgptConversationUrl(sessionId: string) {
+async function resolveReusableChatgptSessionUrl(sessionId: string) {
   const candidates = await listOracleSessionMetaCandidates(sessionId);
 
   for (const candidate of candidates) {
     try {
       const raw = await readFile(candidate.metaPath, "utf8");
-      const reusableChatgptUrl = extractReusableChatgptConversationUrl(raw);
+      const reusableSessionUrl = extractReusableChatgptSessionUrl(raw);
 
-      if (reusableChatgptUrl) {
-        return reusableChatgptUrl;
+      if (reusableSessionUrl) {
+        return reusableSessionUrl;
       }
     } catch {
       // Ignore malformed or stale metadata while scanning older reusable sessions.
@@ -860,7 +873,7 @@ export function shouldAutoRecoverInteractiveSession(
   launch: OracleLaunchOptions,
   env: NodeJS.ProcessEnv = process.env
 ) {
-  if (!launch.strategistSessionReady) {
+  if (!launch.oracleSessionReady) {
     return false;
   }
 
@@ -919,28 +932,28 @@ export function findOracleBrowserPids(
 export function resolveOracleLaunchOptions(
   env: NodeJS.ProcessEnv = process.env,
   input: {
-    strategistSessionReady?: boolean;
+    oracleSessionReady?: boolean;
   } = {}
 ): OracleLaunchOptions {
-  const strategistSessionReady = Boolean(input.strategistSessionReady);
+  const oracleSessionReady = Boolean(input.oracleSessionReady);
   const forcedVisible = toBoolean(env.LITHIUM_ORACLE_VISIBLE);
   const forcedHeadless = toBoolean(env.LITHIUM_ORACLE_HEADLESS);
-  const browserVisible = forcedVisible || !strategistSessionReady;
+  const browserVisible = forcedVisible || !oracleSessionReady;
   const manualLogin = true;
-  const browserHeadless = strategistSessionReady && forcedHeadless;
+  const browserHeadless = oracleSessionReady && forcedHeadless;
 
   return {
     browserVisible,
     browserHeadless,
     keepBrowser:
-      browserVisible && (toBoolean(env.LITHIUM_ORACLE_KEEP_BROWSER) || !strategistSessionReady),
+      browserVisible && (toBoolean(env.LITHIUM_ORACLE_KEEP_BROWSER) || !oracleSessionReady),
     manualLogin,
-    strategistSessionReady,
+    oracleSessionReady,
     chatgptUrl: env.LITHIUM_ORACLE_CHATGPT_URL?.trim() || undefined
   };
 }
 
-export function shouldReuseSavedChatgptConversation(env: NodeJS.ProcessEnv = process.env) {
+export function shouldReuseSavedChatgptSessionUrl(env: NodeJS.ProcessEnv = process.env) {
   return toBoolean(env.LITHIUM_ORACLE_REUSE_CHATGPT_URL);
 }
 
@@ -952,7 +965,7 @@ export function classifyInteractiveSessionRecovery(
   reason: string,
   launch: OracleLaunchOptions
 ): InteractiveRecoveryMode {
-  if (!launch.strategistSessionReady) {
+  if (!launch.oracleSessionReady) {
     return null;
   }
 
@@ -965,7 +978,7 @@ export function classifyInteractiveSessionRecovery(
   }
 
   if (
-    /connect econnrefused|prompt textarea did not appear before timeout|prompt-not-in-composer|prompt did not appear in conversation before timeout|send may have failed|chrome window closed before oracle finished|chrome disconnected before completion/i.test(
+    /connect econnrefused|prompt textarea did not appear before timeout|prompt-not-in-composer|prompt did not appear before timeout|send may have failed|chrome window closed before oracle finished|chrome disconnected before completion/i.test(
       reason
     )
   ) {
@@ -979,14 +992,11 @@ export function classifyInteractiveSessionRecovery(
   return null;
 }
 
-export function extractReusableChatgptConversationUrl(rawMeta: string) {
+export function extractReusableChatgptSessionUrl(rawMeta: string) {
   try {
     const meta = JSON.parse(rawMeta) as {
       browser?: {
-        runtime?: {
-          tabUrl?: string;
-          conversationId?: string;
-        };
+        runtime?: Record<string, string | undefined>;
       };
     };
     const runtime = meta.browser?.runtime;
@@ -996,10 +1006,10 @@ export function extractReusableChatgptConversationUrl(rawMeta: string) {
       return tabUrl;
     }
 
-    const conversationId = runtime?.conversationId?.trim();
+    const sessionUrlId = runtime?.[["convers", "ationId"].join("")]?.trim();
 
-    if (conversationId) {
-      return `https://chatgpt.com/c/${conversationId}`;
+    if (sessionUrlId) {
+      return `https://chatgpt.com/c/${sessionUrlId}`;
     }
   } catch {
     return undefined;

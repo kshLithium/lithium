@@ -77,7 +77,7 @@ export class ChatgptAuthRunner {
     const chromePath = await detectChromePath();
 
     if (!chromePath) {
-      throw new Error("Chrome or Chromium is required before ChatGPT Pro strategist runs can start.");
+      throw new Error("Chrome or Chromium is required before ChatGPT Pro planner runs can start.");
     }
 
     if (!(await exists(ORACLE_BROWSER_PROFILE_PATH))) {

@@ -11,7 +11,6 @@ import type {
 export class ChatProjectionService {
   buildProjection(input: {
     projectionId: string;
-    threadId: string;
     objective: ResearchObjectiveRecord;
     branches: ResearchBranchRecord[];
     findings: ResearchFindingRecord[];
@@ -42,7 +41,6 @@ export class ChatProjectionService {
 
     return {
       id: input.projectionId,
-      threadId: input.threadId,
       objectiveId: input.objective.id,
       objectiveTitle: input.objective.title,
       status,
@@ -56,7 +54,7 @@ export class ChatProjectionService {
       activeRunId: input.run?.id,
       activeRunStatus: input.run?.status,
       blockedReason: input.run?.blockedReason,
-      activeSlots: runningItems.map((workItem) => `${workItem.executor ?? "builder-edit"}:${workItem.title}`),
+      activeSlots: runningItems.map((workItem) => `${workItem.executor ?? "builder"}:${workItem.title}`),
       lastBranchSwitch:
         activeBranch?.id && activeBranch.id !== input.objective.activeBranchId
           ? `${activeBranch.title}`

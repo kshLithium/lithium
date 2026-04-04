@@ -1,48 +1,48 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types";
-import { sanitizeAppSettings, sanitizeAutomationPromptLanguage } from "./app-settings-store";
+import { sanitizeAppSettings, sanitizePromptLanguage } from "./app-settings-store";
 
 describe("AppSettingsStore sanitizers", () => {
   it("defaults autopilot prompt language to auto", () => {
-    expect(sanitizeAutomationPromptLanguage(undefined)).toBe("auto");
+    expect(sanitizePromptLanguage(undefined)).toBe("auto");
     expect(sanitizeAppSettings({})).toMatchObject({
-      autopilotPromptLanguage: DEFAULT_APP_SETTINGS.autopilotPromptLanguage
+      promptLanguage: DEFAULT_APP_SETTINGS.promptLanguage
     });
   });
 
   it("preserves valid autopilot prompt language values", () => {
-    expect(sanitizeAutomationPromptLanguage("ko")).toBe("ko");
-    expect(sanitizeAutomationPromptLanguage("en")).toBe("en");
-    expect(sanitizeAutomationPromptLanguage("auto")).toBe("auto");
+    expect(sanitizePromptLanguage("ko")).toBe("ko");
+    expect(sanitizePromptLanguage("en")).toBe("en");
+    expect(sanitizePromptLanguage("auto")).toBe("auto");
   });
 
   it("falls back to auto for invalid autopilot prompt language values", () => {
-    expect(sanitizeAutomationPromptLanguage("jp")).toBe("auto");
+    expect(sanitizePromptLanguage("jp")).toBe("auto");
     expect(
       sanitizeAppSettings({
-        autopilotPromptLanguage: "jp"
-      }).autopilotPromptLanguage
+        promptLanguage: "jp"
+      }).promptLanguage
     ).toBe("auto");
   });
 
   it("defaults strategist settings to Pro extended", () => {
-    expect(DEFAULT_APP_SETTINGS.strategistModel).toBe("gpt-5.4-pro");
-    expect(DEFAULT_APP_SETTINGS.strategistReasoningIntensity).toBe("extended");
+    expect(DEFAULT_APP_SETTINGS.oracleModel).toBe("gpt-5.4-pro");
+    expect(DEFAULT_APP_SETTINGS.oracleThinkingTime).toBe("extended");
     expect(sanitizeAppSettings({})).toMatchObject({
-      strategistModel: "gpt-5.4-pro",
-      strategistReasoningIntensity: "extended"
+      oracleModel: "gpt-5.4-pro",
+      oracleThinkingTime: "extended"
     });
   });
 
   it("normalizes legacy strategist settings to Pro extended", () => {
     expect(
       sanitizeAppSettings({
-        strategistModel: "legacy-model",
-        strategistReasoningIntensity: "legacy-intensity"
+        oracleModel: "legacy-model",
+        oracleThinkingTime: "legacy-intensity"
       })
     ).toMatchObject({
-      strategistModel: "gpt-5.4-pro",
-      strategistReasoningIntensity: "extended"
+      oracleModel: "gpt-5.4-pro",
+      oracleThinkingTime: "extended"
     });
   });
 });

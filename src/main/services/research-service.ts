@@ -1,38 +1,32 @@
 import { readFile } from "node:fs/promises";
-import path from "node:path";
-import {
-  type ActiveWorkerProgressRecord,
-  type AppSettings,
-  type AttachmentImportRequest,
-  type AttachmentRecord,
-  type EvaluationRecord,
-  type ObjectiveCreateRequest,
-  type ObjectiveRunControlRequest,
-  type ObjectiveSelectionRequest,
-  type ProjectRecord,
-  type ResearchBranchRecord,
-  type ResearchObjectiveRecord,
-  type ResearchRunRecord,
-  type ResearchWorkItemRecord,
-  type RunRecord,
-  type WorkspaceSnapshot,
-  DEFAULT_APP_SETTINGS
+import type {
+  AppSettings,
+  AttachmentImportRequest,
+  ObjectiveCreateRequest,
+  ObjectiveRunControlRequest,
+  ObjectiveSelectionRequest,
+  ProjectRecord,
+  ResearchBranchRecord,
+  ResearchObjectiveRecord,
+  ResearchRunRecord,
+  WorkerRunRecord,
+  WorkspaceSnapshot
 } from "../../shared/types";
-import { RecordStore } from "./record-store";
-import { buildProjectPaths } from "./workspace-layout";
-import { CodexRunner } from "./codex-runner";
-import { ChatgptAuthRunner } from "./chatgpt-auth-runner";
+import { DEFAULT_APP_SETTINGS } from "../../shared/types";
+import { ArtifactService } from "../research/artifact-service";
 import { EvaluatorRunner } from "../research/evaluator-runner";
 import { OracleWorkerPool } from "../research/oracle-worker-pool";
-import { ResearchEngine } from "../research/engine";
+import { ResearchResultProcessor } from "../research/result-processor";
+import { RuntimeRegistry } from "../research/runtime-registry";
+import { ResearchScheduler } from "../research/scheduler";
 import { ResearchStateStore } from "../research/state-store";
-import { WorktreeManager } from "../research/worktree-manager";
-import { ArtifactService } from "../research/artifact-service";
-import { ProgressRegistry } from "../research/progress-registry";
-import { RuntimeContextBuilder } from "../research/runtime-context-builder";
-import { SourceIngestService } from "../research/source-ingest-service";
-import { AttachmentIngestService } from "../research/attachment-ingest-service";
+import { ResearchRunCoordinator } from "../research/run-coordinator";
+import { ResearchWatchdog } from "../research/watchdog";
 import { WorkerGateway, type WorkerDispatchResult } from "../research/worker-gateway";
+import { WorktreeManager } from "../research/worktree-manager";
+import { CodexRunner } from "./codex-runner";
+import { ChatgptAuthRunner } from "./chatgpt-auth-runner";
+import { buildProjectPaths } from "./workspace-layout";
 
 type ResearchServiceDependencies = {
   stateStore?: ResearchStateStore;
@@ -41,31 +35,31 @@ type ResearchServiceDependencies = {
   codexRunner?: CodexRunner;
   chatgptAuthRunner?: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   worktreeManager?: WorktreeManager;
+  artifactService?: ArtifactService;
+  workerGateway?: WorkerGateway;
+  runtimeRegistry?: RuntimeRegistry<WorkerDispatchResult>;
+  scheduler?: ResearchScheduler;
+  resultProcessor?: ResearchResultProcessor;
+  watchdog?: ResearchWatchdog<WorkerDispatchResult>;
+  coordinator?: ResearchRunCoordinator;
   getAppSettings?: () => Promise<AppSettings>;
 };
 
-type RunControlState = {
-  stopRequested: boolean;
-};
-
 export class ResearchService {
-  private readonly records = new RecordStore();
   private readonly stateStore: ResearchStateStore;
   private readonly oracleWorkerPool: OracleWorkerPool;
   private readonly evaluatorRunner: EvaluatorRunner;
   private readonly codexRunner: CodexRunner;
   private readonly chatgptAuthRunner: Pick<ChatgptAuthRunner, "signIn" | "prepareReusableSession">;
   private readonly worktreeManager: WorktreeManager;
-  private readonly engine: ResearchEngine;
   private readonly artifactService: ArtifactService;
-  private readonly runtimeContextBuilder: RuntimeContextBuilder;
-  private readonly sourceIngestService: SourceIngestService;
-  private readonly attachmentIngestService: AttachmentIngestService;
   private readonly workerGateway: WorkerGateway;
-  private readonly progressRegistry: ProgressRegistry;
-  private readonly getAppSettings: () => Promise<AppSettings>;
+  private readonly runtimeRegistry: RuntimeRegistry<WorkerDispatchResult>;
+  private readonly scheduler: ResearchScheduler;
+  private readonly resultProcessor: ResearchResultProcessor;
+  private readonly watchdog: ResearchWatchdog<WorkerDispatchResult>;
+  private readonly coordinator: ResearchRunCoordinator;
   private readonly loopPromises = new Map<string, Promise<void>>();
-  private readonly runControls = new Map<string, RunControlState>();
   private currentWorkspacePath: string;
 
   constructor(workspacePath: string, deps: ResearchServiceDependencies = {}) {
@@ -76,33 +70,46 @@ export class ResearchService {
     this.codexRunner = deps.codexRunner ?? new CodexRunner();
     this.chatgptAuthRunner = deps.chatgptAuthRunner ?? new ChatgptAuthRunner();
     this.worktreeManager = deps.worktreeManager ?? new WorktreeManager();
-    this.engine = new ResearchEngine({
-      stateStore: this.stateStore
-    });
-    this.artifactService = new ArtifactService({
-      stateStore: this.stateStore
-    });
-    this.runtimeContextBuilder = new RuntimeContextBuilder({
-      stateStore: this.stateStore,
-      artifactService: this.artifactService
-    });
-    this.sourceIngestService = new SourceIngestService({
-      stateStore: this.stateStore
-    });
-    this.attachmentIngestService = new AttachmentIngestService({
-      sourceIngestService: this.sourceIngestService
-    });
-    this.workerGateway = new WorkerGateway({
-      stateStore: this.stateStore,
-      oracleWorkerPool: this.oracleWorkerPool,
-      evaluatorRunner: this.evaluatorRunner,
-      codexRunner: this.codexRunner,
-      worktreeManager: this.worktreeManager,
-      artifactService: this.artifactService,
-      getAppSettings: deps.getAppSettings ?? (async () => DEFAULT_APP_SETTINGS)
-    });
-    this.progressRegistry = new ProgressRegistry();
-    this.getAppSettings = deps.getAppSettings ?? (async () => DEFAULT_APP_SETTINGS);
+    this.artifactService =
+      deps.artifactService ??
+      new ArtifactService({
+        stateStore: this.stateStore
+      });
+    this.workerGateway =
+      deps.workerGateway ??
+      new WorkerGateway({
+        stateStore: this.stateStore,
+        oracleWorkerPool: this.oracleWorkerPool,
+        evaluatorRunner: this.evaluatorRunner,
+        codexRunner: this.codexRunner,
+        worktreeManager: this.worktreeManager,
+        artifactService: this.artifactService,
+        getAppSettings: deps.getAppSettings ?? (async () => DEFAULT_APP_SETTINGS)
+      });
+    this.runtimeRegistry = deps.runtimeRegistry ?? new RuntimeRegistry<WorkerDispatchResult>();
+    this.scheduler =
+      deps.scheduler ??
+      new ResearchScheduler({
+        stateStore: this.stateStore
+      });
+    this.resultProcessor =
+      deps.resultProcessor ??
+      new ResearchResultProcessor({
+        stateStore: this.stateStore,
+        artifactService: this.artifactService,
+        workerGateway: this.workerGateway
+      });
+    this.watchdog = deps.watchdog ?? new ResearchWatchdog<WorkerDispatchResult>();
+    this.coordinator =
+      deps.coordinator ??
+      new ResearchRunCoordinator({
+        stateStore: this.stateStore,
+        scheduler: this.scheduler,
+        resultProcessor: this.resultProcessor,
+        runtimeRegistry: this.runtimeRegistry,
+        watchdog: this.watchdog,
+        workerGateway: this.workerGateway
+      });
   }
 
   setSelectedWorkspacePath(workspacePath: string) {
@@ -112,17 +119,15 @@ export class ResearchService {
   async initWorkspace(workspacePath = this.currentWorkspacePath) {
     const project = await this.stateStore.initWorkspace(workspacePath);
     await this.stateStore.migrateLegacyWorkspace(workspacePath);
-    await this.cleanupOrphanedWorktrees(workspacePath);
-    await this.engine.recoverInterruptedRuns(workspacePath);
+    await this.resultProcessor.recoverInterruptedRuns(workspacePath);
     const snapshot = await this.getWorkspaceSnapshot(workspacePath);
 
     if (!snapshot.activeObjective && snapshot.objectives.length === 0) {
-      const created = await this.createObjective({
+      return await this.createObjective({
         workspacePath,
         title: project.name,
         objective: `Advance the next research outcome for ${project.name}.`
       });
-      return created;
     }
 
     return snapshot;
@@ -131,43 +136,40 @@ export class ResearchService {
   async getWorkspaceSnapshot(workspacePath = this.currentWorkspacePath): Promise<WorkspaceSnapshot> {
     await this.stateStore.initWorkspace(workspacePath);
     const project = await this.stateStore.readProject(workspacePath);
-    const activeObjectiveId = project?.activeObjectiveId?.trim() || null;
-    const scoped = await this.stateStore.readState(workspacePath, activeObjectiveId);
-    const activeObjective =
-      scoped.latestObjective ??
-      (await this.stateStore.readState(workspacePath)).latestObjective ??
+    const fullState = await this.stateStore.readState(workspacePath);
+    const activeObjectiveId = project?.activeObjectiveId?.trim() || fullState.latestObjective?.id || null;
+    const scopedState = activeObjectiveId ? await this.stateStore.readState(workspacePath, activeObjectiveId) : fullState;
+    const activeObjective = scopedState.latestObjective ?? null;
+    const activeRun =
+      (activeObjective
+        ? scopedState.runs.find((entry) => entry.id === activeObjective.activeRunId)
+        : null) ??
+      scopedState.latestRun ??
       null;
-    const objectiveId = activeObjective?.id ?? null;
-    const activeState = objectiveId ? await this.stateStore.readState(workspacePath, objectiveId) : scoped;
-    const attachments = await this.listAttachments(workspacePath, objectiveId);
-    const latestBuilderRun = objectiveId ? await this.readLatestBuilderRun(workspacePath, objectiveId) : null;
+    const attachments = await this.stateStore.listAttachments(workspacePath, activeObjective?.id ?? null);
+    const latestWorkerRun = activeObjective ? await this.readLatestWorkerRun(workspacePath, activeObjective.id) : null;
     const logs = await this.readRecentLogs(workspacePath);
     const recentExperiments =
-      objectiveId ? await this.artifactService.readRecentExperimentResults(workspacePath, objectiveId, 5) : [];
+      activeObjective ? await this.artifactService.readRecentExperimentResults(workspacePath, activeObjective.id, 5) : [];
 
     return {
       project,
-      activeObjectiveId: objectiveId,
+      activeObjectiveId: activeObjective?.id ?? null,
       activeObjective,
-      objectives: (await this.stateStore.readState(workspacePath)).objectives,
-      activeRun:
-        (activeObjective
-          ? activeState.runs.find((entry) => entry.id === activeObjective.activeRunId) ?? activeState.latestRun
-          : activeState.latestRun) ?? null,
-      runs: activeState.runs,
-      branches: activeState.branches,
-      queue: activeState.workItems.filter((entry) => entry.status === "pending" || entry.status === "running"),
-      recentFindings: activeState.findings.slice(0, 8),
-      recentSources: activeState.sources.slice(0, 8),
+      objectives: fullState.objectives,
+      activeRun,
+      runs: scopedState.runs,
+      branches: scopedState.branches,
+      queue: scopedState.workItems.filter((entry) => entry.status === "pending" || entry.status === "running"),
+      recentFindings: scopedState.findings.slice(0, 8),
+      recentSources: scopedState.sources.slice(0, 8),
       recentExperiments,
-      latestEvaluation: activeState.latestEvaluation,
-      latestProjection: activeState.latestProjection,
-      latestBuilderRun,
-      blockedReason:
-        activeState.runs.find((entry) => entry.id === activeObjective?.activeRunId)?.blockedReason ??
-        activeState.latestRun?.blockedReason,
+      latestEvaluation: scopedState.latestEvaluation,
+      latestProjection: scopedState.latestProjection,
+      latestWorkerRun,
+      blockedReason: activeRun?.blockedReason,
       attachments,
-      activeWorkerProgress: this.progressRegistry.list(workspacePath, objectiveId),
+      activeWorkerProgress: this.runtimeRegistry.listProgress(workspacePath, activeObjective?.id ?? null),
       logs
     };
   }
@@ -180,33 +182,30 @@ export class ResearchService {
     const workspacePath = request.workspacePath ?? this.currentWorkspacePath;
     const project = await this.stateStore.initWorkspace(workspacePath);
     const now = new Date().toISOString();
-    const objectiveAllocation = await this.stateStore.allocateObjective(workspacePath);
-    const branchAllocation = await this.stateStore.allocateBranch(workspacePath);
-    const hypothesisAllocation = await this.stateStore.allocateHypothesis(workspacePath);
-    const objectiveId = objectiveAllocation.id;
+    const objectiveId = (await this.stateStore.allocateObjective(workspacePath)).id;
+    const branchId = (await this.stateStore.allocateBranch(workspacePath)).id;
+    const hypothesisId = (await this.stateStore.allocateHypothesis(workspacePath)).id;
     const title = request.title?.trim() || request.objective.trim();
     const objective: ResearchObjectiveRecord = {
       id: objectiveId,
-      threadId: objectiveId,
       title,
       objective: request.objective.trim(),
       summary: request.objective.trim(),
       status: "pending",
       successCriteria: request.successCriteria?.filter(Boolean) ?? [
         "Advance the highest-value branch with bounded work.",
-        "Capture evidence and evaluations after each executed work item."
+        "Capture source-grounded evidence and structured experiment records."
       ],
-      activeBranchId: branchAllocation.id,
+      activeBranchId: branchId,
       sourceIds: [],
-      branchIds: [branchAllocation.id],
+      branchIds: [branchId],
       createdAt: now,
       updatedAt: now
     };
     await this.stateStore.writeObjective(workspacePath, objective);
     await this.stateStore.writeBranch(workspacePath, {
-      id: branchAllocation.id,
+      id: branchId,
       objectiveId,
-      threadId: objectiveId,
       title: "Primary branch",
       hypothesis: request.objective.trim(),
       status: "active",
@@ -220,10 +219,9 @@ export class ResearchService {
       lastUpdatedAt: now
     });
     await this.stateStore.writeHypothesis(workspacePath, {
-      id: hypothesisAllocation.id,
+      id: hypothesisId,
       objectiveId,
-      branchId: branchAllocation.id,
-      threadId: objectiveId,
+      branchId,
       statement: request.objective.trim(),
       status: "open",
       confidence: 0.5,
@@ -237,7 +235,7 @@ export class ResearchService {
       updatedAt: now
     });
     await this.stateStore.appendActivity(workspacePath, `objective created ${objectiveId}: ${title}`);
-    await this.engine.materializeProjection(workspacePath, objectiveId);
+    await this.resultProcessor.materializeProjection(workspacePath, objectiveId);
     return await this.getWorkspaceSnapshot(workspacePath);
   }
 
@@ -246,7 +244,6 @@ export class ResearchService {
     const project = await this.stateStore.initWorkspace(workspacePath);
     const state = await this.stateStore.readState(workspacePath);
     const objective = state.objectives.find((entry) => entry.id === request.objectiveId);
-
     if (!objective) {
       throw new Error(`Objective not found: ${request.objectiveId}`);
     }
@@ -256,7 +253,7 @@ export class ResearchService {
       activeObjectiveId: objective.id,
       updatedAt: new Date().toISOString()
     });
-    await this.engine.materializeProjection(workspacePath, objective.id);
+    await this.resultProcessor.materializeProjection(workspacePath, objective.id);
     return await this.getWorkspaceSnapshot(workspacePath);
   }
 
@@ -264,7 +261,6 @@ export class ResearchService {
     const workspacePath = request.workspacePath ?? this.currentWorkspacePath;
     const snapshot = await this.initWorkspace(workspacePath);
     const objective = resolveRequestedObjective(snapshot, request.objectiveId);
-
     if (!objective) {
       throw new Error("No active objective is available.");
     }
@@ -274,15 +270,17 @@ export class ResearchService {
     }
 
     const scoped = await this.stateStore.readState(workspacePath, objective.id);
-    const existingActive = scoped.runs.find((entry) => entry.status === "active" || entry.status === "blocked" || entry.status === "paused") ?? null;
-    const now = new Date().toISOString();
+    const existingRun =
+      scoped.runs.find((entry) => entry.id === objective.activeRunId) ??
+      scoped.runs.find((entry) => entry.status === "active" || entry.status === "blocked" || entry.status === "paused") ??
+      null;
 
-    if (existingActive?.status === "active") {
-      this.ensureRunLoop(workspacePath, existingActive.id);
+    if (existingRun?.status === "active") {
+      this.ensureRunLoop(workspacePath, existingRun.id);
       return await this.getWorkspaceSnapshot(workspacePath);
     }
 
-    if (existingActive?.status === "blocked") {
+    if (existingRun?.status === "paused" || existingRun?.status === "blocked") {
       return await this.getWorkspaceSnapshot(workspacePath);
     }
 
@@ -293,27 +291,26 @@ export class ResearchService {
       blockedReason = error instanceof Error ? error.message : String(error);
     }
 
-    const run =
-      existingActive ??
-      ({
-        id: (await this.stateStore.allocateRun(workspacePath)).id,
-        objectiveId: objective.id,
-        threadId: objective.id,
-        status: blockedReason ? "blocked" : "active",
-        blockedReason,
-        slotBudget: {
-          codexSlots: 1,
-          oracleSlots: 2,
-          maxTotalWorkItems: 12,
-          completedWorkItems: 0
-        },
-        activeWorkItemIds: [],
-        oracleSessionSlugs: [],
-        worktreeLeases: [],
-        createdAt: now,
-        updatedAt: now,
-        startedAt: now
-      } satisfies ResearchRunRecord);
+    const now = new Date().toISOString();
+    const run: ResearchRunRecord = {
+      id: (await this.stateStore.allocateRun(workspacePath)).id,
+      objectiveId: objective.id,
+      status: blockedReason ? "blocked" : "active",
+      blockedReason,
+      slotBudget: {
+        codexSlots: 1,
+        oracleSlots: 2,
+        maxTotalWorkItems: 12,
+        completedWorkItems: 0
+      },
+      activeWorkItemIds: [],
+      oracleSessionSlugs: [],
+      worktreeLeases: [],
+      dispatchPaused: false,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: now
+    };
 
     await this.stateStore.writeRun(workspacePath, run);
     await this.stateStore.writeObjective(workspacePath, {
@@ -326,7 +323,7 @@ export class ResearchService {
       workspacePath,
       run.status === "active" ? `run started ${run.id}` : `run blocked ${run.id}: ${run.blockedReason ?? "unknown"}`
     );
-    await this.engine.materializeProjection(workspacePath, objective.id);
+    await this.resultProcessor.materializeProjection(workspacePath, objective.id);
 
     if (run.status === "active") {
       this.ensureRunLoop(workspacePath, run.id);
@@ -339,19 +336,19 @@ export class ResearchService {
     const workspacePath = request.workspacePath ?? this.currentWorkspacePath;
     const snapshot = await this.getWorkspaceSnapshot(workspacePath);
     const run = resolveRequestedRun(snapshot, request.runId);
-
     if (!run) {
       throw new Error("No active run is available.");
     }
 
-    this.getRunControl(workspacePath, run.id).stopRequested = true;
     await this.stateStore.writeRun(workspacePath, {
       ...run,
       status: "paused",
+      dispatchPaused: true,
       updatedAt: new Date().toISOString()
     });
+    await this.stateStore.appendActivity(workspacePath, `run paused ${run.id}`);
     if (snapshot.activeObjective) {
-      await this.engine.materializeProjection(workspacePath, snapshot.activeObjective.id);
+      await this.resultProcessor.materializeProjection(workspacePath, snapshot.activeObjective.id);
     }
     return await this.getWorkspaceSnapshot(workspacePath);
   }
@@ -360,7 +357,6 @@ export class ResearchService {
     const workspacePath = request.workspacePath ?? this.currentWorkspacePath;
     const snapshot = await this.getWorkspaceSnapshot(workspacePath);
     const run = resolveRequestedRun(snapshot, request.runId);
-
     if (!run) {
       throw new Error("No run is available to resume.");
     }
@@ -369,11 +365,18 @@ export class ResearchService {
       await this.chatgptAuthRunner.prepareReusableSession?.();
     }
 
-    await this.engine.resumeRun({
-      workspacePath,
-      run
+    await this.stateStore.writeRun(workspacePath, {
+      ...run,
+      status: "active",
+      blockedReason: undefined,
+      stopReason: undefined,
+      dispatchPaused: false,
+      updatedAt: new Date().toISOString()
     });
     await this.stateStore.appendActivity(workspacePath, `run resumed ${run.id}`);
+    if (snapshot.activeObjective) {
+      await this.resultProcessor.materializeProjection(workspacePath, snapshot.activeObjective.id);
+    }
     this.ensureRunLoop(workspacePath, run.id);
     return await this.getWorkspaceSnapshot(workspacePath);
   }
@@ -382,24 +385,26 @@ export class ResearchService {
     const workspacePath = request.workspacePath ?? this.currentWorkspacePath;
     const snapshot = await this.getWorkspaceSnapshot(workspacePath);
     const run = resolveRequestedRun(snapshot, request.runId);
-
     if (!run) {
       throw new Error("No run is available to stop.");
     }
 
-    this.getRunControl(workspacePath, run.id).stopRequested = true;
-    const stoppedRun: ResearchRunRecord = {
+    this.coordinator.terminateRun(run.id);
+    const now = new Date().toISOString();
+    await this.stateStore.writeRun(workspacePath, {
       ...run,
       status: "failed",
       stopReason: "Run stopped by the user.",
       activeWorkItemIds: [],
       oracleSessionSlugs: [],
-      updatedAt: new Date().toISOString(),
-      endedAt: new Date().toISOString()
-    };
-    await this.stateStore.writeRun(workspacePath, stoppedRun);
-    await this.cleanupRecordedRunLeases(workspacePath, stoppedRun);
+      dispatchPaused: true,
+      updatedAt: now,
+      endedAt: now
+    });
     await this.stateStore.appendActivity(workspacePath, `run stopped ${run.id}`);
+    if (snapshot.activeObjective) {
+      await this.resultProcessor.materializeProjection(workspacePath, snapshot.activeObjective.id);
+    }
     return await this.getWorkspaceSnapshot(workspacePath);
   }
 
@@ -407,26 +412,23 @@ export class ResearchService {
     const workspacePath = request.workspacePath ?? this.currentWorkspacePath;
     const snapshot = await this.getWorkspaceSnapshot(workspacePath);
     const objective = resolveRequestedObjective(snapshot, request.objectiveId);
-
     if (!objective) {
       throw new Error("Create or select an objective before importing attachments.");
     }
 
+    const scoped = await this.stateStore.readState(workspacePath, objective.id);
     const branch =
-      (await this.stateStore.readState(workspacePath, objective.id)).branches.find(
-        (entry) => entry.id === objective.activeBranchId
-      ) ?? null;
-    await this.attachmentIngestService.importAttachments({
+      scoped.branches.find((entry) => entry.id === objective.activeBranchId) ??
+      scoped.latestBranch ??
+      null;
+    await this.resultProcessor.importAttachments({
       workspacePath,
       objective,
       branch,
       filePaths: request.filePaths
     });
-    await this.stateStore.appendActivity(
-      workspacePath,
-      `attachments imported for ${objective.id}: ${request.filePaths.map((entry) => path.basename(entry)).join(", ")}`
-    );
-
+    await this.stateStore.appendActivity(workspacePath, `attachments imported for ${objective.id}`);
+    await this.resultProcessor.materializeProjection(workspacePath, objective.id);
     return await this.getWorkspaceSnapshot(workspacePath);
   }
 
@@ -453,324 +455,24 @@ export class ResearchService {
   private ensureRunLoop(workspacePath: string, runId: string) {
     const key = `${workspacePath}::${runId}`;
     const existing = this.loopPromises.get(key);
-
     if (existing) {
       return existing;
     }
 
-    const loop = this.processRunLoop(workspacePath, runId).finally(() => {
+    const loop = this.coordinator.runLoop(workspacePath, runId).finally(() => {
       this.loopPromises.delete(key);
-      this.runControls.delete(key);
     });
     this.loopPromises.set(key, loop);
     return loop;
   }
 
-  private async processRunLoop(workspacePath: string, runId: string) {
-    while (true) {
-      const snapshot = await this.getWorkspaceSnapshot(workspacePath);
-      const objective = snapshot.activeObjective;
-      const run = snapshot.runs.find((entry) => entry.id === runId) ?? snapshot.activeRun;
-
-      if (!objective || !run || run.status !== "active") {
-        return;
-      }
-
-      const control = this.getRunControl(workspacePath, run.id);
-      if (control.stopRequested) {
-        return;
-      }
-
-      const runtimeContext = await this.buildRuntimeContext(workspacePath, objective.id);
-      await this.engine.ensureRunnableQueue({
-        workspacePath,
-        objective,
-        run,
-        runtimeContext
-      });
-
-      const batch = await this.engine.pickDispatchBatch({
-        workspacePath,
-        objectiveId: objective.id,
-        runId: run.id
-      });
-
-      if (!batch) {
-        return;
-      }
-
-      const selected = [...batch.oracleWorkItems, ...batch.codexWorkItems];
-
-      if (selected.length === 0) {
-        await this.engine.materializeProjection(workspacePath, objective.id);
-        return;
-      }
-
-      await this.stateStore.appendActivity(
-        workspacePath,
-        `scheduler selected ${selected.map((entry) => `${entry.executor}:${entry.id}`).join(", ")}`
-      );
-      await this.engine.markWorkItemsRunning({
-        workspacePath,
-        run: batch.run,
-        workItems: selected
-      });
-      selected.forEach((workItem) => this.progressRegistry.set(workspacePath, run.id, objective.id, workItem));
-
-      const results = await Promise.all(
-        selected.map(async (workItem) => ({
-          workItem,
-          result: await this.safeExecuteWorkItem({
-            workspacePath,
-            objective,
-            run,
-            workItem,
-            runtimeContext
-          })
-        }))
-      );
-
-      for (const { workItem, result } of results) {
-        try {
-          const currentState = await this.stateStore.readState(workspacePath, objective.id);
-          const currentRun = currentState.runs.find((entry) => entry.id === run.id) ?? currentState.latestRun;
-          const currentObjective = currentState.latestObjective ?? objective;
-          const currentBranch = currentState.branches.find((entry) => entry.id === workItem.branchId) ?? null;
-
-          if (!currentRun) {
-            continue;
-          }
-
-          if (result.lease) {
-            await this.persistLeaseOnRun(workspacePath, currentRun, result.lease);
-          }
-
-          if (
-            result.status === "failed" &&
-            result.infraFailure &&
-            (workItem.executor === "oracle-planner" || workItem.executor === "oracle-research")
-          ) {
-            await this.handleOracleInfraFailure({
-              workspacePath,
-              run: currentRun,
-              workItem,
-              result
-            });
-            continue;
-          }
-
-          const evaluation = await this.createEvaluation({
-            workspacePath,
-            objective: currentObjective,
-            branch: currentBranch,
-            workItem,
-            executionResult: result,
-            runtimeContext
-          });
-
-          if (workItem.executor === "oracle-planner" && result.handoff) {
-            await this.engine.applyPlannerHandoff({
-              workspacePath,
-              objective: currentObjective,
-              run: currentRun,
-              workItem,
-              handoff: result.handoff,
-              oracleSessionSlug: result.oracleSessionSlug ?? workItem.oracleSessionSlug ?? workItem.id
-            });
-          }
-
-          const promotion = await this.workerGateway.promotePatchArtifact({
-            workspacePath,
-            workItem: {
-              ...workItem,
-              patchArtifactPath: result.patchArtifactPath ?? workItem.patchArtifactPath
-            },
-            evaluation
-          });
-
-          await this.engine.finalizeOutcome({
-            workspacePath,
-            objective: currentObjective,
-            run: currentRun,
-            workItem,
-            summary: result.summary,
-            status: result.status,
-            evaluation,
-            changedFiles: result.changedFiles,
-            risks: result.risks,
-            openQuestions: result.openQuestions,
-            runActions: result.runActions,
-            handoff: result.handoff,
-            runId: result.runId,
-            worktreePath: result.worktreePath,
-            oracleSessionSlug: result.oracleSessionSlug,
-            patchArtifactPath: result.patchArtifactPath,
-            promotionStatus: promotion.promotionStatus,
-            promotionError: promotion.promotionError,
-            lease: result.lease
-          });
-        } finally {
-          await this.finishWorkItemLifecycle({
-            workspacePath,
-            runId: run.id,
-            workItemId: workItem.id,
-            lease: result.lease
-          });
-        }
-      }
-
-      await this.engine.materializeProjection(workspacePath, objective.id);
-    }
-  }
-
-  private async safeExecuteWorkItem(input: {
-    workspacePath: string;
-    objective: ResearchObjectiveRecord;
-    run: ResearchRunRecord;
-    workItem: ResearchWorkItemRecord;
-    runtimeContext: string;
-  }): Promise<WorkerDispatchResult> {
-    const branch = await this.resolveBranch(input.workspacePath, input.workItem.branchId);
-
-    return await this.workerGateway.dispatch({
-      workspacePath: input.workspacePath,
-      objective: input.objective,
-      branch,
-      run: input.run,
-      workItem: input.workItem,
-      runtimeContext: input.runtimeContext
-    });
-  }
-
-  private async handleOracleInfraFailure(input: {
-    workspacePath: string;
-    run: ResearchRunRecord;
-    workItem: ResearchWorkItemRecord;
-    result: WorkerDispatchResult;
-  }) {
-    const now = new Date().toISOString();
-    await this.stateStore.writeWorkItem(input.workspacePath, {
-      ...input.workItem,
-      status: "blocked",
-      updatedAt: now,
-      oracleSessionSlug: input.result.oracleSessionSlug ?? input.workItem.oracleSessionSlug
-    });
-    await this.engine.blockRun({
-      workspacePath: input.workspacePath,
-      run: {
-        ...input.run,
-        activeWorkItemIds: input.run.activeWorkItemIds.filter((entry) => entry !== input.workItem.id),
-        oracleSessionSlugs: input.run.oracleSessionSlugs.filter((entry) => entry !== input.result.oracleSessionSlug)
-      },
-      reason: input.result.summary
-    });
-    await this.stateStore.appendEvent(input.workspacePath, {
-      id: `${input.workItem.id}-infra-failed`,
-      threadId: input.workItem.threadId,
-      objectiveId: input.workItem.objectiveId,
-      branchId: input.workItem.branchId,
-      workItemId: input.workItem.id,
-      type: "work-item.blocked",
-      payload: {
-        executor: input.workItem.executor,
-        reason: input.result.summary
-      },
-      createdAt: now
-    });
-  }
-
-  private async createEvaluation(input: {
-    workspacePath: string;
-    objective: ResearchObjectiveRecord;
-    branch: ResearchBranchRecord | null;
-    workItem: ResearchWorkItemRecord;
-    executionResult: WorkerDispatchResult;
-    runtimeContext: string;
-  }) {
-    const branch = input.branch ?? (await this.resolveBranch(input.workspacePath, input.workItem.branchId));
-
-    if (!branch) {
-      throw new Error(`Branch not found for evaluation of ${input.workItem.id}`);
-    }
-
-    const result =
-      input.executionResult.evaluatorDecision ??
-      (await this.evaluatorRunner.evaluate({
-        workspacePath: input.workspacePath,
-        branchTitle: branch.title,
-        workItemTitle: input.workItem.title,
-        executionSummary: [
-          input.executionResult.summary,
-          input.executionResult.patchArtifactPath
-            ? `PATCH_ARTIFACT: ${input.executionResult.patchArtifactPath}`
-            : "",
-          ...(input.executionResult.runActions ?? []).map((entry) => `RUN_ACTION: ${entry}`)
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        runtimeContext: input.runtimeContext
-      })).decision;
-    const allocation = await this.stateStore.allocateEvaluation(input.workspacePath);
-    const now = new Date().toISOString();
-
-    return {
-      id: allocation.id,
-      objectiveId: input.objective.id,
-      branchId: branch.id,
-      threadId: input.objective.id,
-      workItemId: input.workItem.id,
-      verdict: input.executionResult.status === "failed" ? "kill" : result.verdict,
-      scoreDelta: input.executionResult.status === "failed" ? Math.min(result.scoreDelta, -0.1) : result.scoreDelta,
-      summary: result.summary,
-      rationale: result.rationale,
-      followupPrompt: result.followupPrompt,
-      createdAt: now,
-      updatedAt: now
-    } satisfies EvaluationRecord;
-  }
-
-  private async buildRuntimeContext(workspacePath: string, objectiveId: string) {
-    return await this.runtimeContextBuilder.build(workspacePath, objectiveId);
-  }
-
-  private async resolveBranch(workspacePath: string, branchId: string) {
-    return (await this.stateStore.readState(workspacePath)).branches.find((entry) => entry.id === branchId) ?? null;
-  }
-
-  private getRunControl(workspacePath: string, runId: string) {
-    const key = `${workspacePath}::${runId}`;
-    const existing = this.runControls.get(key);
-
-    if (existing) {
-      return existing;
-    }
-
-    const created: RunControlState = {
-      stopRequested: false
-    };
-    this.runControls.set(key, created);
-    return created;
-  }
-
-  private async listAttachmentRecords(workspacePath: string) {
-    return await this.records.readRecordDirectory<AttachmentRecord>(buildProjectPaths(workspacePath).attachmentRecordsDir);
-  }
-
-  private async listAttachments(workspacePath: string, objectiveId: string | null) {
-    const records = await this.listAttachmentRecords(workspacePath);
-    return records
-      .filter((record) => !objectiveId || record.objectiveId === objectiveId)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  }
-
-  private async readBuilderRuns(workspacePath: string, objectiveId: string) {
-    return (await this.records.readRecordDirectory<RunRecord>(buildProjectPaths(workspacePath).runsDir))
-      .filter((entry) => entry.threadId === objectiveId)
-      .sort((left, right) => (right.endedAt ?? right.startedAt).localeCompare(left.endedAt ?? left.startedAt));
-  }
-
-  private async readLatestBuilderRun(workspacePath: string, objectiveId: string) {
-    return (await this.readBuilderRuns(workspacePath, objectiveId))[0] ?? null;
+  private async readLatestWorkerRun(workspacePath: string, objectiveId: string) {
+    const workerRuns = await this.stateStore.listWorkerRuns<WorkerRunRecord>(workspacePath);
+    return (
+      workerRuns
+        .filter((entry) => entry.objectiveId === objectiveId)
+        .sort((left, right) => (right.endedAt ?? right.startedAt).localeCompare(left.endedAt ?? left.startedAt))[0] ?? null
+    );
   }
 
   private async readRecentLogs(workspacePath: string) {
@@ -782,131 +484,18 @@ export class ResearchService {
       .slice(-40)
       .reverse();
   }
-
-  private async persistLeaseOnRun(
-    workspacePath: string,
-    run: ResearchRunRecord,
-    lease: NonNullable<WorkerDispatchResult["lease"]>
-  ) {
-    if (run.worktreeLeases.some((entry) => entry.id === lease.id)) {
-      return;
-    }
-
-    await this.stateStore.writeRun(workspacePath, {
-      ...run,
-      worktreeLeases: [...run.worktreeLeases, lease],
-      updatedAt: new Date().toISOString()
-    });
-  }
-
-  private async finishWorkItemLifecycle(input: {
-    workspacePath: string;
-    runId: string;
-    workItemId: string;
-    lease?: WorkerDispatchResult["lease"];
-  }) {
-    this.progressRegistry.clear(input.workspacePath, input.runId, input.workItemId);
-    const state = await this.stateStore.readState(input.workspacePath);
-    const run = state.runs.find((entry) => entry.id === input.runId) ?? null;
-
-    if (!run) {
-      return;
-    }
-
-    const lease = input.lease ? run.worktreeLeases.find((entry) => entry.id === input.lease?.id) ?? input.lease : null;
-    let worktreeLeases = run.worktreeLeases;
-
-    if (lease) {
-      const released = await this.workerGateway.releaseLease({
-        workspacePath: input.workspacePath,
-        lease
-      });
-      const now = new Date().toISOString();
-      worktreeLeases = run.worktreeLeases.map((entry) =>
-        entry.id === lease.id
-          ? {
-              ...entry,
-              cleanupStatus:
-                released?.cleanupStatus === "released"
-                  ? ("released" as ResearchRunRecord["worktreeLeases"][number]["cleanupStatus"])
-                  : ("failed" as ResearchRunRecord["worktreeLeases"][number]["cleanupStatus"]),
-              cleanupError: released?.cleanupError,
-              releasedAt: now,
-              updatedAt: now
-            }
-          : entry
-      );
-      await this.stateStore.appendActivity(
-        input.workspacePath,
-        released?.cleanupStatus === "released"
-          ? `worktree cleanup ${lease.id}`
-          : `worktree cleanup failed ${lease.id}: ${released?.cleanupError ?? "unknown"}`
-      );
-    }
-
-    await this.stateStore.writeRun(input.workspacePath, {
-      ...run,
-      activeWorkItemIds: run.activeWorkItemIds.filter((entry) => entry !== input.workItemId),
-      worktreeLeases,
-      updatedAt: new Date().toISOString()
-    });
-  }
-
-  private async cleanupOrphanedWorktrees(workspacePath: string) {
-    const state = await this.stateStore.readState(workspacePath);
-    const activeLeasePaths = state.runs
-      .flatMap((run) => run.worktreeLeases)
-      .filter((lease) => lease.cleanupStatus === "active")
-      .map((lease) => lease.worktreePath);
-    await this.worktreeManager.garbageCollect(workspacePath, activeLeasePaths);
-  }
-
-  private async cleanupRecordedRunLeases(workspacePath: string, run: ResearchRunRecord) {
-    const now = new Date().toISOString();
-    const worktreeLeases = await Promise.all(
-      run.worktreeLeases.map(async (lease) => {
-        if (lease.cleanupStatus !== "active") {
-          return lease;
-        }
-
-        const released = await this.workerGateway.releaseLease({
-          workspacePath,
-          lease
-        });
-
-        return {
-          ...lease,
-          cleanupStatus:
-            released?.cleanupStatus === "released"
-              ? ("released" as ResearchRunRecord["worktreeLeases"][number]["cleanupStatus"])
-              : ("failed" as ResearchRunRecord["worktreeLeases"][number]["cleanupStatus"]),
-          cleanupError: released?.cleanupError,
-          releasedAt: now,
-          updatedAt: now
-        };
-      })
-    );
-
-    await this.stateStore.writeRun(workspacePath, {
-      ...run,
-      worktreeLeases,
-      updatedAt: now
-    });
-  }
 }
 
-function resolveRequestedObjective(snapshot: WorkspaceSnapshot, objectiveId?: string | null) {
-  if (objectiveId?.trim()) {
-    return snapshot.objectives.find((entry) => entry.id === objectiveId) ?? null;
+function resolveRequestedObjective(snapshot: WorkspaceSnapshot, objectiveId?: string) {
+  if (!objectiveId) {
+    return snapshot.activeObjective;
   }
-
-  return snapshot.activeObjective;
+  return snapshot.objectives.find((entry) => entry.id === objectiveId) ?? null;
 }
 
-function resolveRequestedRun(snapshot: WorkspaceSnapshot, runId?: string | null) {
-  if (runId?.trim()) {
-    return snapshot.runs.find((entry) => entry.id === runId) ?? null;
+function resolveRequestedRun(snapshot: WorkspaceSnapshot, runId?: string) {
+  if (!runId) {
+    return snapshot.activeRun;
   }
-
-  return snapshot.activeRun;
+  return snapshot.runs.find((entry) => entry.id === runId) ?? null;
 }

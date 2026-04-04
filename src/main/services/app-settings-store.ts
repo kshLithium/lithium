@@ -3,12 +3,11 @@ import path from "node:path";
 import {
   isBuilderModel,
   isBuilderReasoningEffort,
-  normalizeStrategistModel,
-  normalizeStrategistThinkingTime
+  normalizeOracleModel,
+  normalizeOracleThinkingTime
 } from "../../shared/model-config";
 import {
   DEFAULT_APP_SETTINGS,
-  type AutomationPromptLanguage,
   type AppSettings,
   type AppSettingsUpdate,
   type BuilderModel,
@@ -84,40 +83,41 @@ export function sanitizeAppSettings(value: unknown): AppSettings {
   const candidate = value as Record<string, unknown>;
 
   return {
-    autopilotPromptLanguage: sanitizeAutomationPromptLanguage(candidate.autopilotPromptLanguage),
-    strategistSessionReady:
-      typeof candidate.strategistSessionReady === "boolean"
-        ? candidate.strategistSessionReady
-        : DEFAULT_APP_SETTINGS.strategistSessionReady,
+    promptLanguage: sanitizePromptLanguage(candidate.promptLanguage),
+    oracleSessionReady:
+      typeof candidate.oracleSessionReady === "boolean"
+        ? candidate.oracleSessionReady
+        : DEFAULT_APP_SETTINGS.oracleSessionReady,
     lastWorkspacePath:
       typeof candidate.lastWorkspacePath === "string"
         ? candidate.lastWorkspacePath
         : DEFAULT_APP_SETTINGS.lastWorkspacePath,
-    strategistModel: sanitizeOracleModel(candidate.strategistModel),
-    strategistReasoningIntensity: sanitizeOracleThinkingTime(
-      candidate.strategistReasoningIntensity,
-      sanitizeOracleModel(candidate.strategistModel)
+    oracleModel: sanitizeOracleModel(candidate.oracleModel),
+    oracleThinkingTime: sanitizeOracleThinkingTime(
+      candidate.oracleThinkingTime,
+      sanitizeOracleModel(candidate.oracleModel)
     ),
     builderModel: sanitizeBuilderModel(candidate.builderModel),
     builderReasoningEffort: sanitizeBuilderReasoningEffort(candidate.builderReasoningEffort)
   };
 }
 
-export function sanitizeAutomationPromptLanguage(value: unknown): AutomationPromptLanguage {
+export function sanitizePromptLanguage(...values: unknown[]): AppSettings["promptLanguage"] {
+  const value = values.find((candidate) => typeof candidate === "string");
   return value === "auto" || value === "ko" || value === "en"
     ? value
-    : DEFAULT_APP_SETTINGS.autopilotPromptLanguage;
+    : DEFAULT_APP_SETTINGS.promptLanguage;
 }
 
-export function sanitizeOracleModel(value: unknown): OracleModel {
-  return normalizeStrategistModel(value);
+export function sanitizeOracleModel(...values: unknown[]): OracleModel {
+  return normalizeOracleModel(values.find((candidate) => candidate !== undefined));
 }
 
 export function sanitizeOracleThinkingTime(
   value: unknown,
-  model: OracleModel = DEFAULT_APP_SETTINGS.strategistModel
+  _model: OracleModel = DEFAULT_APP_SETTINGS.oracleModel
 ): OracleThinkingTime {
-  return normalizeStrategistThinkingTime(value);
+  return normalizeOracleThinkingTime(value);
 }
 
 export function sanitizeBuilderModel(value: unknown): BuilderModel {

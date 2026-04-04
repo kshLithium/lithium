@@ -43,7 +43,7 @@ describe("run-artifacts", () => {
       JSON.stringify({
         summary: "context-pack builder wired",
         result: "success",
-        files: ["src/main/services/project-store.ts", "src/main/services/app-service.ts"],
+        files: ["src/main/services/research-service.ts", "src/main/services/protocol.ts"],
         risks: [],
         run_actions: ["rerun smoke test"],
         success_criteria: ["npm test"],
@@ -52,8 +52,8 @@ describe("run-artifacts", () => {
     ].join("\n");
 
     expect(parseChangedFilesFromFinalMessage(finalMessage)).toEqual([
-      "src/main/services/project-store.ts",
-      "src/main/services/app-service.ts"
+      "src/main/services/research-service.ts",
+      "src/main/services/protocol.ts"
     ]);
     expect(extractFinalSummary(finalMessage)).toBe("context-pack builder wired");
     expect(
@@ -70,8 +70,8 @@ describe("run-artifacts", () => {
       inferRunStatus({
         run: {
           id: "R001",
+          objectiveId: "RO001",
           taskId: "T001",
-          threadId: "TH001",
           prompt: "Finalize the completed run.",
           model: "gpt-5.4",
           command: { command: "codex", args: [], cwd: "/tmp/workspace" },
@@ -86,6 +86,7 @@ describe("run-artifacts", () => {
           finalMessage: "",
           finalization: null,
           createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
           startedAt: "2026-03-23T00:00:00.000Z"
         },
         active: true,
@@ -106,8 +107,8 @@ describe("run-artifacts", () => {
         inferRunStatus({
           run: {
             id: "R002",
+            objectiveId: "RO001",
             taskId: "T002",
-            threadId: "TH002",
             prompt: "Run a long MLX compare.",
             model: "gpt-5.4",
             command: { command: "codex", args: [], cwd: "/tmp/workspace" },
@@ -122,6 +123,7 @@ describe("run-artifacts", () => {
             finalMessage: "",
             finalization: null,
             createdAt: "2026-03-23T00:00:00.000Z",
+            updatedAt: "2026-03-23T00:00:00.000Z",
             startedAt: "2026-03-23T00:00:00.000Z"
           },
           active: true,

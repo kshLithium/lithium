@@ -67,7 +67,7 @@ export class LithiumCliController {
   async initialize(workspacePath: string) {
     const resolvedWorkspacePath = resolveWorkspacePath(workspacePath, this.cwd);
     this.writeLine("Lithium CLI");
-    this.writeLine("Objective-first autopilot controller. Type :help for commands.");
+    this.writeLine("Objective-first research controller. Type :help for commands.");
     await this.activateWorkspace(resolvedWorkspacePath);
   }
 
@@ -85,7 +85,7 @@ export class LithiumCliController {
     }
 
     if (!line.startsWith(":")) {
-      this.writeLine("Free-form chat is disabled in autopilot mode. Use :objective, :run, :queue, :evidence, or :status.");
+      this.writeLine("Free-form chat is disabled in research mode. Use :objective, :run, :queue, :evidence, or :status.");
       return "continue";
     }
 
@@ -273,7 +273,7 @@ export class LithiumCliController {
   private async handleSignInCommand() {
     await this.service.prepareOracleSignIn();
     await this.settingsStore.update({
-      strategistSessionReady: true
+      oracleSessionReady: true
     } satisfies Partial<AppSettings>);
     this.writeLine("[signin] Oracle/ChatGPT session is ready.");
   }

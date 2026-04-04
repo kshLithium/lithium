@@ -25,14 +25,14 @@ describe("AppSettingsStore runtime behavior", () => {
         lastWorkspacePath: "/tmp/real-real"
       }),
       store.update({
-        strategistSessionReady: true
+        oracleSessionReady: true
       })
     ]);
 
     const settings = await store.read();
 
     expect(settings.lastWorkspacePath).toBe("/tmp/real-real");
-    expect(settings.strategistSessionReady).toBe(true);
+    expect(settings.oracleSessionReady).toBe(true);
   });
 
   it("does not leave temporary files behind after writing settings", async () => {

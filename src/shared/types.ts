@@ -7,17 +7,18 @@ export type CommandSpec = {
   cwd: string;
 };
 
-export type AutomationPromptLanguage = "auto" | "ko" | "en";
+export type PromptLanguage = "auto" | "ko" | "en";
 export type OracleModel = "gpt-5.4-pro";
 export type OracleThinkingTime = "extended";
 export type BuilderModel = "gpt-5.4" | "gpt-5.3-codex";
 export type BuilderReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
 export type AppSettings = {
-  autopilotPromptLanguage: AutomationPromptLanguage;
-  strategistSessionReady: boolean;
+  promptLanguage: PromptLanguage;
+  oracleSessionReady: boolean;
   lastWorkspacePath: string;
-  strategistModel: OracleModel;
-  strategistReasoningIntensity: OracleThinkingTime;
+  oracleModel: OracleModel;
+  oracleThinkingTime: OracleThinkingTime;
   builderModel: BuilderModel;
   builderReasoningEffort: BuilderReasoningEffort;
 };
@@ -25,14 +26,14 @@ export type AppSettings = {
 export type AppSettingsUpdate = Partial<AppSettings>;
 
 export const DEFAULT_PROJECT_RESEARCH_GOAL = "Define the next research outcome this project should produce.";
-export const PROJECT_SCHEMA_VERSION = 2;
+export const PROJECT_SCHEMA_VERSION = 3;
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  autopilotPromptLanguage: "auto",
-  strategistSessionReady: false,
+  promptLanguage: "auto",
+  oracleSessionReady: false,
   lastWorkspacePath: "",
-  strategistModel: "gpt-5.4-pro",
-  strategistReasoningIntensity: "extended",
+  oracleModel: "gpt-5.4-pro",
+  oracleThinkingTime: "extended",
   builderModel: "gpt-5.4",
   builderReasoningEffort: "xhigh"
 };
@@ -45,235 +46,40 @@ export type ProjectRecord = {
   oracleModel: OracleModel;
   codexModel: string;
   activeObjectiveId?: string;
-  defaultThreadId: string;
-  activeThreadId: string;
   createdAt: string;
   updatedAt: string;
-};
-
-export type ThreadRecord = {
-  id: string;
-  title: string;
-  summary: string;
-  memory?: string;
-  conversationOrchestratorSessionId?: string;
-  conversationOrchestratorUpdatedAt?: string;
-  strategistContextFingerprint?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ProjectMemoryPreferences = {
-  strategistStyle: string;
-  builderStyle: string;
-};
-
-export type ProjectNarrativeMemoryRecord = {
-  northStar: string;
-  activeStory: string;
-  collaborationContract: string[];
-  currentFocus: string;
-  recentDirections: string[];
-  constraints: string[];
-};
-
-export type ProjectModelMemoryRecord = {
-  openQuestions: string[];
-  activeHypotheses: string[];
-  stableFacts: string[];
-  keyDecisions: string[];
-  metrics: string[];
-  learnedPatterns: string[];
-};
-
-export type ProjectExecutionJournalMemoryRecord = {
-  sessionSummary: string;
-  activeAutomationSummary: string;
-  recentArtifacts: string[];
-  recentCommands: string[];
-  recentLogs: string[];
-  recoveryNotes: string[];
-};
-
-export type ProjectMemoryLayer = {
-  summary: string;
-  bullets: string[];
-};
-
-export type ProjectMemoryMap = {
-  narrative: ProjectMemoryLayer;
-  knowledge: ProjectMemoryLayer;
-  execution: ProjectMemoryLayer;
-};
-
-export type ProjectMemoryRecord = {
-  projectBrief: string;
-  researchGoal: string;
-  constraints: string[];
-  preferences: ProjectMemoryPreferences;
-  openQuestions: string[];
-  activeHypotheses: string[];
-  sessionSummary: string;
-  layers: {
-    narrative: ProjectNarrativeMemoryRecord;
-    projectModel: ProjectModelMemoryRecord;
-    executionJournal: ProjectExecutionJournalMemoryRecord;
-  };
-  memoryMap: ProjectMemoryMap;
-  updatedAt: string;
-};
-
-export type ContextPackLane = "strategist" | "builder";
-
-export type AutomationMode = "checkpoint" | "continuous";
-export type AutomationStatus = "idle" | "running";
-export type AutomationWorkerMode = "planner" | "sync" | "async" | "live";
-export type AutomationStepKind =
-  | "strategize"
-  | "code-edit"
-  | "experiment-run"
-  | "result-analysis"
-  | "literature-search"
-  | "checkpoint";
-export type AutomationStepLane = "controller" | "strategist" | "builder" | "researcher" | "writer" | "critic";
-export type AutomationCycleStatus = "planned" | "running" | "paused" | "completed" | "failed" | "cancelled";
-export type AutomationCyclePhase = "planning" | "workers" | "reporting";
-export type AutomationBudget = {
-  maxSteps: number;
-  maxRuntimeMinutes: number;
-  maxRetries: number;
-  usedSteps: number;
-  usedRetries: number;
-};
-export type AutomationCycleLaneState = {
-  lane: AutomationStepLane;
-  title: string;
-  status: "pending" | RecordStatus;
-  workerMode: AutomationWorkerMode;
-  summary: string;
-  stepId?: string;
-  idempotencyKey?: string;
-  resumeCursor?: string;
-  updatedAt: string;
-};
-export type AutomationProposedStep = {
-  kind: AutomationStepKind;
-  title: string;
-  prompt: string;
-  requiresReview?: boolean;
-};
-export type AutomationCycleRecord = {
-  id: string;
-  sessionId: string;
-  threadId: string;
-  title: string;
-  objective: string;
-  plannerPrompt: string;
-  plannerReply?: string;
-  plannerSessionId?: string;
-  status: AutomationCycleStatus;
-  phase: AutomationCyclePhase;
-  summary: string;
-  laneStates: AutomationCycleLaneState[];
-  activeLaneStepIds?: string[];
-  completedLaneStepIds?: string[];
-  createdAt: string;
-  updatedAt: string;
-  startedAt: string;
-  completedAt?: string;
-};
-export type AutomationSessionRecord = {
-  id: string;
-  threadId: string;
-  objective: string;
-  displayObjective?: string;
-  plannerSessionId?: string;
-  plannerUpdatedAt?: string;
-  mode: AutomationMode;
-  status: AutomationStatus;
-  allowedActions: AutomationStepKind[];
-  evidenceMode: "strict" | "pragmatic";
-  budget: AutomationBudget;
-  latestCycleId?: string;
-  activeCycleId?: string;
-  activeLaneStepIds?: string[];
-  latestStepId?: string;
-  latestCheckpointId?: string;
-  currentStepSummary: string;
-  lastConversationReportFingerprint?: string;
-  lastUserInstruction?: string;
-  queuedUserInstruction?: string;
-  stopReason?: string;
-  createdAt: string;
-  updatedAt: string;
-  startedAt?: string;
-  endedAt?: string;
-};
-export type AutomationStepRecord = {
-  id: string;
-  sessionId: string;
-  threadId: string;
-  cycleId?: string;
-  kind: AutomationStepKind;
-  lane: AutomationStepLane;
-  workerMode?: AutomationWorkerMode;
-  title: string;
-  prompt: string;
-  status: RecordStatus;
-  summary: string;
-  idempotencyKey?: string;
-  startedSideEffects?: string[];
-  completedSideEffects?: string[];
-  resumeCursor?: string;
-  decisionId?: string;
-  runId?: string;
-  changedFiles: string[];
-  evidence: string[];
-  checkpointRequired: boolean;
-  createdAt: string;
-  updatedAt: string;
-  completedAt?: string;
-};
-export type AutomationCheckpointStatus = "pending" | "approved" | "dismissed";
-export type AutomationCheckpointRecord = {
-  id: string;
-  sessionId: string;
-  threadId: string;
-  status: AutomationCheckpointStatus;
-  title: string;
-  summary: string;
-  whatChanged: string[];
-  evidence: string[];
-  risks: string[];
-  nextActions: string[];
-  userResponse?: string;
-  createdAt: string;
-  updatedAt: string;
-  approvedAt?: string;
 };
 
 export type ResearchObjectiveStatus = "pending" | "active" | "paused" | "completed" | "failed";
 export type ResearchBranchStatus = "candidate" | "active" | "blocked" | "killed" | "pivoted" | "completed";
-export type ResearchSourceKind =
-  | "workspace"
-  | "paper"
-  | "repo"
-  | "web"
-  | "decision"
-  | "run"
-  | "conversation"
-  | "attachment";
+export type ResearchSourceKind = "workspace" | "paper" | "repo" | "web" | "attachment";
 export type ResearchFindingKind = "evidence" | "observation" | "claim";
 export type ResearchHypothesisStatus = "open" | "supported" | "unsupported" | "revised";
-export type ResearchWorkItemKind = "planner" | "deep-research" | "code-edit" | "experiment" | "evaluation";
-export type ResearchWorkItemLane = "planner" | "research" | "builder" | "experiment" | "evaluator";
+export type ResearchWorkItemKind =
+  | "plan"
+  | "discover"
+  | "read_synthesize"
+  | "build_change"
+  | "run_experiment"
+  | "evaluate_branch"
+  | "arbitrate_branch";
+export type ResearchWorkItemLane =
+  | "plan"
+  | "discover"
+  | "synthesis"
+  | "build"
+  | "experiment"
+  | "evaluate"
+  | "arbiter";
 export type ResearchWorkItemExecutionMode = "sync" | "async" | "isolated";
 export type ResearchWorkItemExecutor =
-  | "oracle-planner"
-  | "oracle-research"
-  | "builder-edit"
-  | "experiment-run"
-  | "evaluator";
+  | "planner"
+  | "discoverer"
+  | "reader-synthesizer"
+  | "builder"
+  | "experimenter"
+  | "evaluator"
+  | "arbiter";
 export type ResearchIsolationMode = "none" | "worktree";
 export type ResearchWorkItemStatus = "pending" | "running" | "blocked" | "completed" | "failed" | "cancelled";
 export type ResearchEvaluationVerdict = "continue" | "kill" | "pivot" | "complete";
@@ -295,8 +101,6 @@ export type ResearchPriorityScore = {
 
 export type ResearchObjectiveRecord = {
   id: string;
-  threadId: string;
-  automationSessionId?: string;
   title: string;
   objective: string;
   summary: string;
@@ -313,11 +117,15 @@ export type ResearchObjectiveRecord = {
 export type ResearchBranchRecord = {
   id: string;
   objectiveId: string;
-  threadId: string;
   title: string;
   hypothesis: string;
   status: ResearchBranchStatus;
   score: number;
+  baseCommit?: string;
+  gitRef?: string;
+  headCommit?: string;
+  worktreePath?: string;
+  promotionHeadCommit?: string;
   blocker?: string;
   nextWorkItemId?: string;
   lastFailureReason?: string;
@@ -333,7 +141,6 @@ export type ResearchBranchRecord = {
 export type ResearchSourceRecord = {
   id: string;
   objectiveId: string;
-  threadId: string;
   branchId?: string;
   kind: ResearchSourceKind;
   title: string;
@@ -342,7 +149,26 @@ export type ResearchSourceRecord = {
   summary: string;
   excerpt?: string;
   attachmentId?: string;
+  artifactPath?: string;
+  artifactHash?: string;
+  citationStart?: number;
+  citationEnd?: number;
+  readAt?: string;
+  oracleSessionSlug?: string;
+  sourceArtifactId?: string;
   metadata?: Record<string, string | number | boolean | null>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SourceArtifactRecord = {
+  id: string;
+  objectiveId: string;
+  sourceId: string;
+  path: string;
+  hash: string;
+  contentType?: string;
+  sizeBytes: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -350,22 +176,106 @@ export type ResearchSourceRecord = {
 export type ResearchFindingRecord = {
   id: string;
   objectiveId: string;
-  threadId: string;
   branchId?: string;
   sourceId?: string;
+  sourceArtifactId?: string;
   kind: ResearchFindingKind;
   summary: string;
   detail?: string;
+  citationStart?: number;
+  citationEnd?: number;
   evidence: string[];
   createdAt: string;
   updatedAt: string;
 };
 
+export type ResearchTaskDependency = {
+  taskId: string;
+  reason: string;
+};
+
+export type ResearchTaskTimeoutPolicy = {
+  wallMs: number;
+  silenceMs?: number;
+};
+
+export type DiscoverSourceSpec = {
+  locator: string;
+  title: string;
+  kind: Extract<ResearchSourceKind, "paper" | "repo" | "web">;
+  summary: string;
+  excerpt?: string;
+  citationText?: string;
+  branchTitle?: string;
+};
+
+export type DiscoverTaskPayload = {
+  branchId: string;
+  goal: string;
+  maxResults: number;
+  domains?: string[];
+};
+
+export type ReadSynthesizeTaskPayload = {
+  branchId: string;
+  sourceIds: string[];
+  questions: string[];
+};
+
+export type BuildChangeTaskPayload = {
+  branchId: string;
+  goal: string;
+  constraints: string[];
+  verificationCommands: string[];
+  successCriteria: string[];
+};
+
+export type ExperimentMetricExpectation = {
+  name: string;
+  value?: number;
+  min?: number;
+  max?: number;
+  baselineDelta?: number;
+};
+
+export type RunExperimentTaskPayload = {
+  branchId: string;
+  commands: string[];
+  timeoutMs: number;
+  expectedMetrics: ExperimentMetricExpectation[];
+};
+
+export type EvaluateBranchTaskPayload = {
+  branchId: string;
+  compareToBranchId?: string;
+  focus: string;
+};
+
+export type ArbitrateBranchTaskPayload = {
+  branchId: string;
+  evaluationId: string;
+  candidateTaskId?: string;
+};
+
+export type PlannerTaskPayload = {
+  objectiveId: string;
+  activeBranchId: string;
+  goal: string;
+};
+
+export type ResearchTaskPayload =
+  | PlannerTaskPayload
+  | DiscoverTaskPayload
+  | ReadSynthesizeTaskPayload
+  | BuildChangeTaskPayload
+  | RunExperimentTaskPayload
+  | EvaluateBranchTaskPayload
+  | ArbitrateBranchTaskPayload;
+
 export type ResearchHypothesisRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  threadId: string;
   statement: string;
   status: ResearchHypothesisStatus;
   confidence: number;
@@ -390,7 +300,6 @@ export type ResearchWorkItemRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  threadId: string;
   kind: ResearchWorkItemKind;
   lane: ResearchWorkItemLane;
   executor?: ResearchWorkItemExecutor;
@@ -402,7 +311,11 @@ export type ResearchWorkItemRecord = {
   priorityScore: ResearchPriorityScore;
   sourceIds: string[];
   dependsOnIds: string[];
-  decisionId?: string;
+  dependencyRefs?: ResearchTaskDependency[];
+  payload?: ResearchTaskPayload;
+  timeoutPolicy?: ResearchTaskTimeoutPolicy;
+  maxAttempts?: number;
+  attemptCount?: number;
   runId?: string;
   oracleSessionSlug?: string;
   worktreePath?: string;
@@ -427,7 +340,6 @@ export type ResearchRunSlotBudget = {
 export type ResearchRunRecord = {
   id: string;
   objectiveId: string;
-  threadId: string;
   status: ResearchRunStatus;
   blockedReason?: string;
   stopReason?: string;
@@ -435,6 +347,12 @@ export type ResearchRunRecord = {
   activeWorkItemIds: string[];
   oracleSessionSlugs: string[];
   worktreeLeases: ResearchWorktreeLeaseRecord[];
+  dispatchPaused?: boolean;
+  lastPlanTaskId?: string;
+  lastPlanAt?: string;
+  lastPlanSourceCount?: number;
+  lastPlanCompletedCount?: number;
+  lastPlanBranchScore?: number;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -445,7 +363,6 @@ export type EvaluationRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  threadId: string;
   workItemId: string;
   verdict: ResearchEvaluationVerdict;
   scoreDelta: number;
@@ -460,22 +377,37 @@ export type ExperimentSpecRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  threadId: string;
   workItemId: string;
   title: string;
   prompt: string;
-  executor: Extract<ResearchWorkItemExecutor, "experiment-run">;
+  executor: Extract<ResearchWorkItemExecutor, "experimenter">;
   isolation: ResearchIsolationMode;
   worktreePath?: string;
   createdAt: string;
   updatedAt: string;
 };
 
+export type ExperimentManifest = {
+  commands: string[];
+  exitCode: number | null;
+  status: "completed" | "failed" | "cancelled";
+  stdoutPath?: string;
+  stderrPath?: string;
+  outputPath?: string;
+  artifacts: string[];
+  metrics: Array<{
+    name: string;
+    value: number;
+    unit?: string;
+  }>;
+  baselineCompare?: Record<string, number>;
+  expectations?: ExperimentMetricExpectation[];
+};
+
 export type ExperimentResultRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  threadId: string;
   workItemId: string;
   experimentSpecId: string;
   runId?: string;
@@ -488,6 +420,8 @@ export type ExperimentResultRecord = {
   worktreePath?: string;
   changedFiles: string[];
   patchArtifactPath?: string;
+  manifestPath?: string;
+  manifest?: ExperimentManifest;
   createdAt: string;
   updatedAt: string;
 };
@@ -496,7 +430,6 @@ export type MetricRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
-  threadId: string;
   workItemId: string;
   experimentResultId: string;
   name: string;
@@ -508,7 +441,6 @@ export type MetricRecord = {
 
 export type ResearchEventRecord = {
   id: string;
-  threadId: string;
   objectiveId?: string;
   branchId?: string;
   workItemId?: string;
@@ -519,7 +451,6 @@ export type ResearchEventRecord = {
 
 export type ResearchProjectionRecord = {
   id: string;
-  threadId: string;
   objectiveId: string;
   objectiveTitle: string;
   status: ResearchProjectionStatus;
@@ -556,10 +487,9 @@ export type ActiveWorkerProgressRecord = {
 
 export type LithiumHandoff = {
   schemaVersion: "lithium_handoff_v1";
-  role: ContextPackLane;
+  role: "planner" | "builder";
   summary: string;
   machineSummary?: string;
-  userMessage?: string;
   rationale?: string;
   result?: "success" | "partial" | "failed";
   files: string[];
@@ -567,8 +497,6 @@ export type LithiumHandoff = {
   runActions: string[];
   successCriteria: string[];
   openQuestions: string[];
-  automationMode?: "continue" | "checkpoint" | "blocked" | "done";
-  proposedSteps?: AutomationProposedStep[];
   proposedBranches?: Array<{
     title: string;
     hypothesis: string;
@@ -576,50 +504,18 @@ export type LithiumHandoff = {
   researchWorkItems?: Array<{
     title: string;
     prompt: string;
-    kind: ResearchWorkItemKind;
-    executor?: ResearchWorkItemExecutor;
+    kind: Exclude<ResearchWorkItemKind, "plan" | "arbitrate_branch">;
+    executor?: Exclude<ResearchWorkItemExecutor, "planner" | "arbiter">;
     isolation?: ResearchIsolationMode;
     branchTitle?: string;
   }>;
-  needsUserCheckpoint?: boolean;
   confidence?: number;
 };
 
-export type DecisionRecord = {
+export type WorkerRunRecord = {
   id: string;
-  threadId: string;
-  prompt: string;
-  displayPrompt?: string;
-  inputFiles?: string[];
-  rawOutput: string;
-  summary: string;
-  rationale: string;
-  handoff?: LithiumHandoff;
-  model: string;
-  engine: "browser";
-  status: RecordStatus;
-  command: CommandSpec;
-  stdoutPath: string;
-  stderrPath: string;
-  outputPath: string;
-  contextPackPath?: string;
-  createdAt: string;
-};
-
-export type TaskRecord = {
-  id: string;
-  threadId: string;
-  sourceDecisionId?: string;
-  title: string;
-  prompt: string;
-  status: RecordStatus;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type RunRecord = {
-  id: string;
-  threadId: string;
+  objectiveId: string;
+  branchId?: string;
   taskId: string;
   prompt: string;
   displayPrompt?: string;
@@ -634,55 +530,17 @@ export type RunRecord = {
   finalMessage: string;
   handoff?: LithiumHandoff | null;
   changedFiles: string[];
-  contextPackPath?: string;
   finalization: RunFinalizationMode | null;
   createdAt: string;
+  updatedAt: string;
   startedAt: string;
   endedAt?: string;
-};
-
-export type BuilderRunControlRequest = {
-  workspacePath?: string;
-  runId?: string;
-};
-
-export type ChatProgressRequest = {
-  workspacePath?: string;
-  threadId?: string;
-};
-
-export type BuilderRunInspection = {
-  run: RunRecord | null;
-  active: boolean;
-  pid: number | null;
-  stdoutTail: string;
-  stderrTail: string;
-  outputText: string;
-  changedFiles: string[];
-  progressSummary: string;
-  progressDetails: string[];
-  activeCommand: string | null;
-  suggestedStatus: "idle" | "running" | "awaiting-finalization" | "hung";
-  quietForMs: number;
-};
-
-export type ChatProgressInspection = {
-  active: boolean;
-  lane: "orchestrator" | "router" | "strategist" | "builder";
-  threadId?: string;
-  progressSummary: string;
-  progressDetails: string[];
-  activeCommand: string | null;
-  stdoutTail: string;
-  stderrTail: string;
-  updatedAt: string;
 };
 
 export type AttachmentKind = "text" | "json" | "csv" | "document" | "image" | "other";
 
 export type AttachmentRecord = {
   id: string;
-  threadId: string;
   objectiveId?: string;
   name: string;
   relativePath: string;
@@ -693,73 +551,7 @@ export type AttachmentRecord = {
   importedAt: string;
   updatedAt: string;
   consumedAt?: string;
-  conversationEntryId?: string;
-  decisionId?: string;
   runId?: string;
-};
-
-export type ConversationEntryRole = "user" | "assistant" | "system";
-export type ConversationEntrySource =
-  | "user"
-  | "orchestrator"
-  | "automation"
-  | "checkpoint"
-  | "system";
-
-export type ConversationEntryRecord = {
-  id: string;
-  threadId: string;
-  role: ConversationEntryRole;
-  source: ConversationEntrySource;
-  body: string;
-  createdAt: string;
-  attachmentIds?: string[];
-  decisionId?: string;
-  runId?: string;
-  automationSessionId?: string;
-  automationCycleId?: string;
-  automationStepId?: string;
-  automationCheckpointId?: string;
-};
-
-export type ProjectSnapshot = {
-  project: ProjectRecord | null;
-  memory: ProjectMemoryRecord | null;
-  threads: ThreadRecord[];
-  activeThreadId: string | null;
-  activeThread: ThreadRecord | null;
-  conversationEntries?: ConversationEntryRecord[];
-  latestConversationEntry?: ConversationEntryRecord | null;
-  attachments: AttachmentRecord[];
-  activeThreadAttachments: AttachmentRecord[];
-  decisions: DecisionRecord[];
-  tasks: TaskRecord[];
-  runs: RunRecord[];
-  routerTraces?: RouterTraceRecord[];
-  latestDecision: DecisionRecord | null;
-  latestTask: TaskRecord | null;
-  latestRun: RunRecord | null;
-  latestRouterTrace?: RouterTraceRecord | null;
-  automationSessions?: AutomationSessionRecord[];
-  automationCycles?: AutomationCycleRecord[];
-  automationSteps?: AutomationStepRecord[];
-  automationCheckpoints?: AutomationCheckpointRecord[];
-  latestAutomationSession?: AutomationSessionRecord | null;
-  latestAutomationCycle?: AutomationCycleRecord | null;
-  latestAutomationCheckpoint?: AutomationCheckpointRecord | null;
-  researchObjectives?: ResearchObjectiveRecord[];
-  researchBranches?: ResearchBranchRecord[];
-  researchSources?: ResearchSourceRecord[];
-  researchFindings?: ResearchFindingRecord[];
-  researchHypotheses?: ResearchHypothesisRecord[];
-  researchWorkItems?: ResearchWorkItemRecord[];
-  researchEvaluations?: EvaluationRecord[];
-  latestResearchObjective?: ResearchObjectiveRecord | null;
-  latestResearchBranch?: ResearchBranchRecord | null;
-  latestResearchWorkItem?: ResearchWorkItemRecord | null;
-  latestResearchEvaluation?: EvaluationRecord | null;
-  latestResearchProjection?: ResearchProjectionRecord | null;
-  logs: string[];
 };
 
 export type WorkspaceSnapshot = {
@@ -776,95 +568,15 @@ export type WorkspaceSnapshot = {
   recentExperiments: ExperimentResultRecord[];
   latestEvaluation: EvaluationRecord | null;
   latestProjection: ResearchProjectionRecord | null;
-  latestBuilderRun: RunRecord | null;
+  latestWorkerRun: WorkerRunRecord | null;
   blockedReason?: string;
   attachments: AttachmentRecord[];
   activeWorkerProgress: ActiveWorkerProgressRecord[];
   logs: string[];
 };
 
-export type ArtifactKind =
-  | "code"
-  | "text"
-  | "json"
-  | "csv"
-  | "image"
-  | "document"
-  | "log"
-  | "other";
-
-export type WorkspaceFileKind = "code" | "artifact";
-
-export type WorkspaceFileRecord = {
-  path: string;
-  relativePath: string;
-  name: string;
-  kind: WorkspaceFileKind;
-  artifactKind?: ArtifactKind;
-};
-
-export type StrategistRequest = {
-  workspacePath?: string;
-  threadId?: string;
-  prompt: string;
-  displayPrompt?: string;
-  attachExplicitWorkspaceFiles?: boolean;
-  sessionSlug?: string;
-  model?: OracleModel;
-  reasoningIntensity?: OracleThinkingTime;
-};
-
-export type BuilderRequest = {
-  workspacePath?: string;
-  threadId?: string;
-  prompt: string;
-  displayPrompt?: string;
-  executionWorkspacePath?: string;
-  model?: BuilderModel;
-  reasoningEffort?: BuilderReasoningEffort;
-};
-
-export type ChatRequest = {
-  workspacePath?: string;
-  threadId?: string;
-  prompt: string;
-};
-
-export type ChatRoute = "strategist" | "builder" | "mixed";
-
-export type ChatRouteDecision = {
-  route: ChatRoute;
-  rewrittenPrompt: string;
-  reasonShort: string;
-};
-
-export type RouterTraceRecord = {
-  id: string;
-  threadId: string;
-  prompt: string;
-  normalizedPrompt: string;
-  rewrittenPrompt: string;
-  requestedRoute: ChatRoute | null;
-  route: ChatRoute;
-  finalRoute: ChatRoute;
-  reasonShort: string;
-  rawOutput: string;
-  command: CommandSpec;
-  stdoutPath: string;
-  stderrPath: string;
-  outputPath: string;
-  downstreamDecisionId?: string;
-  downstreamRunId?: string;
-  downstreamTaskId?: string;
-  downstreamError?: string;
-  createdAt: string;
-  decidedAt: string;
-  completedAt: string;
-};
-
 export type AttachmentImportRequest = {
   workspacePath?: string;
-  threadId?: string;
   objectiveId?: string;
   filePaths: string[];
 };
@@ -885,40 +597,4 @@ export type ObjectiveRunControlRequest = {
   workspacePath?: string;
   runId?: string;
   objectiveId?: string;
-};
-
-export type AttachmentDeleteRequest = {
-  workspacePath?: string;
-  attachmentId: string;
-};
-
-export type ThreadSelectionRequest = {
-  workspacePath?: string;
-  threadId: string;
-};
-
-export type ThreadCreateRequest = {
-  workspacePath?: string;
-  title?: string;
-};
-
-export type AutomationSessionCreateRequest = {
-  workspacePath?: string;
-  threadId?: string;
-  objective: string;
-  displayObjective?: string;
-  mode?: AutomationMode;
-  maxSteps?: number;
-  maxRuntimeMinutes?: number;
-  maxRetries?: number;
-};
-
-export type AutomationSessionControlRequest = {
-  workspacePath?: string;
-  sessionId: string;
-};
-
-export type AutomationInterruptRequest = AutomationSessionControlRequest & {
-  instruction: string;
-  stopNow?: boolean;
 };

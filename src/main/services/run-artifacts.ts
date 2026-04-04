@@ -1,8 +1,7 @@
 import { spawn } from "node:child_process";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import type { RecordStatus, RunRecord } from "../../shared/types";
-import { handoffMachineSummary } from "../../shared/handoff-utils";
+import type { RecordStatus, WorkerRunRecord } from "../../shared/types";
 import { parseBuilderOutput } from "./protocol";
 import { resolveWorkspaceGitRoot } from "./workspace-execution";
 
@@ -63,7 +62,7 @@ export function stripStatusFooter(finalMessage: string) {
 
 export function extractFinalSummary(finalMessage: string) {
   const handoff = parseBuilderOutput(finalMessage);
-  const machineSummary = handoffMachineSummary(handoff);
+  const machineSummary = handoff.machineSummary?.trim() || handoff.summary?.trim() || "";
 
   if (machineSummary) {
     return machineSummary;
@@ -228,7 +227,7 @@ export function mergeChangedFiles(...lists: string[][]) {
 }
 
 export function inferRunStatus(input: {
-  run: RunRecord | null;
+  run: WorkerRunRecord | null;
   active: boolean;
   quietForMs: number;
   outputText: string;

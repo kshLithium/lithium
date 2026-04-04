@@ -1,38 +1,63 @@
 import path from "node:path";
 import type {
+  DiscoverSourceSpec,
   LithiumHandoff,
   OracleModel,
   OracleThinkingTime,
-  ResearchIsolationMode,
-  ResearchWorkItemExecutor,
-  ResearchWorkItemKind,
   ResearchWorkItemRecord
 } from "../../shared/types";
-import { parseOracleOutput } from "../services/protocol";
+import { parseMarkedJsonPayload, parseOracleOutput } from "../services/protocol";
 import { OracleRunner } from "../services/oracle-runner";
 import { buildProjectPaths } from "../services/workspace-layout";
-import { RecordStore } from "../services/record-store";
 
 type OraclePoolDependencies = {
-  oracleRunner?: Pick<OracleRunner, "consult">;
+  oracleRunner?: Pick<OracleRunner, "consult" | "startConsult">;
   model?: OracleModel;
   browserThinkingTime?: OracleThinkingTime;
 };
 
+export type OracleTaskSession<Result> = {
+  oracleSessionSlug: string;
+  terminate: (signal?: NodeJS.Signals) => void;
+  result: Promise<Result>;
+};
+
 export type OraclePlannerResult = {
   handoff: LithiumHandoff;
-  rawOutput: string;
   oracleSessionSlug: string;
+  rawOutput: string;
   stdoutPath: string;
   stderrPath: string;
   outputPath: string;
 };
 
-export type OracleResearchResult = OraclePlannerResult;
+export type OracleDiscoverResult = {
+  summary: string;
+  sources: DiscoverSourceSpec[];
+  oracleSessionSlug: string;
+  rawOutput: string;
+  stdoutPath: string;
+  stderrPath: string;
+  outputPath: string;
+};
+
+export type OracleSynthesisResult = {
+  summary: string;
+  findings: Array<{
+    summary: string;
+    detail?: string;
+    sourceLocator: string;
+    citationText?: string;
+  }>;
+  oracleSessionSlug: string;
+  rawOutput: string;
+  stdoutPath: string;
+  stderrPath: string;
+  outputPath: string;
+};
 
 export class OracleWorkerPool {
-  private readonly records = new RecordStore();
-  private readonly oracleRunner: Pick<OracleRunner, "consult">;
+  private readonly oracleRunner: Pick<OracleRunner, "consult" | "startConsult">;
   private readonly model: OracleModel;
   private readonly browserThinkingTime: OracleThinkingTime;
 
@@ -47,114 +72,224 @@ export class OracleWorkerPool {
     runId: string;
     objectiveTitle: string;
     objectiveSummary: string;
-    branchTitle?: string;
+    activeBranchTitle?: string;
     runtimeContext: string;
-    workItem: ResearchWorkItemRecord;
+    task: ResearchWorkItemRecord;
   }): Promise<OraclePlannerResult> {
-    return await this.runOracleTask({
-      workspacePath: input.workspacePath,
-      runId: input.runId,
-      workItem: input.workItem,
-      prompt: buildOraclePlannerPrompt(input)
-    });
+    return await (await this.startPlannerTask(input)).result;
   }
 
-  async runResearchTask(input: {
+  async startPlannerTask(input: {
     workspacePath: string;
     runId: string;
     objectiveTitle: string;
     objectiveSummary: string;
-    branchTitle: string;
+    activeBranchTitle?: string;
     runtimeContext: string;
-    workItem: ResearchWorkItemRecord;
-  }): Promise<OracleResearchResult> {
-    return await this.runOracleTask({
+    task: ResearchWorkItemRecord;
+  }): Promise<OracleTaskSession<OraclePlannerResult>> {
+    const response = await this.startOracleTask({
       workspacePath: input.workspacePath,
       runId: input.runId,
-      workItem: input.workItem,
-      prompt: buildOracleResearchPrompt(input)
+      task: input.task,
+      lane: "plan",
+      prompt: buildPlannerPrompt(input),
+      files: []
     });
+
+    return {
+      oracleSessionSlug: response.oracleSessionSlug,
+      terminate: response.terminate,
+      result: response.result.then((payload) => ({
+        handoff: parseOracleOutput(payload.rawOutput),
+        oracleSessionSlug: payload.oracleSessionSlug,
+        rawOutput: payload.rawOutput,
+        stdoutPath: payload.stdoutPath,
+        stderrPath: payload.stderrPath,
+        outputPath: payload.outputPath
+      }))
+    };
   }
 
-  private async runOracleTask(input: {
+  async runDiscoverTask(input: {
     workspacePath: string;
     runId: string;
-    workItem: ResearchWorkItemRecord;
+    objectiveTitle: string;
+    branchTitle: string;
+    runtimeContext: string;
+    task: ResearchWorkItemRecord;
+  }): Promise<OracleDiscoverResult> {
+    return await (await this.startDiscoverTask(input)).result;
+  }
+
+  async startDiscoverTask(input: {
+    workspacePath: string;
+    runId: string;
+    objectiveTitle: string;
+    branchTitle: string;
+    runtimeContext: string;
+    task: ResearchWorkItemRecord;
+  }): Promise<OracleTaskSession<OracleDiscoverResult>> {
+    const response = await this.startOracleTask({
+      workspacePath: input.workspacePath,
+      runId: input.runId,
+      task: input.task,
+      lane: "discover",
+      prompt: buildDiscoverPrompt(input),
+      files: []
+    });
+
+    return {
+      oracleSessionSlug: response.oracleSessionSlug,
+      terminate: response.terminate,
+      result: response.result.then((payload) => {
+        const parsed = toRecord(parseMarkedJsonPayload(payload.rawOutput, "LITHIUM_HANDOFF"));
+        const sources = Array.isArray(parsed.sources)
+          ? parsed.sources.flatMap((entry) => normalizeDiscoveredSource(entry))
+          : [];
+
+        return {
+          summary: readString(parsed.summary) || payload.rawOutput.replace(/\s+/g, " ").trim().slice(0, 180),
+          sources,
+          oracleSessionSlug: payload.oracleSessionSlug,
+          rawOutput: payload.rawOutput,
+          stdoutPath: payload.stdoutPath,
+          stderrPath: payload.stderrPath,
+          outputPath: payload.outputPath
+        };
+      })
+    };
+  }
+
+  async runReadSynthesisTask(input: {
+    workspacePath: string;
+    runId: string;
+    objectiveTitle: string;
+    branchTitle: string;
+    runtimeContext: string;
+    task: ResearchWorkItemRecord;
+    files: string[];
+  }): Promise<OracleSynthesisResult> {
+    return await (await this.startReadSynthesisTask(input)).result;
+  }
+
+  async startReadSynthesisTask(input: {
+    workspacePath: string;
+    runId: string;
+    objectiveTitle: string;
+    branchTitle: string;
+    runtimeContext: string;
+    task: ResearchWorkItemRecord;
+    files: string[];
+  }): Promise<OracleTaskSession<OracleSynthesisResult>> {
+    const response = await this.startOracleTask({
+      workspacePath: input.workspacePath,
+      runId: input.runId,
+      task: input.task,
+      lane: "read",
+      prompt: buildReadPrompt(input),
+      files: input.files
+    });
+
+    return {
+      oracleSessionSlug: response.oracleSessionSlug,
+      terminate: response.terminate,
+      result: response.result.then((payload) => {
+        const parsed = toRecord(parseMarkedJsonPayload(payload.rawOutput, "LITHIUM_HANDOFF"));
+        const findings = Array.isArray(parsed.findings)
+          ? parsed.findings.flatMap((entry) => {
+              const record = toRecord(entry);
+              const summary = readString(record.summary);
+              const sourceLocator = readString(record.source_locator, record.sourceLocator);
+              if (!summary || !sourceLocator) {
+                return [];
+              }
+              return [
+                {
+                  summary,
+                  detail: readString(record.detail),
+                  sourceLocator,
+                  citationText: readString(record.citation_text, record.citationText)
+                }
+              ];
+            })
+          : [];
+
+        return {
+          summary: readString(parsed.summary) || payload.rawOutput.replace(/\s+/g, " ").trim().slice(0, 180),
+          findings,
+          oracleSessionSlug: payload.oracleSessionSlug,
+          rawOutput: payload.rawOutput,
+          stdoutPath: payload.stdoutPath,
+          stderrPath: payload.stderrPath,
+          outputPath: payload.outputPath
+        };
+      })
+    };
+  }
+
+  private async startOracleTask(input: {
+    workspacePath: string;
+    runId: string;
+    task: ResearchWorkItemRecord;
+    lane: "plan" | "discover" | "read";
     prompt: string;
+    files: string[];
   }) {
     const paths = buildProjectPaths(input.workspacePath);
-    const slug = buildOracleSessionSlug(input.runId, input.workItem);
-    const stdoutPath = path.join(paths.researchOracleSessionsDir, `${slug}.stdout.log`);
-    const stderrPath = path.join(paths.researchOracleSessionsDir, `${slug}.stderr.log`);
-    const outputPath = path.join(paths.researchOracleSessionsDir, `${slug}.output.txt`);
-
-    const result = await this.oracleRunner.consult({
+    const slug = `oracle-${input.lane}-${input.runId.toLowerCase()}-${input.task.id.toLowerCase()}`;
+    const stdoutPath = path.join(paths.oracleSessionsDir, `${slug}.stdout.log`);
+    const stderrPath = path.join(paths.oracleSessionsDir, `${slug}.stderr.log`);
+    const outputPath = path.join(paths.oracleSessionsDir, `${slug}.output.txt`);
+    const session = await this.oracleRunner.startConsult({
       workspacePath: input.workspacePath,
       prompt: input.prompt,
       model: this.model,
       browserThinkingTime: this.browserThinkingTime,
-      files: [],
+      files: input.files,
       stdoutPath,
       stderrPath,
       outputPath,
       slug,
-      strategistSessionReady: true
-    });
-    const rawOutput = result.outputText || result.stdout || result.stderr;
-    const handoff = parseOracleOutput(rawOutput);
-
-    await this.records.writeJson(path.join(paths.researchOracleSessionsDir, `${slug}.json`), {
-      slug,
-      runId: input.runId,
-      workItemId: input.workItem.id,
-      executor: input.workItem.executor,
-      stdoutPath,
-      stderrPath,
-      outputPath,
-      model: this.model,
-      createdAt: result.startedAt,
-      updatedAt: result.endedAt,
-      status: result.exitCode === 0 ? "completed" : "failed"
+      oracleSessionReady: true
     });
 
     return {
-      handoff,
-      rawOutput,
       oracleSessionSlug: slug,
-      stdoutPath,
-      stderrPath,
-      outputPath
+      terminate: session.terminate,
+      result: session.result.then((result) => ({
+        oracleSessionSlug: slug,
+        rawOutput: result.outputText || result.stdout || result.stderr,
+        stdoutPath,
+        stderrPath,
+        outputPath
+      }))
     };
   }
 }
 
-function buildOracleSessionSlug(runId: string, workItem: ResearchWorkItemRecord) {
-  const lane = workItem.executor === "oracle-planner" ? "planner" : "research";
-  return `oracle-${lane}-${runId.toLowerCase()}-${workItem.id.toLowerCase()}`;
-}
-
-function buildOraclePlannerPrompt(input: {
+function buildPlannerPrompt(input: {
   objectiveTitle: string;
   objectiveSummary: string;
-  branchTitle?: string;
+  activeBranchTitle?: string;
   runtimeContext: string;
-  workItem: ResearchWorkItemRecord;
+  task: ResearchWorkItemRecord;
 }) {
   return [
-    "You are the planner for a headless research engine.",
-    "Return a strategist handoff with the exact marker LITHIUM_HANDOFF followed by one JSON object.",
+    "You are the planner for Lithium V3.",
+    "Return LITHIUM_HANDOFF followed by one JSON object.",
     "The JSON must include: summary, rationale, proposedBranches, researchWorkItems.",
-    "Each proposed branch needs title and hypothesis.",
-    "Each researchWorkItem needs title, prompt, kind, executor, optional isolation, optional branchTitle.",
-    "Allowed kind values: deep-research, code-edit, experiment, evaluation.",
-    "Allowed executor values: oracle-research, builder-edit, experiment-run, evaluator.",
+    "Each proposedBranch needs title and hypothesis.",
+    "Each researchWorkItem needs title, prompt, kind, executor, optional branchTitle, optional isolation.",
+    "Allowed kind values: discover, read_synthesize, build_change, run_experiment, evaluate_branch.",
+    "Allowed executor values: discoverer, reader-synthesizer, builder, experimenter, evaluator.",
     "Allowed isolation values: none, worktree.",
-    "Keep the queue small: propose at most 3 work items.",
+    "Keep the plan bounded: propose at most 4 work items.",
     "",
     `OBJECTIVE_TITLE: ${input.objectiveTitle}`,
     `OBJECTIVE_SUMMARY: ${input.objectiveSummary}`,
-    input.branchTitle ? `ACTIVE_BRANCH: ${input.branchTitle}` : "",
-    `PLANNER_TASK: ${input.workItem.prompt}`,
+    input.activeBranchTitle ? `ACTIVE_BRANCH: ${input.activeBranchTitle}` : "",
+    `PLANNER_TASK: ${input.task.prompt}`,
     "",
     "RUNTIME_CONTEXT:",
     input.runtimeContext.trim()
@@ -163,65 +298,83 @@ function buildOraclePlannerPrompt(input: {
     .join("\n");
 }
 
-function buildOracleResearchPrompt(input: {
+function buildDiscoverPrompt(input: {
   objectiveTitle: string;
-  objectiveSummary: string;
   branchTitle: string;
   runtimeContext: string;
-  workItem: ResearchWorkItemRecord;
+  task: ResearchWorkItemRecord;
 }) {
   return [
-    "You are the parallel strategist researcher for a headless research engine.",
-    "Return a strategist handoff with the exact marker LITHIUM_HANDOFF followed by one JSON object.",
-    "The JSON must include: summary, rationale, risks, runActions, openQuestions.",
-    "Optional keys: proposedBranches, researchWorkItems.",
-    "Do not write prose outside the handoff marker.",
+    "You are the discoverer for Lithium V3.",
+    "Use browser research as needed and return only LITHIUM_HANDOFF plus one JSON object.",
+    "The JSON must include: summary and sources.",
+    "Each source must include: locator, title, kind, summary, optional excerpt, optional citation_text.",
+    "Allowed kind values: paper, repo, web.",
     "",
     `OBJECTIVE_TITLE: ${input.objectiveTitle}`,
-    `OBJECTIVE_SUMMARY: ${input.objectiveSummary}`,
     `BRANCH: ${input.branchTitle}`,
-    `RESEARCH_TASK: ${input.workItem.prompt}`,
+    `DISCOVER_TASK: ${input.task.prompt}`,
     "",
     "RUNTIME_CONTEXT:",
     input.runtimeContext.trim()
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].join("\n");
 }
 
-export function normalizeSuggestedExecutor(
-  kind: ResearchWorkItemKind,
-  executor?: string,
-  isolation?: string
-): {
-  executor: ResearchWorkItemExecutor;
-  isolation: ResearchIsolationMode;
-} {
-  if (executor === "oracle-research") {
-    return { executor, isolation: "none" };
+function buildReadPrompt(input: {
+  objectiveTitle: string;
+  branchTitle: string;
+  runtimeContext: string;
+  task: ResearchWorkItemRecord;
+}) {
+  return [
+    "You are the reader-synthesizer for Lithium V3.",
+    "You may rely on the attached files when present.",
+    "Return only LITHIUM_HANDOFF plus one JSON object.",
+    "The JSON must include: summary and findings.",
+    "Each finding must include: summary, source_locator, optional detail, optional citation_text.",
+    "",
+    `OBJECTIVE_TITLE: ${input.objectiveTitle}`,
+    `BRANCH: ${input.branchTitle}`,
+    `READ_TASK: ${input.task.prompt}`,
+    "",
+    "RUNTIME_CONTEXT:",
+    input.runtimeContext.trim()
+  ].join("\n");
+}
+
+function normalizeDiscoveredSource(value: unknown): DiscoverSourceSpec[] {
+  const record = toRecord(value);
+  const locator = readString(record.locator);
+  const title = readString(record.title);
+  const kind = readString(record.kind);
+
+  if (!locator || !title || !kind || !/^(paper|repo|web)$/.test(kind)) {
+    return [];
   }
 
-  if (executor === "builder-edit") {
-    return { executor, isolation: isolation === "none" ? "none" : "worktree" };
+  return [
+    {
+      locator,
+      title,
+      kind: kind as DiscoverSourceSpec["kind"],
+      summary: readString(record.summary) || title,
+      excerpt: readString(record.excerpt),
+      citationText: readString(record.citation_text, record.citationText),
+      branchTitle: readString(record.branch_title, record.branchTitle)
+    }
+  ];
+}
+
+function toRecord(value: unknown) {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function readString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
   }
 
-  if (executor === "experiment-run") {
-    return { executor, isolation: "worktree" };
-  }
-
-  if (executor === "evaluator") {
-    return { executor, isolation: "none" };
-  }
-
-  switch (kind) {
-    case "deep-research":
-      return { executor: "oracle-research", isolation: "none" };
-    case "code-edit":
-      return { executor: "builder-edit", isolation: "worktree" };
-    case "experiment":
-      return { executor: "experiment-run", isolation: "worktree" };
-    case "evaluation":
-    default:
-      return { executor: "evaluator", isolation: "none" };
-  }
+  return "";
 }

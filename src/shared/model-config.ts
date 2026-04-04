@@ -9,15 +9,15 @@ export const ORACLE_MODELS = ["gpt-5.4-pro"] as const;
 export const ORACLE_THINKING_TIMES = ["extended"] as const;
 export const BUILDER_MODELS = ["gpt-5.4", "gpt-5.3-codex"] as const;
 export const BUILDER_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
-export const PREFERRED_STRATEGIST_MODEL: OracleModel = "gpt-5.4-pro";
-export const PREFERRED_STRATEGIST_THINKING_TIME: OracleThinkingTime = "extended";
+export const PREFERRED_ORACLE_MODEL: OracleModel = "gpt-5.4-pro";
+export const PREFERRED_ORACLE_THINKING_TIME: OracleThinkingTime = "extended";
 
-const STRATEGIST_MODEL_DISPLAY_LABELS: Record<OracleModel, string> = {
+const ORACLE_MODEL_DISPLAY_LABELS: Record<OracleModel, string> = {
   "gpt-5.4-pro": "Pro"
 };
 
-export const STRATEGIST_MODEL_OPTIONS: ReadonlyArray<{ value: OracleModel; label: string }> = [
-  { value: "gpt-5.4-pro", label: getStrategistModelDisplayLabel("gpt-5.4-pro") }
+export const ORACLE_MODEL_OPTIONS: ReadonlyArray<{ value: OracleModel; label: string }> = [
+  { value: "gpt-5.4-pro", label: getOracleModelDisplayLabel("gpt-5.4-pro") }
 ];
 
 export const BUILDER_MODEL_OPTIONS: ReadonlyArray<{ value: BuilderModel; label: string }> = [
@@ -35,14 +35,14 @@ export const BUILDER_REASONING_OPTIONS: ReadonlyArray<{
   { value: "xhigh", label: "xhigh" }
 ];
 
-const STRATEGIST_THINKING_TIME_OPTIONS: ReadonlyArray<{
+const ORACLE_THINKING_TIME_OPTIONS: ReadonlyArray<{
   value: OracleThinkingTime;
   label: string;
 }> = [
   { value: "extended", label: "Extended" }
 ];
 
-const STRATEGIST_THINKING_TIME_VALUES_BY_MODEL: Record<OracleModel, readonly OracleThinkingTime[]> = {
+const ORACLE_THINKING_TIME_VALUES_BY_MODEL: Record<OracleModel, readonly OracleThinkingTime[]> = {
   "gpt-5.4-pro": ["extended"]
 };
 
@@ -62,47 +62,47 @@ export function isBuilderReasoningEffort(value: unknown): value is BuilderReason
   return typeof value === "string" && (BUILDER_REASONING_EFFORTS as readonly string[]).includes(value);
 }
 
-export function normalizeStrategistModel(_value?: unknown): OracleModel {
-  return PREFERRED_STRATEGIST_MODEL;
+export function normalizeOracleModel(_value?: unknown): OracleModel {
+  return PREFERRED_ORACLE_MODEL;
 }
 
-export function normalizeStrategistThinkingTime(_value?: unknown): OracleThinkingTime {
-  return PREFERRED_STRATEGIST_THINKING_TIME;
+export function normalizeOracleThinkingTime(_value?: unknown): OracleThinkingTime {
+  return PREFERRED_ORACLE_THINKING_TIME;
 }
 
-export function getStrategistModelDisplayLabel(model: OracleModel): string {
-  return STRATEGIST_MODEL_DISPLAY_LABELS[model];
+export function getOracleModelDisplayLabel(model: OracleModel): string {
+  return ORACLE_MODEL_DISPLAY_LABELS[model];
 }
 
-export function getStrategistPerspectiveLabel(model: OracleModel): string {
-  return `${getStrategistModelDisplayLabel(model)} strategist`;
+export function getOraclePerspectiveLabel(model: OracleModel): string {
+  return `${getOracleModelDisplayLabel(model)} planner`;
 }
 
-export function getStrategistThinkingTimeValues(model: OracleModel): readonly OracleThinkingTime[] {
-  return STRATEGIST_THINKING_TIME_VALUES_BY_MODEL[model];
+export function getOracleThinkingTimeValues(model: OracleModel): readonly OracleThinkingTime[] {
+  return ORACLE_THINKING_TIME_VALUES_BY_MODEL[model];
 }
 
-export function getStrategistThinkingOptions(model: OracleModel) {
-  const allowed = new Set(getStrategistThinkingTimeValues(model));
-  return STRATEGIST_THINKING_TIME_OPTIONS.filter((option) => allowed.has(option.value));
+export function getOracleThinkingOptions(model: OracleModel) {
+  const allowed = new Set(getOracleThinkingTimeValues(model));
+  return ORACLE_THINKING_TIME_OPTIONS.filter((option) => allowed.has(option.value));
 }
 
-export function getDefaultStrategistThinkingTime(model: OracleModel): OracleThinkingTime {
-  return PREFERRED_STRATEGIST_THINKING_TIME;
+export function getDefaultOracleThinkingTime(model: OracleModel): OracleThinkingTime {
+  return getOracleThinkingTimeValues(model)[0] ?? PREFERRED_ORACLE_THINKING_TIME;
 }
 
-export function coerceStrategistThinkingTime(
+export function coerceOracleThinkingTime(
   model: OracleModel,
   value: unknown,
   fallback?: OracleThinkingTime
 ): OracleThinkingTime {
-  if (isOracleThinkingTime(value) && getStrategistThinkingTimeValues(model).includes(value)) {
+  if (isOracleThinkingTime(value) && getOracleThinkingTimeValues(model).includes(value)) {
     return value;
   }
 
-  if (fallback && getStrategistThinkingTimeValues(model).includes(fallback)) {
+  if (fallback && getOracleThinkingTimeValues(model).includes(fallback)) {
     return fallback;
   }
 
-  return getDefaultStrategistThinkingTime(model);
+  return getDefaultOracleThinkingTime(model);
 }

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { CommandSpec, ResearchEvaluationVerdict } from "../../shared/types";
 import { readTextFileIfExists } from "../services/fs-utils";
-import { runCommand } from "../services/process-runner";
+import { startCommand } from "../services/process-runner";
 
 export type EvaluatorDecision = {
   verdict: ResearchEvaluationVerdict;
@@ -23,7 +23,55 @@ export type EvaluatorRunResult = {
   timedOut: boolean;
 };
 
+export type EvaluatorRunSession = {
+  command: CommandSpec;
+  startedAt: string;
+  pid: number | null;
+  terminate: (signal?: NodeJS.Signals) => void;
+  result: Promise<EvaluatorRunResult>;
+};
+
 export class EvaluatorRunner {
+  async startEvaluate(options: {
+    workspacePath: string;
+    branchTitle: string;
+    workItemTitle: string;
+    executionSummary: string;
+    runtimeContext: string;
+  }): Promise<EvaluatorRunSession> {
+    const artifactDir = path.join(options.workspacePath, ".lithium", "artifacts", "evaluator");
+    await mkdir(artifactDir, { recursive: true });
+    const token = randomUUID();
+    const outputPath = path.join(artifactDir, `${token}.output.json`);
+    const stdoutPath = path.join(artifactDir, `${token}.stdout.log`);
+    const stderrPath = path.join(artifactDir, `${token}.stderr.log`);
+    const command = this.buildCommand(options.workspacePath, options, outputPath);
+    const session = await startCommand({
+      spec: command,
+      stdoutPath,
+      stderrPath
+    });
+
+    return {
+      command,
+      startedAt: session.startedAt,
+      pid: session.pid,
+      terminate: session.terminate,
+      result: session.result.then(async (result) => {
+        const rawOutput =
+          (await readTextFileIfExists(outputPath)).trim() ||
+          [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim();
+
+        return {
+          command,
+          rawOutput,
+          decision: parseEvaluatorDecision(rawOutput),
+          ...result
+        };
+      })
+    };
+  }
+
   async evaluate(options: {
     workspacePath: string;
     branchTitle: string;
@@ -31,28 +79,7 @@ export class EvaluatorRunner {
     executionSummary: string;
     runtimeContext: string;
   }): Promise<EvaluatorRunResult> {
-    const artifactDir = path.join(options.workspacePath, ".lithium", "research", "evaluator");
-    await mkdir(artifactDir, { recursive: true });
-    const token = randomUUID();
-    const outputPath = path.join(artifactDir, `${token}.output.json`);
-    const stdoutPath = path.join(artifactDir, `${token}.stdout.log`);
-    const stderrPath = path.join(artifactDir, `${token}.stderr.log`);
-    const command = this.buildCommand(options.workspacePath, options, outputPath);
-    const result = await runCommand({
-      spec: command,
-      stdoutPath,
-      stderrPath
-    });
-    const rawOutput =
-      (await readTextFileIfExists(outputPath)).trim() ||
-      [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim();
-
-    return {
-      command,
-      rawOutput,
-      decision: parseEvaluatorDecision(rawOutput),
-      ...result
-    };
+    return await (await this.startEvaluate(options)).result;
   }
 
   buildCommand(

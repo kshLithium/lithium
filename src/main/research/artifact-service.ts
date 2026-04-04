@@ -1,165 +1,36 @@
-import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
 import path from "node:path";
-import type {
-  ExperimentResultRecord,
-  ExperimentSpecRecord,
-  MetricRecord,
-  ResearchWorkItemRecord,
-  RunRecord
-} from "../../shared/types";
-import { RecordStore } from "../services/record-store";
-import { createArtifactPaths, type ArtifactPaths, buildProjectPaths } from "../services/workspace-layout";
-import { resolveWorkspaceGitRoot } from "../services/workspace-execution";
+import type { ExperimentManifest, ExperimentResultRecord, SourceArtifactRecord } from "../../shared/types";
+import { createArtifactPaths, buildProjectPaths } from "../services/workspace-layout";
 import { ResearchStateStore } from "./state-store";
 
-const execFileAsync = promisify(execFile);
-
 export class ArtifactService {
-  private readonly records = new RecordStore();
-
   constructor(private readonly deps: { stateStore: ResearchStateStore }) {}
 
-  async allocateRunArtifacts(workspacePath: string): Promise<ArtifactPaths> {
+  async allocateWorkerRunArtifacts(workspacePath: string, lane: "worker" | "oracle" | "evaluator" = "worker") {
     const paths = buildProjectPaths(workspacePath);
-    const id = await this.records.nextId(paths.runsDir, "R");
-    await mkdir(paths.runsDir, { recursive: true });
-    return createArtifactPaths(paths.runsDir, id);
+    const id = (await this.deps.stateStore.allocateWorkerRun(workspacePath)).id;
+    const directory =
+      lane === "oracle" ? paths.oracleSessionsDir : lane === "evaluator" ? paths.evaluatorDir : paths.workerRunsDir;
+    await mkdir(directory, { recursive: true });
+    return createArtifactPaths(directory, id);
   }
 
-  async capturePatchArtifact(input: {
-    workspacePath: string;
-    workItemId: string;
-    worktreePath?: string;
-  }) {
-    if (!input.worktreePath) {
-      return null;
-    }
-
-    const paths = buildProjectPaths(input.workspacePath);
+  async writePatchArtifact(workspacePath: string, taskId: string, patch: string) {
+    const paths = buildProjectPaths(workspacePath);
     await mkdir(paths.researchPatchesDir, { recursive: true });
-    const patchArtifactPath = path.join(paths.researchPatchesDir, `${input.workItemId}.patch`);
-    const { stdout } = await execFileAsync("git", ["diff", "--binary", "HEAD", "--"], {
-      cwd: input.worktreePath,
-      maxBuffer: 10 * 1024 * 1024
-    }).catch(() => ({ stdout: "" }));
-
-    if (!stdout.trim()) {
-      return null;
-    }
-
-    await writeFile(patchArtifactPath, stdout, "utf8");
-    return patchArtifactPath;
+    const patchPath = path.join(paths.researchPatchesDir, `${taskId}.patch`);
+    await writeFile(patchPath, patch, "utf8");
+    return patchPath;
   }
 
-  async promotePatchArtifact(input: {
-    workspacePath: string;
-    patchArtifactPath?: string;
-  }): Promise<{ status: "promoted" | "skipped" | "failed"; error?: string }> {
-    if (!input.patchArtifactPath) {
-      return { status: "skipped" };
-    }
-
-    const gitRoot = await resolveWorkspaceGitRoot(input.workspacePath);
-
-    if (!gitRoot) {
-      return { status: "failed", error: "Patch promotion requires a git-backed workspace." };
-    }
-
-    try {
-      await execFileAsync("git", ["apply", "--3way", input.patchArtifactPath], {
-        cwd: gitRoot,
-        maxBuffer: 10 * 1024 * 1024
-      });
-      return { status: "promoted" };
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : typeof error === "string"
-          ? error
-          : "Failed to apply the patch artifact.";
-      return { status: "failed", error: message };
-    }
-  }
-
-  async recordExperiment(input: {
-    workspacePath: string;
-    workItem: ResearchWorkItemRecord;
-    runRecord: RunRecord;
-    summary: string;
-    worktreePath?: string;
-    patchArtifactPath?: string;
-  }) {
-    if (input.workItem.executor !== "experiment-run") {
-      return {
-        experimentSpec: null,
-        experimentResult: null,
-        metrics: [] as MetricRecord[]
-      };
-    }
-
-    const now = new Date().toISOString();
-    const experimentSpecId = (await this.deps.stateStore.allocateExperimentSpec(input.workspacePath)).id;
-    const experimentResultId = (await this.deps.stateStore.allocateExperimentResult(input.workspacePath)).id;
-    const experimentSpec: ExperimentSpecRecord = {
-      id: experimentSpecId,
-      objectiveId: input.workItem.objectiveId,
-      branchId: input.workItem.branchId,
-      threadId: input.workItem.threadId,
-      workItemId: input.workItem.id,
-      title: input.workItem.title,
-      prompt: input.workItem.prompt,
-      executor: "experiment-run",
-      isolation: input.workItem.isolation ?? "worktree",
-      worktreePath: input.worktreePath,
-      createdAt: now,
-      updatedAt: now
-    };
-    const experimentResult: ExperimentResultRecord = {
-      id: experimentResultId,
-      objectiveId: input.workItem.objectiveId,
-      branchId: input.workItem.branchId,
-      threadId: input.workItem.threadId,
-      workItemId: input.workItem.id,
-      experimentSpecId,
-      runId: input.runRecord.id,
-      status: normalizeTerminalRunStatus(input.runRecord.status),
-      summary: input.summary,
-      command: [input.runRecord.command.command, ...(input.runRecord.command.args ?? [])].join(" "),
-      stdoutPath: input.runRecord.stdoutPath,
-      stderrPath: input.runRecord.stderrPath,
-      outputPath: input.runRecord.finalMessagePath,
-      worktreePath: input.worktreePath,
-      changedFiles: input.runRecord.changedFiles ?? [],
-      patchArtifactPath: input.patchArtifactPath,
-      createdAt: now,
-      updatedAt: now
-    };
-
-    await this.deps.stateStore.writeExperimentSpec(input.workspacePath, experimentSpec);
-    await this.deps.stateStore.writeExperimentResult(input.workspacePath, experimentResult);
-
-    const metrics = await this.extractMetrics({
-      workspacePath: input.workspacePath,
-      workItem: input.workItem,
-      experimentResultId,
-      finalMessage: input.runRecord.finalMessage
-    });
-
-    return {
-      experimentSpec,
-      experimentResult,
-      metrics
-    };
-  }
-
-  async readRecentExperimentResults(workspacePath: string, objectiveId: string, limit = 5) {
-    return (await this.deps.stateStore.listExperimentResults(workspacePath))
-      .filter((entry) => entry.objectiveId === objectiveId)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, limit);
+  async writeExperimentManifest(workspacePath: string, experimentId: string, manifest: ExperimentManifest) {
+    const paths = buildProjectPaths(workspacePath);
+    await mkdir(paths.experimentManifestDir, { recursive: true });
+    const manifestPath = path.join(paths.experimentManifestDir, `${experimentId}.manifest.json`);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    return manifestPath;
   }
 
   async readPatchArtifact(patchArtifactPath?: string) {
@@ -170,60 +41,106 @@ export class ArtifactService {
     return await readFile(patchArtifactPath, "utf8").catch(() => "");
   }
 
-  private async extractMetrics(input: {
+  async captureSourceArtifact(input: {
     workspacePath: string;
-    workItem: ResearchWorkItemRecord;
-    experimentResultId: string;
-    finalMessage: string;
-  }) {
-    const matches = [...input.finalMessage.matchAll(/([A-Za-z][A-Za-z0-9_.\-\/ ]{1,48})\s*[:=]\s*(-?\d+(?:\.\d+)?)/g)];
-    const seen = new Set<string>();
-    const metrics: MetricRecord[] = [];
+    objectiveId: string;
+    sourceId: string;
+    fileName: string;
+    body: string | Buffer;
+    contentType?: string;
+  }): Promise<SourceArtifactRecord> {
+    const paths = buildProjectPaths(input.workspacePath);
+    await mkdir(paths.sourceArtifactsDir, { recursive: true });
+    const artifactId = (await this.deps.stateStore.allocateSourceArtifact(input.workspacePath)).id;
+    const safeName = input.fileName.replace(/[^A-Za-z0-9._-]+/g, "-");
+    const targetPath = path.join(paths.sourceArtifactsDir, `${artifactId}-${safeName}`);
+    const bytes = typeof input.body === "string" ? Buffer.from(input.body, "utf8") : input.body;
+    await writeFile(targetPath, bytes);
     const now = new Date().toISOString();
+    const record: SourceArtifactRecord = {
+      id: artifactId,
+      objectiveId: input.objectiveId,
+      sourceId: input.sourceId,
+      path: targetPath,
+      hash: sha256(bytes),
+      contentType: input.contentType,
+      sizeBytes: bytes.byteLength,
+      createdAt: now,
+      updatedAt: now
+    };
+    await this.deps.stateStore.writeSourceArtifact(input.workspacePath, record);
+    return record;
+  }
 
-    for (const match of matches.slice(0, 10)) {
-      const rawName = match[1]?.trim().replace(/\s+/g, " ");
-      const value = Number(match[2]);
+  async fetchRemoteSourceArtifact(input: {
+    workspacePath: string;
+    objectiveId: string;
+    sourceId: string;
+    locator: string;
+  }) {
+    try {
+      const response = await fetch(input.locator, {
+        headers: {
+          "user-agent": "Lithium/3.0"
+        }
+      });
 
-      if (!rawName || !Number.isFinite(value)) {
-        continue;
+      if (!response.ok) {
+        return null;
       }
 
-      const dedupeKey = `${rawName}:${value}`;
-      if (seen.has(dedupeKey)) {
-        continue;
-      }
-      seen.add(dedupeKey);
-
-      const metric: MetricRecord = {
-        id: (await this.deps.stateStore.allocateMetric(input.workspacePath)).id,
-        objectiveId: input.workItem.objectiveId,
-        branchId: input.workItem.branchId,
-        threadId: input.workItem.threadId,
-        workItemId: input.workItem.id,
-        experimentResultId: input.experimentResultId,
-        name: rawName,
-        value,
-        createdAt: now,
-        updatedAt: now
-      };
-      await this.deps.stateStore.writeMetric(input.workspacePath, metric);
-      metrics.push(metric);
+      const body = Buffer.from(await response.arrayBuffer());
+      const extension = inferExtensionFromContentType(response.headers.get("content-type"));
+      return await this.captureSourceArtifact({
+        workspacePath: input.workspacePath,
+        objectiveId: input.objectiveId,
+        sourceId: input.sourceId,
+        fileName: `${input.sourceId}${extension}`,
+        body,
+        contentType: response.headers.get("content-type") ?? undefined
+      });
+    } catch {
+      return null;
     }
+  }
 
-    return metrics;
+  async readRecentExperimentResults(workspacePath: string, objectiveId: string, limit = 5) {
+    return (await this.deps.stateStore.listExperimentResults(workspacePath))
+      .filter((entry) => entry.objectiveId === objectiveId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, limit);
+  }
+
+  toExperimentResultRecord(
+    record: ExperimentResultRecord,
+    manifest: ExperimentManifest,
+    manifestPath: string
+  ): ExperimentResultRecord {
+    return {
+      ...record,
+      manifest,
+      manifestPath
+    };
   }
 }
 
-function normalizeTerminalRunStatus(
-  status: RunRecord["status"]
-): ExperimentResultRecord["status"] {
-  switch (status) {
-    case "completed":
-    case "failed":
-    case "cancelled":
-      return status;
+function sha256(bytes: Uint8Array) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function inferExtensionFromContentType(contentType: string | null) {
+  const normalized = contentType?.split(";")[0]?.trim().toLowerCase() ?? "";
+
+  switch (normalized) {
+    case "text/html":
+      return ".html";
+    case "application/json":
+      return ".json";
+    case "text/plain":
+      return ".txt";
+    case "application/pdf":
+      return ".pdf";
     default:
-      return "failed";
+      return ".bin";
   }
 }

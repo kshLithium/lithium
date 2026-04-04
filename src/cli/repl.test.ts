@@ -16,7 +16,6 @@ import {
 function buildObjective(id = "RO001", title = "Main objective"): ResearchObjectiveRecord {
   return {
     id,
-    threadId: id,
     title,
     objective: title,
     summary: title,
@@ -35,7 +34,6 @@ function buildRun(status: ResearchRunRecord["status"] = "active"): ResearchRunRe
   return {
     id: "RR001",
     objectiveId: "RO001",
-    threadId: "RO001",
     status,
     slotBudget: {
       codexSlots: 1,
@@ -70,8 +68,6 @@ function buildSnapshot(input: {
       oracleModel: "gpt-5.4-pro",
       codexModel: "gpt-5.4",
       activeObjectiveId: objective?.id ?? undefined,
-      defaultThreadId: "",
-      activeThreadId: "",
       createdAt: "2026-04-03T00:00:00.000Z",
       updatedAt: "2026-04-03T00:00:00.000Z"
     },
@@ -89,7 +85,6 @@ function buildSnapshot(input: {
     latestProjection: objective
       ? {
           id: "RP001",
-          threadId: objective.id,
           objectiveId: objective.id,
           objectiveTitle: objective.title,
           status: run?.status === "blocked" ? "blocked" : "running",
@@ -110,7 +105,7 @@ function buildSnapshot(input: {
           lastUpdatedAt: "2026-04-03T00:00:00.000Z"
         }
       : null,
-    latestBuilderRun: null,
+    latestWorkerRun: null,
     blockedReason: run?.blockedReason,
     attachments: [],
     activeWorkerProgress: input.activeWorkers ?? [],
@@ -296,7 +291,7 @@ describe("LithiumCliController", () => {
 
     expect(service.prepareOracleSignIn).toHaveBeenCalledTimes(1);
     expect(settingsStore.update).toHaveBeenCalledWith({
-      strategistSessionReady: true
+      oracleSessionReady: true
     });
   });
 
