@@ -25,8 +25,11 @@ export class ChatProjectionService {
       input.branches[0] ??
       null;
     const pendingItems = input.workItems.filter((workItem) => workItem.status === "pending");
+    const runningItems = input.workItems.filter((workItem) => workItem.status === "running");
     const latestEvaluation = input.evaluations[0] ?? null;
     const latestFinding = input.findings[0] ?? null;
+    const latestPromotedPatch =
+      input.workItems.find((workItem) => workItem.promotionStatus === "promoted") ?? null;
     const currentFocus =
       pendingItems[0]?.title ||
       latestEvaluation?.summary ||
@@ -53,6 +56,14 @@ export class ChatProjectionService {
       activeRunId: input.run?.id,
       activeRunStatus: input.run?.status,
       blockedReason: input.run?.blockedReason,
+      activeSlots: runningItems.map((workItem) => `${workItem.executor ?? "builder-edit"}:${workItem.title}`),
+      lastBranchSwitch:
+        activeBranch?.id && activeBranch.id !== input.objective.activeBranchId
+          ? `${activeBranch.title}`
+          : activeBranch?.title,
+      lastPatchPromotion: latestPromotedPatch
+        ? `${latestPromotedPatch.title} -> ${latestPromotedPatch.patchArtifactPath ?? "applied"}`
+        : undefined,
       createdAt: now,
       updatedAt: now,
       lastUpdatedAt: now

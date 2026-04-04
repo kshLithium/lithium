@@ -2,9 +2,11 @@ import type {
   EvaluationRecord,
   LithiumHandoff,
   ResearchBranchRecord,
+  ResearchHypothesisRecord,
   ResearchObjectiveRecord,
   ResearchProjectionRecord,
   ResearchRunRecord,
+  ResearchWorktreeLeaseRecord,
   ResearchWorkItemRecord
 } from "../../shared/types";
 import { ChatProjectionService } from "./chat-projection-service";
@@ -17,7 +19,7 @@ export type ResearchDispatchBatch = {
   objective: ResearchObjectiveRecord;
   run: ResearchRunRecord;
   oracleWorkItems: ResearchWorkItemRecord[];
-  codexWorkItem: ResearchWorkItemRecord | null;
+  codexWorkItems: ResearchWorkItemRecord[];
   replanTriggers: string[];
 };
 
@@ -37,6 +39,10 @@ export type ResearchOutcomeInput = {
   runId?: string;
   worktreePath?: string;
   oracleSessionSlug?: string;
+  patchArtifactPath?: string;
+  promotionStatus?: ResearchWorkItemRecord["promotionStatus"];
+  promotionError?: string;
+  lease?: ResearchWorktreeLeaseRecord;
 };
 
 export class ResearchEngine {
@@ -104,29 +110,39 @@ export class ResearchEngine {
       return null;
     }
 
-    const branchesById = new Map(state.branches.map((entry) => [entry.id, entry]));
-    const ranked = rankRunnableWorkItems(state.workItems, branchesById);
-    const oracleWorkItems = ranked
-      .filter((entry) => entry.executor === "oracle-planner" || entry.executor === "oracle-research")
-      .slice(0, run.slotBudget.oracleSlots);
-    const codexWorkItem =
-      ranked.find((entry) =>
-        entry.executor === "builder-edit" || entry.executor === "experiment-run" || entry.executor === "evaluator"
-      ) ?? null;
     const replanTriggers = collectResearchReplanTriggers({
-      runnableQueueDepth: ranked.length,
+      runnableQueueDepth: state.workItems.filter((entry) => entry.status === "pending").length,
       latestEvaluation: state.latestEvaluation,
       latestBranch: state.latestBranch,
       latestSource: state.latestSource,
       latestWorkItem: state.latestWorkItem,
-      budgetBoundary: run.slotBudget.completedWorkItems >= run.slotBudget.maxTotalWorkItems
+      budgetBoundary: run.slotBudget.completedWorkItems >= run.slotBudget.maxTotalWorkItems,
+      metricShift: state.metrics.length > 1
     });
+    const branchesById = new Map(state.branches.map((entry) => [entry.id, entry]));
+    const ranked = rankRunnableWorkItems(state.workItems, branchesById);
+    const oraclePending = ranked.filter(
+      (entry) => entry.executor === "oracle-planner" || entry.executor === "oracle-research"
+    );
+    const codexPending = ranked.filter(
+      (entry) => entry.executor === "builder-edit" || entry.executor === "experiment-run" || entry.executor === "evaluator"
+    );
+    const plannerCandidate = oraclePending.find((entry) => entry.executor === "oracle-planner") ?? null;
+    const oracleResearchCandidates = oraclePending.filter((entry) => entry.executor === "oracle-research");
+    const reservedPlannerSlots = plannerCandidate ? 1 : 0;
+    const oracleWorkItems = [
+      ...(reservedPlannerSlots ? [plannerCandidate] : []),
+      ...oracleResearchCandidates.slice(0, Math.max(run.slotBudget.oracleSlots - reservedPlannerSlots, 0))
+    ]
+      .filter((entry): entry is ResearchWorkItemRecord => Boolean(entry))
+      .slice(0, run.slotBudget.oracleSlots);
+    const codexWorkItems = codexPending.slice(0, Math.max(run.slotBudget.codexSlots, 0));
 
     return {
       objective,
       run,
       oracleWorkItems,
-      codexWorkItem,
+      codexWorkItems,
       replanTriggers
     };
   }
@@ -175,16 +191,26 @@ export class ResearchEngine {
     oracleSessionSlug: string;
   }) {
     const state = await this.deps.stateStore.readState(input.workspacePath, input.objective.id);
-    const branches = new Map(state.branches.map((entry) => [entry.title.toLowerCase(), entry]));
+    const branchesByTitle = new Map(state.branches.map((entry) => [entry.title.toLowerCase(), entry]));
+    const branchesById = new Map(state.branches.map((entry) => [entry.id, entry]));
     const now = new Date().toISOString();
+    const nextObjective: ResearchObjectiveRecord = {
+      ...input.objective,
+      branchIds: [...input.objective.branchIds],
+      updatedAt: now
+    };
+    const branchWrites = new Map<string, ResearchBranchRecord>();
+    const newHypotheses: ResearchHypothesisRecord[] = [];
 
     for (const proposedBranch of input.handoff.proposedBranches ?? []) {
-      const existing = branches.get(proposedBranch.title.trim().toLowerCase());
+      const normalizedTitle = proposedBranch.title.trim().toLowerCase();
+      const existing = branchesByTitle.get(normalizedTitle);
       if (existing) {
         continue;
       }
 
       const allocation = await this.deps.stateStore.allocateBranch(input.workspacePath);
+      const hypothesisAllocation = await this.deps.stateStore.allocateHypothesis(input.workspacePath);
       const branch: ResearchBranchRecord = {
         id: allocation.id,
         objectiveId: input.objective.id,
@@ -204,19 +230,29 @@ export class ResearchEngine {
         updatedAt: now,
         lastUpdatedAt: now
       };
-      await this.deps.stateStore.writeBranch(input.workspacePath, branch);
-      branches.set(branch.title.toLowerCase(), branch);
-      await this.deps.stateStore.writeObjective(input.workspacePath, {
-        ...input.objective,
-        branchIds: Array.from(new Set([...input.objective.branchIds, branch.id])),
+      const hypothesis: ResearchHypothesisRecord = {
+        id: hypothesisAllocation.id,
+        objectiveId: input.objective.id,
+        branchId: branch.id,
+        threadId: input.objective.threadId,
+        statement: proposedBranch.hypothesis.trim(),
+        status: "open",
+        confidence: 0.5,
+        evidenceIds: [],
+        createdAt: now,
         updatedAt: now
-      });
+      };
+      branchesByTitle.set(normalizedTitle, branch);
+      branchesById.set(branch.id, branch);
+      branchWrites.set(branch.id, branch);
+      newHypotheses.push(hypothesis);
+      nextObjective.branchIds = Array.from(new Set([...nextObjective.branchIds, branch.id]));
     }
 
     for (const suggested of input.handoff.researchWorkItems ?? []) {
       const branch =
-        (suggested.branchTitle && branches.get(suggested.branchTitle.trim().toLowerCase())) ??
-        state.branches.find((entry) => entry.id === input.objective.activeBranchId) ??
+        (suggested.branchTitle && branchesByTitle.get(suggested.branchTitle.trim().toLowerCase())) ??
+        branchesById.get(input.objective.activeBranchId ?? "") ??
         state.latestBranch;
       if (!branch) {
         continue;
@@ -250,20 +286,30 @@ export class ResearchEngine {
         updatedAt: now
       };
       await this.deps.stateStore.writeWorkItem(input.workspacePath, workItem);
-      await this.deps.stateStore.writeBranch(input.workspacePath, {
-        ...branch,
-        workItemIds: Array.from(new Set([...branch.workItemIds, workItem.id])),
-        nextWorkItemId: branch.nextWorkItemId ?? workItem.id,
+      const nextBranch = branchWrites.get(branch.id) ?? branch;
+      branchWrites.set(branch.id, {
+        ...nextBranch,
+        workItemIds: Array.from(new Set([...nextBranch.workItemIds, workItem.id])),
+        nextWorkItemId: nextBranch.nextWorkItemId ?? workItem.id,
         updatedAt: now,
         lastUpdatedAt: now
       });
     }
 
+    await this.deps.stateStore.writeObjective(input.workspacePath, nextObjective);
+    for (const branch of branchWrites.values()) {
+      await this.deps.stateStore.writeBranch(input.workspacePath, branch);
+    }
+    for (const hypothesis of newHypotheses) {
+      await this.deps.stateStore.writeHypothesis(input.workspacePath, hypothesis);
+    }
+
     await this.appendHandoffEvidence({
       workspacePath: input.workspacePath,
-      objective: input.objective,
+      objective: nextObjective,
       branch:
-        state.branches.find((entry) => entry.id === input.objective.activeBranchId) ??
+        branchWrites.get(input.objective.activeBranchId ?? "") ??
+        branchesById.get(input.objective.activeBranchId ?? "") ??
         state.latestBranch ??
         null,
       workItem: input.workItem,
@@ -293,6 +339,10 @@ export class ResearchEngine {
       runId: input.runId ?? input.workItem.runId,
       worktreePath: input.worktreePath ?? input.workItem.worktreePath,
       resultEvaluationId: input.evaluation.id,
+      leaseId: input.lease?.id ?? input.workItem.leaseId,
+      patchArtifactPath: input.patchArtifactPath ?? input.workItem.patchArtifactPath,
+      promotionStatus: input.promotionStatus ?? input.workItem.promotionStatus,
+      promotionError: input.promotionError ?? input.workItem.promotionError,
       completedAt: now,
       updatedAt: now
     };
@@ -314,18 +364,37 @@ export class ResearchEngine {
     });
 
     await this.deps.stateStore.writeEvaluation(input.workspacePath, input.evaluation);
+    await this.deps.stateStore.appendActivity(
+      input.workspacePath,
+      `evaluation ${input.evaluation.verdict} for ${input.workItem.id} on ${branch.title}`
+    );
 
+    const branchState = await this.deps.stateStore.readState(input.workspacePath, input.objective.id);
+    const branchWithEvidence = branchState.branches.find((entry) => entry.id === branch.id) ?? branch;
     const updatedBranch: ResearchBranchRecord = {
-      ...branch,
-      score: roundScore(branch.score + input.evaluation.scoreDelta),
-      status: deriveBranchStatus(branch, input.evaluation.verdict, input.status),
+      ...branchWithEvidence,
+      score: roundScore(branchWithEvidence.score + input.evaluation.scoreDelta),
+      status: deriveBranchStatus(branchWithEvidence, input.evaluation.verdict, input.status),
       nextWorkItemId: undefined,
-      lastFailureReason: input.status === "failed" ? input.summary : branch.lastFailureReason,
-      workItemIds: Array.from(new Set([...branch.workItemIds, finalizedWorkItem.id])),
+      lastFailureReason: input.status === "failed" ? input.summary : branchWithEvidence.lastFailureReason,
+      workItemIds: Array.from(new Set([...branchWithEvidence.workItemIds, finalizedWorkItem.id])),
       updatedAt: now,
       lastUpdatedAt: now
     };
     await this.deps.stateStore.writeBranch(input.workspacePath, updatedBranch);
+    await this.updateHypothesisFromEvaluation({
+      workspacePath: input.workspacePath,
+      branch: updatedBranch,
+      evaluation: input.evaluation
+    });
+
+    const latestState = await this.deps.stateStore.readState(input.workspacePath, input.objective.id);
+    const latestObjective = latestState.latestObjective ?? input.objective;
+    const nextActiveBranch =
+      selectActiveBranch(latestState.branches) ??
+      latestState.branches.find((entry) => entry.id === latestObjective.activeBranchId) ??
+      updatedBranch;
+    const branchSwitched = nextActiveBranch.id !== latestObjective.activeBranchId;
 
     const nextRunStatus =
       input.run.slotBudget.completedWorkItems + 1 >= input.run.slotBudget.maxTotalWorkItems
@@ -350,11 +419,30 @@ export class ResearchEngine {
       endedAt: nextRunStatus === "completed" ? now : input.run.endedAt
     });
     await this.deps.stateStore.writeObjective(input.workspacePath, {
-      ...input.objective,
-      status: nextRunStatus === "completed" ? "completed" : input.objective.status,
+      ...latestObjective,
+      status: nextRunStatus === "completed" ? "completed" : latestObjective.status,
       summary: input.evaluation.summary,
+      activeBranchId: nextActiveBranch.id,
       updatedAt: now
     });
+    if (branchSwitched) {
+      await this.deps.stateStore.appendActivity(
+        input.workspacePath,
+        `branch switch ${latestObjective.activeBranchId ?? "none"} -> ${nextActiveBranch.id} (${nextActiveBranch.title})`
+      );
+    }
+    if (finalizedWorkItem.promotionStatus === "promoted") {
+      await this.deps.stateStore.appendActivity(
+        input.workspacePath,
+        `patch promoted for ${finalizedWorkItem.id}: ${finalizedWorkItem.patchArtifactPath ?? "inline"}`
+      );
+    }
+    if (finalizedWorkItem.promotionStatus === "failed") {
+      await this.deps.stateStore.appendActivity(
+        input.workspacePath,
+        `patch promotion failed for ${finalizedWorkItem.id}: ${finalizedWorkItem.promotionError ?? "unknown error"}`
+      );
+    }
     await this.deps.stateStore.appendEvent(input.workspacePath, {
       id: `${input.workItem.id}-completed`,
       threadId: input.objective.threadId,
@@ -366,7 +454,8 @@ export class ResearchEngine {
         executor: input.workItem.executor,
         status: input.status,
         evaluationId: input.evaluation.id,
-        runId: input.runId ?? null
+        runId: input.runId ?? null,
+        promotionStatus: finalizedWorkItem.promotionStatus ?? null
       },
       createdAt: now
     });
@@ -384,6 +473,7 @@ export class ResearchEngine {
       blockedReason: input.reason,
       updatedAt: now
     });
+    await this.deps.stateStore.appendActivity(input.workspacePath, `run blocked ${input.run.id}: ${input.reason}`);
   }
 
   async resumeRun(input: {
@@ -438,6 +528,10 @@ export class ResearchEngine {
         oracleSessionSlugs: [],
         updatedAt: now
       });
+      await this.deps.stateStore.appendActivity(
+        workspacePath,
+        `run blocked ${run.id}: application restarted while work items were active`
+      );
     }
   }
 
@@ -529,7 +623,13 @@ export class ResearchEngine {
       kind: input.sourceKind,
       title: input.workItem.title,
       locator: input.oracleSessionSlug ?? input.workItem.runId ?? input.workItem.id,
+      provenance: input.oracleSessionSlug
+        ? `oracle-session:${input.oracleSessionSlug}`
+        : input.workItem.runId
+        ? `run:${input.workItem.runId}`
+        : `work-item:${input.workItem.id}`,
       summary: input.summary,
+      excerpt: input.detail?.trim() || input.summary,
       metadata:
         input.oracleSessionSlug
           ? {
@@ -559,6 +659,11 @@ export class ResearchEngine {
 
     await this.deps.stateStore.writeSource(input.workspacePath, source);
     await this.deps.stateStore.writeFinding(input.workspacePath, finding);
+    await this.deps.stateStore.writeObjective(input.workspacePath, {
+      ...input.objective,
+      sourceIds: Array.from(new Set([...input.objective.sourceIds, source.id])),
+      updatedAt: now
+    });
 
     if (input.branch) {
       await this.deps.stateStore.writeBranch(input.workspacePath, {
@@ -570,6 +675,41 @@ export class ResearchEngine {
         lastUpdatedAt: now
       });
     }
+  }
+
+  private async updateHypothesisFromEvaluation(input: {
+    workspacePath: string;
+    branch: ResearchBranchRecord;
+    evaluation: EvaluationRecord;
+  }) {
+    const state = await this.deps.stateStore.readState(input.workspacePath, input.branch.objectiveId);
+    const hypothesis = state.hypotheses.find((entry) => entry.branchId === input.branch.id) ?? null;
+
+    if (!hypothesis) {
+      return;
+    }
+
+    const nextStatus =
+      input.evaluation.verdict === "kill"
+        ? "unsupported"
+        : input.evaluation.verdict === "pivot"
+        ? "revised"
+        : input.evaluation.verdict === "complete" || input.evaluation.verdict === "continue"
+        ? "supported"
+        : "open";
+    const nextConfidence = Math.max(
+      0,
+      Math.min(1, roundScore(hypothesis.confidence + input.evaluation.scoreDelta + (nextStatus === "supported" ? 0.05 : 0)))
+    );
+
+    await this.deps.stateStore.writeHypothesis(input.workspacePath, {
+      ...hypothesis,
+      status: nextStatus,
+      confidence: nextConfidence,
+      evidenceIds: Array.from(new Set([...hypothesis.evidenceIds, input.evaluation.id])),
+      lastEvaluationId: input.evaluation.id,
+      updatedAt: new Date().toISOString()
+    });
   }
 }
 
@@ -615,4 +755,10 @@ function deriveBranchStatus(
 
 function roundScore(value: number) {
   return Math.round(value * 1_000) / 1_000;
+}
+
+function selectActiveBranch(branches: ResearchBranchRecord[]) {
+  return [...branches]
+    .filter((entry) => entry.status === "active" || entry.status === "candidate" || entry.status === "pivoted")
+    .sort((left, right) => right.score - left.score || right.lastUpdatedAt.localeCompare(left.lastUpdatedAt))[0] ?? null;
 }

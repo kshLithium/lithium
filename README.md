@@ -1,13 +1,13 @@
 # Lithium
 
-Lithium is a local-first CLI for running an automation-heavy research loop from one terminal chat.
+Lithium is a local-first CLI for running an objective-first research engine from one terminal.
 
 ## Philosophy
 
-- Chat is the front door.
+- Objectives, branches, work items, evidence, and evaluations are the source of truth.
 - Workspace state should live with the workspace.
-- Research, execution, and memory should feel like one loop instead of separate tools.
-- The tool should stay lightweight instead of growing side tools again.
+- Research, execution, evidence capture, and evaluation should feel like one loop.
+- Builder edits and experiments should run in isolated worktrees whenever possible.
 
 ## Usage
 
@@ -27,27 +27,24 @@ If no workspace path is provided, Lithium uses the last workspace from `~/.lithi
 
 ## CLI Commands
 
-Lithium accepts natural-language chat input by default. Use these commands only for precise control:
+Lithium runs in objective-first autopilot mode. Free-form chat is disabled.
 
 ```text
 :help
 :workspace <path>
-:threads
-:thread new [title]
-:thread use <id|index>
+:objective list
+:objective new <goal>
+:objective use <id>
+:run start
+:run pause
+:run resume
+:run stop
 :attach <path...>
 :signin
 :status
+:queue
+:evidence
 :exit
-```
-
-Route overrides still work in chat:
-
-```text
-/research ...
-/build ...
-/mixed ...
-/plan ...
 ```
 
 ## Development
@@ -61,8 +58,9 @@ npm run build
 ## Notes
 
 - Lithium stores workspace state in `.lithium/` inside the selected folder.
+- Active research state lives under `.lithium/research/`.
 - CLI settings live in `~/.lithium/settings.json`.
-- `:signin` prepares the reusable strategist browser session for ChatGPT/Oracle-backed research turns.
+- `:signin` prepares the reusable strategist browser session for Oracle-backed planner and research work.
 
 ## License
 

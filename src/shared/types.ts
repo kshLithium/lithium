@@ -254,7 +254,15 @@ export type AutomationCheckpointRecord = {
 
 export type ResearchObjectiveStatus = "pending" | "active" | "paused" | "completed" | "failed";
 export type ResearchBranchStatus = "candidate" | "active" | "blocked" | "killed" | "pivoted" | "completed";
-export type ResearchSourceKind = "workspace" | "paper" | "repo" | "web" | "decision" | "run" | "conversation";
+export type ResearchSourceKind =
+  | "workspace"
+  | "paper"
+  | "repo"
+  | "web"
+  | "decision"
+  | "run"
+  | "conversation"
+  | "attachment";
 export type ResearchFindingKind = "evidence" | "observation" | "claim";
 export type ResearchHypothesisStatus = "open" | "supported" | "unsupported" | "revised";
 export type ResearchWorkItemKind = "planner" | "deep-research" | "code-edit" | "experiment" | "evaluation";
@@ -271,6 +279,8 @@ export type ResearchWorkItemStatus = "pending" | "running" | "blocked" | "comple
 export type ResearchEvaluationVerdict = "continue" | "kill" | "pivot" | "complete";
 export type ResearchProjectionStatus = "idle" | "running" | "paused" | "blocked" | "completed";
 export type ResearchRunStatus = "pending" | "active" | "blocked" | "paused" | "completed" | "failed";
+export type ResearchPatchPromotionStatus = "pending" | "promoted" | "skipped" | "failed";
+export type ResearchWorktreeLeaseCleanupStatus = "active" | "released" | "failed";
 
 export type ResearchPriorityScore = {
   objectiveAlignment: number;
@@ -328,7 +338,10 @@ export type ResearchSourceRecord = {
   kind: ResearchSourceKind;
   title: string;
   locator: string;
+  provenance: string;
   summary: string;
+  excerpt?: string;
+  attachmentId?: string;
   metadata?: Record<string, string | number | boolean | null>;
   createdAt: string;
   updatedAt: string;
@@ -357,8 +370,20 @@ export type ResearchHypothesisRecord = {
   status: ResearchHypothesisStatus;
   confidence: number;
   evidenceIds: string[];
+  lastEvaluationId?: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ResearchWorktreeLeaseRecord = {
+  id: string;
+  workItemId: string;
+  worktreePath: string;
+  cleanupStatus: ResearchWorktreeLeaseCleanupStatus;
+  createdAt: string;
+  updatedAt: string;
+  releasedAt?: string;
+  cleanupError?: string;
 };
 
 export type ResearchWorkItemRecord = {
@@ -382,6 +407,10 @@ export type ResearchWorkItemRecord = {
   oracleSessionSlug?: string;
   worktreePath?: string;
   resultEvaluationId?: string;
+  leaseId?: string;
+  patchArtifactPath?: string;
+  promotionStatus?: ResearchPatchPromotionStatus;
+  promotionError?: string;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -405,7 +434,7 @@ export type ResearchRunRecord = {
   slotBudget: ResearchRunSlotBudget;
   activeWorkItemIds: string[];
   oracleSessionSlugs: string[];
-  worktreeLeases: string[];
+  worktreeLeases: ResearchWorktreeLeaseRecord[];
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -423,6 +452,56 @@ export type EvaluationRecord = {
   summary: string;
   rationale: string;
   followupPrompt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ExperimentSpecRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  threadId: string;
+  workItemId: string;
+  title: string;
+  prompt: string;
+  executor: Extract<ResearchWorkItemExecutor, "experiment-run">;
+  isolation: ResearchIsolationMode;
+  worktreePath?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ExperimentResultRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  threadId: string;
+  workItemId: string;
+  experimentSpecId: string;
+  runId?: string;
+  status: "completed" | "failed" | "cancelled";
+  summary: string;
+  command?: string;
+  stdoutPath?: string;
+  stderrPath?: string;
+  outputPath?: string;
+  worktreePath?: string;
+  changedFiles: string[];
+  patchArtifactPath?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MetricRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  threadId: string;
+  workItemId: string;
+  experimentResultId: string;
+  name: string;
+  value: number;
+  unit?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -454,6 +533,9 @@ export type ResearchProjectionRecord = {
   activeRunId?: string;
   activeRunStatus?: ResearchRunStatus;
   blockedReason?: string;
+  activeSlots: string[];
+  lastBranchSwitch?: string;
+  lastPatchPromotion?: string;
   createdAt: string;
   updatedAt: string;
   lastUpdatedAt: string;
@@ -690,9 +772,12 @@ export type WorkspaceSnapshot = {
   branches: ResearchBranchRecord[];
   queue: ResearchWorkItemRecord[];
   recentFindings: ResearchFindingRecord[];
+  recentSources: ResearchSourceRecord[];
+  recentExperiments: ExperimentResultRecord[];
   latestEvaluation: EvaluationRecord | null;
   latestProjection: ResearchProjectionRecord | null;
   latestBuilderRun: RunRecord | null;
+  blockedReason?: string;
   attachments: AttachmentRecord[];
   activeWorkerProgress: ActiveWorkerProgressRecord[];
   logs: string[];

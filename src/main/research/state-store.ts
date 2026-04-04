@@ -5,6 +5,9 @@ import type {
   AutomationSessionRecord,
   DecisionRecord,
   EvaluationRecord,
+  ExperimentResultRecord,
+  ExperimentSpecRecord,
+  MetricRecord,
   ProjectRecord,
   ResearchBranchRecord,
   ResearchEventRecord,
@@ -30,6 +33,9 @@ export type ResearchStateSnapshot = {
   hypotheses: ResearchHypothesisRecord[];
   workItems: ResearchWorkItemRecord[];
   evaluations: EvaluationRecord[];
+  experimentSpecs: ExperimentSpecRecord[];
+  experimentResults: ExperimentResultRecord[];
+  metrics: MetricRecord[];
   runs: ResearchRunRecord[];
   latestObjective: ResearchObjectiveRecord | null;
   latestBranch: ResearchBranchRecord | null;
@@ -38,6 +44,7 @@ export type ResearchStateSnapshot = {
   latestHypothesis: ResearchHypothesisRecord | null;
   latestWorkItem: ResearchWorkItemRecord | null;
   latestEvaluation: EvaluationRecord | null;
+  latestExperimentResult: ExperimentResultRecord | null;
   latestProjection: ResearchProjectionRecord | null;
   latestRun: ResearchRunRecord | null;
 };
@@ -80,6 +87,10 @@ export class ResearchStateStore {
       mkdir(paths.researchProjectionsDir, { recursive: true }),
       mkdir(paths.researchRunsDir, { recursive: true }),
       mkdir(paths.researchOracleSessionsDir, { recursive: true }),
+      mkdir(paths.researchExperimentSpecsDir, { recursive: true }),
+      mkdir(paths.researchExperimentResultsDir, { recursive: true }),
+      mkdir(paths.researchMetricsDir, { recursive: true }),
+      mkdir(paths.researchPatchesDir, { recursive: true }),
       mkdir(paths.worktreesDir, { recursive: true }),
       mkdir(paths.legacyV2Dir, { recursive: true })
     ]);
@@ -158,6 +169,18 @@ export class ResearchStateStore {
     return await this.allocateRecord(workspacePath, "run");
   }
 
+  async allocateExperimentSpec(workspacePath: string) {
+    return await this.allocateRecord(workspacePath, "experiment-spec");
+  }
+
+  async allocateExperimentResult(workspacePath: string) {
+    return await this.allocateRecord(workspacePath, "experiment-result");
+  }
+
+  async allocateMetric(workspacePath: string) {
+    return await this.allocateRecord(workspacePath, "metric");
+  }
+
   async writeObjective(workspacePath: string, record: ResearchObjectiveRecord) {
     await this.writeScopedRecord(workspacePath, this.buildPaths(workspacePath).researchObjectivesDir, record.id, record);
   }
@@ -198,9 +221,45 @@ export class ResearchStateStore {
     await this.records.writeJson(paths.researchCurrentProjectionFile, record);
   }
 
+  async writeExperimentSpec(workspacePath: string, record: ExperimentSpecRecord) {
+    await this.writeScopedRecord(workspacePath, this.buildPaths(workspacePath).researchExperimentSpecsDir, record.id, record);
+  }
+
+  async writeExperimentResult(workspacePath: string, record: ExperimentResultRecord) {
+    await this.writeScopedRecord(workspacePath, this.buildPaths(workspacePath).researchExperimentResultsDir, record.id, record);
+  }
+
+  async writeMetric(workspacePath: string, record: MetricRecord) {
+    await this.writeScopedRecord(workspacePath, this.buildPaths(workspacePath).researchMetricsDir, record.id, record);
+  }
+
   async appendEvent(workspacePath: string, record: ResearchEventRecord) {
     await this.ensureLayout(workspacePath);
     await appendFile(this.buildPaths(workspacePath).researchEventsFile, `${JSON.stringify(record)}\n`, "utf8");
+  }
+
+  async appendActivity(workspacePath: string, message: string) {
+    await this.ensureLayout(workspacePath);
+    const entry = `[${new Date().toISOString()}] ${message}`;
+    await appendFile(this.buildPaths(workspacePath).activityLog, `${entry}\n`, "utf8");
+  }
+
+  async appendPromptLog(workspacePath: string, entry: Record<string, unknown>) {
+    await this.ensureLayout(workspacePath);
+    await appendFile(
+      this.buildPaths(workspacePath).promptLog,
+      `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`,
+      "utf8"
+    );
+  }
+
+  async appendWorkerHistory(workspacePath: string, entry: Record<string, unknown>) {
+    await this.ensureLayout(workspacePath);
+    await appendFile(
+      this.buildPaths(workspacePath).workerHistoryLog,
+      `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`,
+      "utf8"
+    );
   }
 
   async listObjectives(workspacePath: string) {
@@ -229,6 +288,18 @@ export class ResearchStateStore {
 
   async listEvaluations(workspacePath: string) {
     return await this.records.readRecordDirectory<EvaluationRecord>(this.buildPaths(workspacePath).researchEvaluationsDir);
+  }
+
+  async listExperimentSpecs(workspacePath: string) {
+    return await this.records.readRecordDirectory<ExperimentSpecRecord>(this.buildPaths(workspacePath).researchExperimentSpecsDir);
+  }
+
+  async listExperimentResults(workspacePath: string) {
+    return await this.records.readRecordDirectory<ExperimentResultRecord>(this.buildPaths(workspacePath).researchExperimentResultsDir);
+  }
+
+  async listMetrics(workspacePath: string) {
+    return await this.records.readRecordDirectory<MetricRecord>(this.buildPaths(workspacePath).researchMetricsDir);
   }
 
   async listRuns(workspacePath: string) {
@@ -280,6 +351,9 @@ export class ResearchStateStore {
       hypotheses,
       workItems,
       evaluations,
+      experimentSpecs,
+      experimentResults,
+      metrics,
       runs,
       latestProjection,
       latestRunFile
@@ -291,6 +365,9 @@ export class ResearchStateStore {
       this.listHypotheses(workspacePath),
       this.listWorkItems(workspacePath),
       this.listEvaluations(workspacePath),
+      this.listExperimentSpecs(workspacePath),
+      this.listExperimentResults(workspacePath),
+      this.listMetrics(workspacePath),
       this.listRuns(workspacePath),
       this.readCurrentProjection(workspacePath),
       this.readCurrentRun(workspacePath)
@@ -317,6 +394,15 @@ export class ResearchStateStore {
     const scopedEvaluations = evaluations
       .filter((record) => matchesScope(record, scopeId) || objectiveIds.has(record.objectiveId) || branchIds.has(record.branchId))
       .sort(sortByUpdatedAt);
+    const scopedExperimentSpecs = experimentSpecs
+      .filter((record) => matchesScope(record, scopeId) || objectiveIds.has(record.objectiveId) || branchIds.has(record.branchId))
+      .sort(sortByUpdatedAt);
+    const scopedExperimentResults = experimentResults
+      .filter((record) => matchesScope(record, scopeId) || objectiveIds.has(record.objectiveId) || branchIds.has(record.branchId))
+      .sort(sortByUpdatedAt);
+    const scopedMetrics = metrics
+      .filter((record) => matchesScope(record, scopeId) || objectiveIds.has(record.objectiveId) || branchIds.has(record.branchId))
+      .sort(sortByUpdatedAt);
     const scopedRuns = runs
       .filter((record) => matchesScope(record, scopeId) || objectiveIds.has(record.objectiveId))
       .sort(sortByUpdatedAt);
@@ -329,6 +415,9 @@ export class ResearchStateStore {
       hypotheses: scopedHypotheses,
       workItems: scopedWorkItems,
       evaluations: scopedEvaluations,
+      experimentSpecs: scopedExperimentSpecs,
+      experimentResults: scopedExperimentResults,
+      metrics: scopedMetrics,
       runs: scopedRuns,
       latestObjective: scopedObjectives[0] ?? null,
       latestBranch: scopedBranches[0] ?? null,
@@ -337,6 +426,7 @@ export class ResearchStateStore {
       latestHypothesis: scopedHypotheses[0] ?? null,
       latestWorkItem: scopedWorkItems[0] ?? null,
       latestEvaluation: scopedEvaluations[0] ?? null,
+      latestExperimentResult: scopedExperimentResults[0] ?? null,
       latestProjection: latestProjection && (!scopeId || matchesScope(latestProjection, scopeId) || objectiveIds.has(latestProjection.objectiveId))
         ? latestProjection
         : null,
@@ -559,6 +649,7 @@ export class ResearchStateStore {
       kind: "decision",
       title: decision.displayPrompt ?? decision.prompt,
       locator: decision.id,
+      provenance: `legacy-decision:${decision.id}`,
       summary: decision.summary,
       metadata: {
         model: decision.model,
@@ -615,6 +706,7 @@ export class ResearchStateStore {
       kind: "run",
       title: run.displayPrompt ?? run.prompt,
       locator: run.id,
+      provenance: `legacy-run:${run.id}`,
       summary: run.handoff?.machineSummary ?? run.finalMessage,
       metadata: {
         status: run.status,
@@ -656,7 +748,19 @@ export class ResearchStateStore {
 
   private async allocateRecord(
     workspacePath: string,
-    kind: "objective" | "branch" | "source" | "finding" | "hypothesis" | "work-item" | "evaluation" | "projection" | "run"
+    kind:
+      | "objective"
+      | "branch"
+      | "source"
+      | "finding"
+      | "hypothesis"
+      | "work-item"
+      | "evaluation"
+      | "projection"
+      | "run"
+      | "experiment-spec"
+      | "experiment-result"
+      | "metric"
   ) {
     const paths = this.buildPaths(workspacePath);
     const resolved = {
@@ -668,7 +772,10 @@ export class ResearchStateStore {
       "work-item": [paths.researchWorkItemsDir, "RW"],
       evaluation: [paths.researchEvaluationsDir, "RE"],
       projection: [paths.researchProjectionsDir, "RP"],
-      run: [paths.researchRunsDir, "RR"]
+      run: [paths.researchRunsDir, "RR"],
+      "experiment-spec": [paths.researchExperimentSpecsDir, "ES"],
+      "experiment-result": [paths.researchExperimentResultsDir, "ER"],
+      metric: [paths.researchMetricsDir, "RM"]
     } as const;
     const [directory, prefix] = resolved[kind];
     const id = await this.records.nextId(directory, prefix);

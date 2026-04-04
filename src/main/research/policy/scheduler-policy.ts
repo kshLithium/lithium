@@ -108,21 +108,34 @@ export function rankRunnableWorkItems(
   workItems: ResearchWorkItemRecord[],
   branchesById: Map<string, ResearchBranchRecord>
 ) {
+  const titleCounts = new Map<string, number>();
+
+  for (const workItem of workItems) {
+    if (workItem.status !== "pending") {
+      continue;
+    }
+
+    const key = `${workItem.branchId}:${workItem.title.trim().toLowerCase()}`;
+    titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
+  }
+
   return [...workItems]
     .filter((workItem) => workItem.status === "pending")
     .sort((left, right) => {
-      const leftScore =
-        left.priorityScore?.total ??
-        scoreWorkItemForScheduling({
-          workItem: left,
-          branch: branchesById.get(left.branchId)
-        }).total;
-      const rightScore =
-        right.priorityScore?.total ??
-        scoreWorkItemForScheduling({
-          workItem: right,
-          branch: branchesById.get(right.branchId)
-        }).total;
+      const leftBranch = branchesById.get(left.branchId);
+      const rightBranch = branchesById.get(right.branchId);
+      const leftScore = scoreWorkItemForScheduling({
+        workItem: left,
+        branch: leftBranch,
+        duplicatePenalty: Math.max(0, (titleCounts.get(`${left.branchId}:${left.title.trim().toLowerCase()}`) ?? 1) - 1) * 0.12,
+        branchFreshnessOverride: deriveBranchFreshness(leftBranch)
+      }).total;
+      const rightScore = scoreWorkItemForScheduling({
+        workItem: right,
+        branch: rightBranch,
+        duplicatePenalty: Math.max(0, (titleCounts.get(`${right.branchId}:${right.title.trim().toLowerCase()}`) ?? 1) - 1) * 0.12,
+        branchFreshnessOverride: deriveBranchFreshness(rightBranch)
+      }).total;
 
       return (
         rightScore - leftScore ||
@@ -142,4 +155,20 @@ function clamp01(value: number) {
 
 function roundScore(value: number) {
   return Math.round(value * 1_000) / 1_000;
+}
+
+function deriveBranchFreshness(branch?: Pick<ResearchBranchRecord, "status" | "score"> | null) {
+  if (!branch) {
+    return 0.55;
+  }
+
+  if (branch.status === "blocked" || branch.status === "killed") {
+    return 0.15;
+  }
+
+  if (branch.status === "pivoted") {
+    return 0.45;
+  }
+
+  return Math.max(0.25, Math.min(1, 0.45 + branch.score * 0.5));
 }

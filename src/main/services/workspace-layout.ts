@@ -40,6 +40,10 @@ export type ProjectPaths = {
   researchProjectionsDir: string;
   researchRunsDir: string;
   researchOracleSessionsDir: string;
+  researchExperimentSpecsDir: string;
+  researchExperimentResultsDir: string;
+  researchMetricsDir: string;
+  researchPatchesDir: string;
   researchEventsFile: string;
   researchCurrentProjectionFile: string;
   researchCurrentRunFile: string;
@@ -101,6 +105,10 @@ export function buildProjectPaths(workspacePath: string): ProjectPaths {
     researchProjectionsDir: path.join(root, "research", "projections"),
     researchRunsDir: path.join(root, "research", "runs"),
     researchOracleSessionsDir: path.join(root, "research", "oracle-sessions"),
+    researchExperimentSpecsDir: path.join(root, "research", "experiment-specs"),
+    researchExperimentResultsDir: path.join(root, "research", "experiment-results"),
+    researchMetricsDir: path.join(root, "research", "metrics"),
+    researchPatchesDir: path.join(root, "research", "patches"),
     researchEventsFile: path.join(root, "research", "events.jsonl"),
     researchCurrentProjectionFile: path.join(root, "research", "projections", "current.json"),
     researchCurrentRunFile: path.join(root, "research", "runs", "current.json"),

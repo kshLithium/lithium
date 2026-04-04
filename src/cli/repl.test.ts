@@ -83,6 +83,8 @@ function buildSnapshot(input: {
     branches: [],
     queue: [],
     recentFindings: [],
+    recentSources: [],
+    recentExperiments: [],
     latestEvaluation: null,
     latestProjection: objective
       ? {
@@ -100,12 +102,16 @@ function buildSnapshot(input: {
           activeRunId: run?.id,
           activeRunStatus: run?.status,
           blockedReason: run?.blockedReason,
+          activeSlots: [],
+          lastBranchSwitch: "Primary branch",
+          lastPatchPromotion: undefined,
           createdAt: "2026-04-03T00:00:00.000Z",
           updatedAt: "2026-04-03T00:00:00.000Z",
           lastUpdatedAt: "2026-04-03T00:00:00.000Z"
         }
       : null,
     latestBuilderRun: null,
+    blockedReason: run?.blockedReason,
     attachments: [],
     activeWorkerProgress: input.activeWorkers ?? [],
     logs: []
