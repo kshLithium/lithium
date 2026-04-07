@@ -1,4 +1,4 @@
-export const PROJECT_SCHEMA_VERSION = 4;
+export const PROJECT_SCHEMA_VERSION = 5;
 
 export type PromptLanguage = "auto" | "ko" | "en";
 export type OracleModel = "gpt-5.4-pro";
@@ -54,15 +54,26 @@ export type ResearchTaskKind =
   | "discover"
   | "read_synthesize"
   | "build_change"
+  | "verify_change"
   | "run_experiment"
-  | "evaluate_branch";
+  | "evaluate_branch"
+  | "promote_patch";
 export type TaskExecutor = "strategist" | "builder" | "experimenter" | "evaluator";
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "needs-human";
 export type TaskTerminalStatus = Extract<TaskStatus, "completed" | "failed" | "cancelled" | "needs-human">;
-export type RunStatus = "idle" | "active" | "paused" | "completed" | "failed" | "stopped" | "needs-human";
+export type RunStatus =
+  | "idle"
+  | "active"
+  | "pausing"
+  | "paused"
+  | "stopping"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "needs-human";
 export type RecoveryAction = "reattach" | "retryable" | "needs-human";
 export type EvaluationVerdict = "continue" | "kill" | "pivot" | "complete";
-export type DependencyCondition = "success" | "failed" | "terminal";
+export type EvaluationGateStatus = "passed" | "failed" | "inconclusive";
 export type SourceKind = "file" | "web" | "repo" | "paper" | "attachment";
 export type ArtifactKind =
   | "patch"
@@ -76,6 +87,10 @@ export type ArtifactKind =
   | "attachment"
   | "daemon-log";
 export type WorkerProvider = "strategist" | "builder" | "experimenter" | "evaluator";
+export type SourceLinkScope = "objective" | "branch";
+export type SourceLinkReason = "manual" | "discover" | "reuse";
+export type ExperimentMode = "read-only" | "write-allowed";
+export type TaskDependencyCondition = "success" | "failed" | "terminal";
 
 export type RunBudget = {
   planning: number;
@@ -102,7 +117,7 @@ export type TaskBudgetBucket = "planning" | "discovery" | "build" | "experiment"
 
 export type TaskDependency = {
   taskId: string;
-  on: DependencyCondition;
+  on: TaskDependencyCondition;
 };
 
 export type PriorityScore = {
@@ -125,6 +140,7 @@ export type ObjectiveRecord = {
   branchIds: string[];
   activeBranchId?: string;
   activeRunId?: string;
+  baselineExperimentId?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -141,7 +157,8 @@ export type BranchRecord = {
   headCommit?: string;
   worktreePath?: string;
   promotionHeadCommit?: string;
-  sourceIds: string[];
+  parentBranchId?: string;
+  successorBranchId?: string;
   findingIds: string[];
   taskIds: string[];
   latestEvaluationId?: string;
@@ -163,7 +180,6 @@ export type ArtifactRef = {
 export type SourceRecord = {
   id: string;
   objectiveId: string;
-  branchId?: string;
   kind: SourceKind;
   title: string;
   locator: string;
@@ -181,11 +197,21 @@ export type SourceChunkRecord = {
   id: string;
   sourceId: string;
   objectiveId: string;
-  branchId?: string;
   chunkIndex: number;
   text: string;
   textArtifactRef?: ArtifactRef;
   hash: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SourceLinkRecord = {
+  id: string;
+  objectiveId: string;
+  sourceId: string;
+  branchId?: string;
+  scope: SourceLinkScope;
+  reason: SourceLinkReason;
   createdAt: string;
   updatedAt: string;
 };
@@ -217,7 +243,23 @@ export type MetricMeasurement = {
   unit?: string;
 };
 
+export type ExperimentSpecRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  title: string;
+  cwd: string;
+  commands: string[];
+  timeoutMs: number;
+  mode: ExperimentMode;
+  expectedMetrics: MetricExpectation[];
+  artifactGlobs: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ExperimentManifest = {
+  experimentSpecId: string;
   commands: string[];
   exitCode: number | null;
   status: TaskTerminalStatus;
@@ -228,13 +270,15 @@ export type ExperimentManifest = {
   metrics: MetricMeasurement[];
   expectations: MetricExpectation[];
   baselineCompare?: Record<string, number>;
+  contractViolation?: string;
 };
 
-export type ExperimentRecord = {
+export type ExperimentRunRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
   taskId: string;
+  experimentSpecId: string;
   status: TaskTerminalStatus;
   summary: string;
   manifestRef?: ArtifactRef;
@@ -243,6 +287,7 @@ export type ExperimentRecord = {
   patchArtifactRef?: ArtifactRef;
   changedFiles: string[];
   metrics: MetricMeasurement[];
+  contractViolation?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -260,16 +305,36 @@ export type MetricRecord = {
   updatedAt: string;
 };
 
-export type EvaluationRecord = {
+export type EvaluationComparator = {
+  baselineExperimentId?: string;
+  metricDeltas: Record<string, number>;
+};
+
+export type EvaluationDecisionRecord = {
   id: string;
   objectiveId: string;
   branchId: string;
   taskId: string;
   verdict: EvaluationVerdict;
+  gateStatus: EvaluationGateStatus;
   scoreDelta: number;
   summary: string;
   rationale: string;
   followupPrompt?: string;
+  comparator?: EvaluationComparator;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PromotionRecord = {
+  id: string;
+  objectiveId: string;
+  branchId: string;
+  taskId: string;
+  sourceTaskId: string;
+  patchArtifactRef: ArtifactRef;
+  status: "pending" | "promoted" | "failed";
+  summary: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -283,6 +348,8 @@ export type RunRecord = {
   activeTaskIds: string[];
   stopReason?: string;
   blockedReason?: string;
+  pausedAt?: string;
+  totalPausedMs?: number;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -295,6 +362,7 @@ export type WorktreeLeaseRecord = {
   branchId: string;
   worktreePath: string;
   tempDir: string;
+  mode: "write" | "read";
   status: "active" | "released" | "failed";
   createdAt: string;
   updatedAt: string;
@@ -302,22 +370,33 @@ export type WorktreeLeaseRecord = {
   cleanupError?: string;
 };
 
-export type TaskProposal = {
+export type ExperimentSpecInput = {
+  title?: string;
+  cwd: string;
+  commands: string[];
+  timeoutMs: number;
+  mode: ExperimentMode;
+  expectedMetrics: MetricExpectation[];
+  artifactGlobs: string[];
+};
+
+export type PlanStepProposal = {
+  stepId: string;
   title: string;
   prompt: string;
-  kind: Exclude<ResearchTaskKind, "evaluate_branch"> | "evaluate_branch";
+  kind: Exclude<ResearchTaskKind, "plan">;
   branchTitle?: string;
+  dependsOn: string[];
   expectedInfoGain: number;
   estimatedCost: number;
   evidenceNeeded: string[];
   successRubric: string[];
   stopCondition: string;
-  dependencyMode: DependencyCondition;
   branchUpdateIntent: "advance" | "branch" | "verify" | "kill";
   sourceIds?: string[];
-  verificationCommands?: string[];
   questions?: string[];
-  commands?: string[];
+  experimentSpec?: ExperimentSpecInput;
+  verificationSpec?: ExperimentSpecInput;
 };
 
 export type PlannerProposal = {
@@ -327,7 +406,7 @@ export type PlannerProposal = {
     title: string;
     hypothesis: string;
   }>;
-  proposedTasks: TaskProposal[];
+  proposedTasks: PlanStepProposal[];
 };
 
 export type DiscoveredSourceSpec = {
@@ -346,6 +425,11 @@ export type SynthesizedFindingSpec = {
   citationText?: string;
 };
 
+export type EvaluationDecisionInput = Omit<
+  EvaluationDecisionRecord,
+  "id" | "objectiveId" | "branchId" | "taskId" | "createdAt" | "updatedAt"
+>;
+
 export type EvaluationInput = {
   branchId: string;
   subjectTaskId: string;
@@ -357,7 +441,7 @@ export type EvaluationInput = {
   metricRefs: string[];
   sourceRefs: string[];
   successCriteria: string[];
-  baselineRefs: string[];
+  baselineExperimentId?: string;
   focus: string;
 };
 
@@ -384,26 +468,37 @@ export type BuildTaskPayload = {
   branchId: string;
   goal: string;
   constraints: string[];
-  verificationCommands: string[];
   successCriteria: string[];
+  verificationSpecId?: string;
+};
+
+export type VerifyTaskPayload = {
+  branchId: string;
+  experimentSpecId: string;
 };
 
 export type ExperimentTaskPayload = {
   branchId: string;
-  commands: string[];
-  timeoutMs: number;
-  expectedMetrics: MetricExpectation[];
+  experimentSpecId: string;
 };
 
 export type EvaluateTaskPayload = EvaluationInput;
+
+export type PromoteTaskPayload = {
+  branchId: string;
+  sourceTaskId: string;
+  patchArtifactRef: ArtifactRef;
+};
 
 export type TaskPayload =
   | PlanTaskPayload
   | DiscoverTaskPayload
   | ReadTaskPayload
   | BuildTaskPayload
+  | VerifyTaskPayload
   | ExperimentTaskPayload
-  | EvaluateTaskPayload;
+  | EvaluateTaskPayload
+  | PromoteTaskPayload;
 
 export type TaskRecord = {
   id: string;
@@ -426,6 +521,8 @@ export type TaskRecord = {
   summary?: string;
   changedFiles?: string[];
   artifactRefs?: ArtifactRef[];
+  planStepId?: string;
+  lastInterruptionReason?: string;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -467,8 +564,9 @@ export type TaskOutcome = {
   plan?: PlannerProposal;
   discoveredSources?: DiscoveredSourceSpec[];
   findings?: SynthesizedFindingSpec[];
-  evaluation?: Omit<EvaluationRecord, "id" | "objectiveId" | "branchId" | "taskId" | "createdAt" | "updatedAt">;
+  evaluation?: EvaluationDecisionInput;
   experimentManifest?: ExperimentManifest;
+  promotion?: Pick<PromotionRecord, "status" | "summary">;
 };
 
 export type EventRecord<T extends Record<string, unknown> = Record<string, unknown>> = {
@@ -492,10 +590,13 @@ export type WorkspaceProjection = {
   runs: RunRecord[];
   sources: SourceRecord[];
   sourceChunks: SourceChunkRecord[];
+  sourceLinks: SourceLinkRecord[];
   findings: FindingRecord[];
-  evaluations: EvaluationRecord[];
-  experiments: ExperimentRecord[];
+  evaluations: EvaluationDecisionRecord[];
+  experimentSpecs: ExperimentSpecRecord[];
+  experiments: ExperimentRunRecord[];
   metrics: MetricRecord[];
+  promotions: PromotionRecord[];
   workerRuns: WorkerRunRecord[];
   leases: WorktreeLeaseRecord[];
 };
@@ -513,7 +614,7 @@ export type StatusSnapshot = {
   branches: BranchRecord[];
   queue: TaskRecord[];
   activeTasks: TaskRecord[];
-  recentEvaluations: EvaluationRecord[];
+  recentEvaluations: EvaluationDecisionRecord[];
   recentFindings: FindingRecord[];
 };
 
@@ -565,3 +666,9 @@ export type DaemonStatus = {
 export type WorkspaceArchiveResult = {
   archivedPath: string;
 };
+
+// Compatibility aliases kept to make the V5 refactor incremental.
+export type DependencyCondition = TaskDependencyCondition;
+export type TaskProposal = PlanStepProposal;
+export type ExperimentRecord = ExperimentRunRecord;
+export type EvaluationRecord = EvaluationDecisionRecord;

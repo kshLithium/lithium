@@ -1,5 +1,3 @@
-import os from "node:os";
-import path from "node:path";
 import type {
   AppSettings,
   BuilderModel,
@@ -102,10 +100,9 @@ export class CodexRunner {
         "--model",
         model,
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--sandbox",
+        "workspace-write",
         "--skip-git-repo-check",
-        "--add-dir",
-        resolveOracleHomeDir(),
         "--output-last-message",
         outputPath,
         this.normalizePrompt(prompt, runtimeContext, artifactContext, promptLanguage)
@@ -195,8 +192,4 @@ function resolveBuilderPromptLanguage(
   }
 
   return samples.some((value) => /[\u3131-\u318E\uAC00-\uD7A3]/.test(value)) ? "ko" : "en";
-}
-
-function resolveOracleHomeDir() {
-  return process.env.ORACLE_HOME_DIR?.trim() || path.join(os.homedir(), ".oracle");
 }

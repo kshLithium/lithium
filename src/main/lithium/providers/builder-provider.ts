@@ -1,5 +1,6 @@
 import path from "node:path";
 import type {
+  AppSettings,
   ArtifactRef,
   BranchRecord,
   BuildTaskPayload,
@@ -24,6 +25,7 @@ export class BuilderProvider implements TaskProvider {
       artifactStore: ArtifactStore;
       store: ResearchStore;
       leaseManager: WorkerLeaseManager;
+      settings: AppSettings;
     }
   ) {}
 
@@ -40,7 +42,8 @@ export class BuilderProvider implements TaskProvider {
     const leaseInfo = await this.deps.leaseManager.ensureLease({
       workspacePath: context.workspacePath,
       branch: context.branch,
-      taskId: context.task.id
+      taskId: context.task.id,
+      mode: "write"
     });
     const execution = await resolveWorkspaceCommandContext(leaseInfo.branch.worktreePath!);
     const artifacts = await this.deps.artifactStore.allocateRunArtifacts(context.workspacePath, "worker", createId("builder"));
@@ -49,8 +52,9 @@ export class BuilderProvider implements TaskProvider {
       commandCwd: execution.commandCwd,
       prompt: buildBuilderPrompt(context.task.prompt, payload),
       runtimeContext: context.contextText,
-      model: "gpt-5.4",
-      reasoningEffort: "high",
+      model: this.deps.settings.builderModel,
+      reasoningEffort: this.deps.settings.builderReasoningEffort,
+      promptLanguage: this.deps.settings.promptLanguage,
       stdoutPath: artifacts.stdoutPath,
       stderrPath: artifacts.stderrPath,
       outputPath: artifacts.outputPath,
@@ -71,7 +75,7 @@ export class BuilderProvider implements TaskProvider {
       command: session.command,
       status: "running",
       pid: session.pid,
-      model: "gpt-5.4",
+      model: this.deps.settings.builderModel,
       stdoutPath: artifacts.stdoutPath,
       stderrPath: artifacts.stderrPath,
       outputPath: artifacts.outputPath,
@@ -198,7 +202,22 @@ export class BuilderProvider implements TaskProvider {
       artifactRefs.push(await this.deps.artifactStore.writePatchArtifact(input.workspacePath, input.task.id, patchBuild.patch));
     }
 
-    const resultTag = statusPayload.result;
+    if (!statusPayload.ok) {
+      return {
+        status: "failed",
+        summary: "Builder output violated the structured protocol.",
+        failureReason: statusPayload.error,
+        retryability: "retryable",
+        artifactRefs,
+        changedFiles,
+        metrics: [],
+        providerMetadata: {
+          branch: committed.branch
+        }
+      };
+    }
+
+    const resultTag = statusPayload.value.result;
     const inferredStatus =
       input.timedOut || input.exitCode === null
         ? "failed"
@@ -210,17 +229,18 @@ export class BuilderProvider implements TaskProvider {
 
     return {
       status: inferredStatus,
-      summary: statusPayload.machineSummary || "Builder task finished.",
-      failureReason: inferredStatus === "failed" ? statusPayload.risks[0] || "Builder execution failed." : undefined,
-      retryability: inferredStatus === "failed" ? "retryable" : "needs-human",
+      summary: statusPayload.value.machineSummary || "Builder task finished.",
+      failureReason: inferredStatus === "failed" ? statusPayload.value.risks[0] || "Builder execution failed." : undefined,
+      retryability: inferredStatus === "failed" ? "needs-human" : "needs-human",
       artifactRefs,
-      changedFiles: Array.from(new Set([...statusPayload.files, ...changedFiles])),
+      changedFiles: Array.from(new Set([...statusPayload.value.files, ...changedFiles])),
       metrics: [],
       providerMetadata: {
-        successCriteria: statusPayload.successCriteria,
-        runActions: statusPayload.runActions,
-        openQuestions: statusPayload.openQuestions,
-        branchScoreHint: clamp01(statusPayload.files.length > 0 ? 0.7 : 0.55)
+        successCriteria: statusPayload.value.successCriteria,
+        runActions: statusPayload.value.runActions,
+        openQuestions: statusPayload.value.openQuestions,
+        branchScoreHint: clamp01(statusPayload.value.files.length > 0 ? 0.7 : 0.55),
+        branch: committed.branch
       }
     };
   }
@@ -230,8 +250,7 @@ function buildBuilderPrompt(prompt: string, payload: BuildTaskPayload) {
   const lines = [
     prompt.trim(),
     payload.constraints.length > 0 ? `Constraints:\n- ${payload.constraints.join("\n- ")}` : null,
-    payload.successCriteria.length > 0 ? `Success criteria:\n- ${payload.successCriteria.join("\n- ")}` : null,
-    payload.verificationCommands.length > 0 ? `Verification commands:\n- ${payload.verificationCommands.join("\n- ")}` : null
+    payload.successCriteria.length > 0 ? `Success criteria:\n- ${payload.successCriteria.join("\n- ")}` : null
   ].filter((entry): entry is string => Boolean(entry));
   return lines.join("\n\n");
 }

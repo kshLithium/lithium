@@ -1,4 +1,5 @@
 import type {
+  AppSettings,
   BuildTaskPayload,
   DiscoverTaskPayload,
   DiscoveredSourceSpec,
@@ -30,6 +31,7 @@ export class StrategistProvider implements TaskProvider {
       oracleRunner: OracleRunner;
       artifactStore: ArtifactStore;
       store: ResearchStore;
+      settings: AppSettings;
     }
   ) {}
 
@@ -44,8 +46,8 @@ export class StrategistProvider implements TaskProvider {
     const session = await this.deps.oracleRunner.startConsult({
       workspacePath: context.workspacePath,
       prompt,
-      model: "gpt-5.4-pro",
-      browserThinkingTime: "extended",
+      model: this.deps.settings.oracleModel,
+      browserThinkingTime: this.deps.settings.oracleThinkingTime,
       files,
       stdoutPath: artifacts.stdoutPath,
       stderrPath: artifacts.stderrPath,
@@ -64,7 +66,7 @@ export class StrategistProvider implements TaskProvider {
       command: session.command,
       status: "running",
       pid: session.pid,
-      model: "gpt-5.4-pro",
+      model: this.deps.settings.oracleModel,
       stdoutPath: artifacts.stdoutPath,
       stderrPath: artifacts.stderrPath,
       outputPath: artifacts.outputPath,
@@ -153,39 +155,72 @@ export class StrategistProvider implements TaskProvider {
 
     if (input.task.kind === "plan") {
       const plan = parsePlannerOutput(input.rawOutput);
+      if (!plan.ok) {
+        return {
+          status: "failed",
+          summary: "Planner output violated the structured protocol.",
+          failureReason: plan.error,
+          retryability: "retryable",
+          artifactRefs,
+          changedFiles: [],
+          metrics: []
+        };
+      }
       return {
         status: "completed",
-        summary: plan.summary || "Planner completed.",
+        summary: plan.value.summary || "Planner completed.",
         retryability: "needs-human",
         artifactRefs,
         changedFiles: [],
         metrics: [],
-        plan
+        plan: plan.value
       };
     }
 
     if (input.task.kind === "discover") {
       const discover = parseDiscoverOutput(input.rawOutput);
+      if (!discover.ok) {
+        return {
+          status: "failed",
+          summary: "Discover output violated the structured protocol.",
+          failureReason: discover.error,
+          retryability: "retryable",
+          artifactRefs,
+          changedFiles: [],
+          metrics: []
+        };
+      }
       return {
         status: "completed",
-        summary: discover.summary || "Discovery completed.",
+        summary: discover.value.summary || "Discovery completed.",
         retryability: "needs-human",
         artifactRefs,
         changedFiles: [],
         metrics: [],
-        discoveredSources: discover.sources
+        discoveredSources: discover.value.sources
       };
     }
 
     const read = parseReadOutput(input.rawOutput);
+    if (!read.ok) {
+      return {
+        status: "failed",
+        summary: "Read/synthesize output violated the structured protocol.",
+        failureReason: read.error,
+        retryability: "retryable",
+        artifactRefs,
+        changedFiles: [],
+        metrics: []
+      };
+    }
     return {
       status: "completed",
-      summary: read.summary || "Synthesis completed.",
+      summary: read.value.summary || "Synthesis completed.",
       retryability: "needs-human",
       artifactRefs,
       changedFiles: [],
       metrics: [],
-      findings: read.findings
+      findings: read.value.findings
     };
   }
 
@@ -207,13 +242,14 @@ function buildStrategistPrompt(context: ProviderContext) {
   switch (context.task.kind) {
     case "plan":
       return [
-        "You are the strategist for Lithium V4.",
+        "You are the strategist for Lithium V5.",
         `Return ${LITHIUM_PLAN_MARKER} followed by one JSON object.`,
         "Required top-level keys: summary, rationale, proposedBranches, proposedTasks.",
         "Each proposedBranch needs title and hypothesis.",
-        "Each proposedTask needs title, prompt, kind, expectedInfoGain, estimatedCost, evidenceNeeded, successRubric, stopCondition, dependencyMode, branchUpdateIntent.",
-        "Allowed kinds: discover, read_synthesize, build_change, run_experiment, evaluate_branch.",
-        "Allowed dependencyMode values: success, failed, terminal.",
+        "Each proposedTask needs stepId, title, prompt, kind, dependsOn, expectedInfoGain, estimatedCost, evidenceNeeded, successRubric, stopCondition, branchUpdateIntent.",
+        "Allowed kinds: discover, read_synthesize, build_change, verify_change, run_experiment, evaluate_branch, promote_patch.",
+        "For verify_change and run_experiment, include experiment_spec with cwd, commands, timeoutMs, mode, expectedMetrics, artifactGlobs.",
+        "For build_change, include verification_spec when the build should be followed by a declarative verification step.",
         "Allowed branchUpdateIntent values: advance, branch, verify, kill.",
         "",
         "CURRENT_CONTEXT:",
@@ -221,7 +257,7 @@ function buildStrategistPrompt(context: ProviderContext) {
       ].join("\n");
     case "discover":
       return [
-        "You are the discoverer for Lithium V4.",
+        "You are the discoverer for Lithium V5.",
         `Return ${LITHIUM_DISCOVER_MARKER} followed by one JSON object.`,
         "Required keys: summary, sources.",
         "Each source needs locator, title, kind, summary. Allowed kinds: web, repo, paper.",
@@ -231,7 +267,7 @@ function buildStrategistPrompt(context: ProviderContext) {
       ].join("\n");
     case "read_synthesize":
       return [
-        "You are the reader-synthesizer for Lithium V4.",
+        "You are the reader-synthesizer for Lithium V5.",
         `Return ${LITHIUM_READ_MARKER} followed by one JSON object.`,
         "Required keys: summary, findings.",
         "Each finding needs summary and source_locator. Optional: detail, citation_text.",

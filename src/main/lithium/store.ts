@@ -3,14 +3,17 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import type {
   BranchRecord,
-  EvaluationRecord,
+  EvaluationDecisionRecord,
   EventRecord,
-  ExperimentRecord,
+  ExperimentRunRecord,
+  ExperimentSpecRecord,
   FindingRecord,
   MetricRecord,
   ObjectiveRecord,
+  PromotionRecord,
   RunRecord,
   SourceChunkRecord,
+  SourceLinkRecord,
   SourceRecord,
   StatusSnapshot,
   TaskRecord,
@@ -34,10 +37,13 @@ type ProjectionKind =
   | "run"
   | "source"
   | "source_chunk"
+  | "source_link"
   | "finding"
   | "evaluation"
+  | "experiment_spec"
   | "experiment"
   | "metric"
+  | "promotion"
   | "worker_run"
   | "lease";
 
@@ -49,13 +55,32 @@ type TypedProjectionMap = {
   run: RunRecord;
   source: SourceRecord;
   source_chunk: SourceChunkRecord;
+  source_link: SourceLinkRecord;
   finding: FindingRecord;
-  evaluation: EvaluationRecord;
-  experiment: ExperimentRecord;
+  evaluation: EvaluationDecisionRecord;
+  experiment_spec: ExperimentSpecRecord;
+  experiment: ExperimentRunRecord;
   metric: MetricRecord;
+  promotion: PromotionRecord;
   worker_run: WorkerRunRecord;
   lease: WorktreeLeaseRecord;
 };
+
+export type ProjectionMutation<K extends ProjectionKind = ProjectionKind> =
+  | {
+      type: "upsert";
+      kind: K;
+      value: TypedProjectionMap[K];
+    }
+  | {
+      type: "delete";
+      kind: ProjectionKind;
+      id: string;
+    }
+  | {
+      type: "event";
+      value: EventRecord;
+    };
 
 const requireBuiltin: NodeJS.Require =
   typeof require === "function"
@@ -96,7 +121,6 @@ export class ResearchStore {
       mkdir(paths.worktreesDir, { recursive: true })
     ]);
 
-    const db = this.getDb(workspacePath);
     const workspace = this.getWorkspace(workspacePath);
     if (!workspace) {
       const now = nowIso();
@@ -154,20 +178,12 @@ export class ResearchStore {
   }
 
   appendEvent(workspacePath: string, event: EventRecord) {
-    const db = this.getDb(workspacePath);
-    db.prepare(
-      `INSERT INTO events (id, type, objective_id, branch_id, run_id, task_id, created_at, payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      event.id,
-      event.type,
-      event.objectiveId ?? null,
-      event.branchId ?? null,
-      event.runId ?? null,
-      event.taskId ?? null,
-      event.createdAt,
-      JSON.stringify(event.payload)
-    );
+    this.applyMutations(workspacePath, [
+      {
+        type: "event",
+        value: event
+      }
+    ]);
   }
 
   listEvents(workspacePath: string) {
@@ -197,33 +213,78 @@ export class ResearchStore {
     kind: K,
     id: string
   ): TypedProjectionMap[K] | null {
-    const table = tableNameForKind(kind);
     const db = this.getDb(workspacePath);
-    const row = db.prepare(`SELECT payload FROM ${table} WHERE id = ?`).get(id) as { payload: string } | undefined;
+    const row = db.prepare(`SELECT payload FROM ${tableNameForKind(kind)} WHERE id = ?`).get(id) as { payload: string } | undefined;
     return row ? parseNullable<TypedProjectionMap[K]>(row.payload) : null;
   }
 
   listProjections<K extends ProjectionKind>(workspacePath: string, kind: K): TypedProjectionMap[K][] {
-    const table = tableNameForKind(kind);
     const db = this.getDb(workspacePath);
     return db
-      .prepare(`SELECT payload FROM ${table}`)
+      .prepare(`SELECT payload FROM ${tableNameForKind(kind)}`)
       .all()
       .map((row: any) => parseNullable<TypedProjectionMap[K]>(String(row.payload)))
       .filter((entry: TypedProjectionMap[K] | null): entry is TypedProjectionMap[K] => Boolean(entry));
   }
 
   upsertProjection<K extends ProjectionKind>(workspacePath: string, kind: K, value: TypedProjectionMap[K]) {
-    const table = tableNameForKind(kind);
-    const db = this.getDb(workspacePath);
-    const columns = projectionColumns(kind, value);
-    db.prepare(columns.sql).run(...columns.values);
+    this.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind,
+        value
+      }
+    ]);
   }
 
   deleteProjection(workspacePath: string, kind: ProjectionKind, id: string) {
-    const table = tableNameForKind(kind);
+    this.applyMutations(workspacePath, [
+      {
+        type: "delete",
+        kind,
+        id
+      }
+    ]);
+  }
+
+  applyMutations(workspacePath: string, operations: ProjectionMutation[]) {
     const db = this.getDb(workspacePath);
-    db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const operation of operations) {
+        switch (operation.type) {
+          case "upsert": {
+            const columns = projectionColumns(operation.kind, operation.value);
+            db.prepare(columns.sql).run(...columns.values);
+            break;
+          }
+          case "delete": {
+            db.prepare(`DELETE FROM ${tableNameForKind(operation.kind)} WHERE id = ?`).run(operation.id);
+            break;
+          }
+          case "event": {
+            db.prepare(
+              `INSERT INTO events (id, type, objective_id, branch_id, run_id, task_id, created_at, payload)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(
+              operation.value.id,
+              operation.value.type,
+              operation.value.objectiveId ?? null,
+              operation.value.branchId ?? null,
+              operation.value.runId ?? null,
+              operation.value.taskId ?? null,
+              operation.value.createdAt,
+              JSON.stringify(operation.value.payload)
+            );
+            break;
+          }
+        }
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   getProjection(workspacePath: string): WorkspaceProjection {
@@ -233,10 +294,13 @@ export class ResearchStore {
     const runs = this.listProjections(workspacePath, "run").sort(byUpdatedAtDesc);
     const sources = this.listProjections(workspacePath, "source").sort(byUpdatedAtDesc);
     const sourceChunks = this.listProjections(workspacePath, "source_chunk").sort(byChunkIndexAsc);
+    const sourceLinks = this.listProjections(workspacePath, "source_link").sort(byUpdatedAtDesc);
     const findings = this.listProjections(workspacePath, "finding").sort(byUpdatedAtDesc);
     const evaluations = this.listProjections(workspacePath, "evaluation").sort(byUpdatedAtDesc);
+    const experimentSpecs = this.listProjections(workspacePath, "experiment_spec").sort(byUpdatedAtDesc);
     const experiments = this.listProjections(workspacePath, "experiment").sort(byUpdatedAtDesc);
     const metrics = this.listProjections(workspacePath, "metric").sort(byUpdatedAtDesc);
+    const promotions = this.listProjections(workspacePath, "promotion").sort(byUpdatedAtDesc);
     const workerRuns = this.listProjections(workspacePath, "worker_run").sort(byUpdatedAtDesc);
     const leases = this.listProjections(workspacePath, "lease").sort(byUpdatedAtDesc);
     const activeObjective =
@@ -254,10 +318,13 @@ export class ResearchStore {
       runs,
       sources,
       sourceChunks,
+      sourceLinks,
       findings,
       evaluations,
+      experimentSpecs,
       experiments,
       metrics,
+      promotions,
       workerRuns,
       leases
     };
@@ -312,7 +379,7 @@ export class ResearchStore {
     const paths = buildProjectPaths(workspacePath);
     const db = new DatabaseSync(paths.researchDbFile);
     db.exec("PRAGMA journal_mode = WAL;");
-    db.exec("PRAGMA foreign_keys = OFF;");
+    db.exec("PRAGMA foreign_keys = ON;");
     initializeSchema(db);
     this.dbByWorkspace.set(workspacePath, db);
     return db;
@@ -377,7 +444,6 @@ function initializeSchema(db: SqliteDatabase) {
     CREATE TABLE IF NOT EXISTS sources (
       id TEXT PRIMARY KEY,
       objective_id TEXT NOT NULL,
-      branch_id TEXT,
       kind TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       payload TEXT NOT NULL
@@ -386,10 +452,18 @@ function initializeSchema(db: SqliteDatabase) {
       id TEXT PRIMARY KEY,
       source_id TEXT NOT NULL,
       objective_id TEXT NOT NULL,
-      branch_id TEXT,
       chunk_index INTEGER NOT NULL,
       updated_at TEXT NOT NULL,
       text TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS source_links (
+      id TEXT PRIMARY KEY,
+      objective_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      branch_id TEXT,
+      scope TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
       payload TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS findings (
@@ -407,6 +481,13 @@ function initializeSchema(db: SqliteDatabase) {
       updated_at TEXT NOT NULL,
       payload TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS experiment_specs (
+      id TEXT PRIMARY KEY,
+      objective_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS experiments (
       id TEXT PRIMARY KEY,
       objective_id TEXT NOT NULL,
@@ -419,36 +500,40 @@ function initializeSchema(db: SqliteDatabase) {
       id TEXT PRIMARY KEY,
       objective_id TEXT NOT NULL,
       branch_id TEXT NOT NULL,
-      experiment_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS promotions (
+      id TEXT PRIMARY KEY,
+      objective_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      status TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       payload TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS worker_runs (
       id TEXT PRIMARY KEY,
+      objective_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       task_id TEXT NOT NULL,
-      branch_id TEXT NOT NULL,
-      provider TEXT NOT NULL,
       status TEXT NOT NULL,
-      pid INTEGER,
       updated_at TEXT NOT NULL,
       payload TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS leases (
       id TEXT PRIMARY KEY,
-      task_id TEXT NOT NULL,
       branch_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
       status TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       payload TEXT NOT NULL
     );
   `);
-  db.prepare(`INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)`).run(String(PROJECT_SCHEMA_VERSION));
 }
 
 function projectionColumns(kind: ProjectionKind, value: any) {
   const payload = JSON.stringify(value);
-
   switch (kind) {
     case "workspace":
       return {
@@ -467,8 +552,7 @@ function projectionColumns(kind: ProjectionKind, value: any) {
       };
     case "task":
       return {
-        sql: `INSERT OR REPLACE INTO tasks (id, objective_id, branch_id, run_id, kind, status, created_at, updated_at, payload)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT OR REPLACE INTO tasks (id, objective_id, branch_id, run_id, kind, status, created_at, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         values: [value.id, value.objectiveId, value.branchId, value.runId, value.kind, value.status, value.createdAt, value.updatedAt, payload]
       };
     case "run":
@@ -478,14 +562,18 @@ function projectionColumns(kind: ProjectionKind, value: any) {
       };
     case "source":
       return {
-        sql: `INSERT OR REPLACE INTO sources (id, objective_id, branch_id, kind, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
-        values: [value.id, value.objectiveId, value.branchId ?? null, value.kind, value.updatedAt, payload]
+        sql: `INSERT OR REPLACE INTO sources (id, objective_id, kind, updated_at, payload) VALUES (?, ?, ?, ?, ?)`,
+        values: [value.id, value.objectiveId, value.kind, value.updatedAt, payload]
       };
     case "source_chunk":
       return {
-        sql: `INSERT OR REPLACE INTO source_chunks (id, source_id, objective_id, branch_id, chunk_index, updated_at, text, payload)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        values: [value.id, value.sourceId, value.objectiveId, value.branchId ?? null, value.chunkIndex, value.updatedAt, value.text, payload]
+        sql: `INSERT OR REPLACE INTO source_chunks (id, source_id, objective_id, chunk_index, updated_at, text, payload) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        values: [value.id, value.sourceId, value.objectiveId, value.chunkIndex, value.updatedAt, value.text, payload]
+      };
+    case "source_link":
+      return {
+        sql: `INSERT OR REPLACE INTO source_links (id, objective_id, source_id, branch_id, scope, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        values: [value.id, value.objectiveId, value.sourceId, value.branchId ?? null, value.scope, value.updatedAt, payload]
       };
     case "finding":
       return {
@@ -497,6 +585,11 @@ function projectionColumns(kind: ProjectionKind, value: any) {
         sql: `INSERT OR REPLACE INTO evaluations (id, objective_id, branch_id, verdict, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
         values: [value.id, value.objectiveId, value.branchId, value.verdict, value.updatedAt, payload]
       };
+    case "experiment_spec":
+      return {
+        sql: `INSERT OR REPLACE INTO experiment_specs (id, objective_id, branch_id, updated_at, payload) VALUES (?, ?, ?, ?, ?)`,
+        values: [value.id, value.objectiveId, value.branchId, value.updatedAt, payload]
+      };
     case "experiment":
       return {
         sql: `INSERT OR REPLACE INTO experiments (id, objective_id, branch_id, status, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -504,19 +597,23 @@ function projectionColumns(kind: ProjectionKind, value: any) {
       };
     case "metric":
       return {
-        sql: `INSERT OR REPLACE INTO metrics (id, objective_id, branch_id, experiment_id, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
-        values: [value.id, value.objectiveId, value.branchId, value.experimentId, value.updatedAt, payload]
+        sql: `INSERT OR REPLACE INTO metrics (id, objective_id, branch_id, updated_at, payload) VALUES (?, ?, ?, ?, ?)`,
+        values: [value.id, value.objectiveId, value.branchId, value.updatedAt, payload]
+      };
+    case "promotion":
+      return {
+        sql: `INSERT OR REPLACE INTO promotions (id, objective_id, branch_id, status, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
+        values: [value.id, value.objectiveId, value.branchId, value.status, value.updatedAt, payload]
       };
     case "worker_run":
       return {
-        sql: `INSERT OR REPLACE INTO worker_runs (id, run_id, task_id, branch_id, provider, status, pid, updated_at, payload)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        values: [value.id, value.runId, value.taskId, value.branchId, value.provider, value.status, value.pid, value.updatedAt, payload]
+        sql: `INSERT OR REPLACE INTO worker_runs (id, objective_id, branch_id, run_id, task_id, status, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        values: [value.id, value.objectiveId, value.branchId, value.runId, value.taskId, value.status, value.updatedAt, payload]
       };
     case "lease":
       return {
-        sql: `INSERT OR REPLACE INTO leases (id, task_id, branch_id, status, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
-        values: [value.id, value.taskId, value.branchId, value.status, value.updatedAt, payload]
+        sql: `INSERT OR REPLACE INTO leases (id, branch_id, task_id, status, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
+        values: [value.id, value.branchId, value.taskId, value.status, value.updatedAt, payload]
       };
   }
 }
@@ -537,14 +634,20 @@ function tableNameForKind(kind: ProjectionKind) {
       return "sources";
     case "source_chunk":
       return "source_chunks";
+    case "source_link":
+      return "source_links";
     case "finding":
       return "findings";
     case "evaluation":
       return "evaluations";
+    case "experiment_spec":
+      return "experiment_specs";
     case "experiment":
       return "experiments";
     case "metric":
       return "metrics";
+    case "promotion":
+      return "promotions";
     case "worker_run":
       return "worker_runs";
     case "lease":
@@ -552,40 +655,32 @@ function tableNameForKind(kind: ProjectionKind) {
   }
 }
 
-function safeParse<T>(raw: string, fallback: T): T {
+function parseNullable<T>(value: string) {
+  return safeParse<T | null>(value, null);
+}
+
+function safeParse<T>(value: string, fallback: T) {
   try {
-    return JSON.parse(raw) as T;
+    return JSON.parse(value) as T;
   } catch {
     return fallback;
   }
 }
 
-function parseNullable<T>(raw: string): T | null {
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
 function readNullableString(value: unknown) {
-  return typeof value === "string" && value ? value : undefined;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function byUpdatedAtDesc<T extends { updatedAt: string; id: string }>(left: T, right: T) {
-  return right.updatedAt.localeCompare(left.updatedAt) || rightUpdatedFallback(left, right);
+function byUpdatedAtDesc<T extends { updatedAt: string }>(left: T, right: T) {
+  return right.updatedAt.localeCompare(left.updatedAt);
 }
 
-function rightUpdatedFallback<T extends { id: string }>(left: T, right: T) {
-  return left.id.localeCompare(right.id);
+function byCreatedAtAsc<T extends { createdAt: string }>(left: T, right: T) {
+  return left.createdAt.localeCompare(right.createdAt);
 }
 
-function byCreatedAtAsc<T extends { createdAt: string; id: string }>(left: T, right: T) {
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-}
-
-function byChunkIndexAsc<T extends { chunkIndex: number; id: string }>(left: T, right: T) {
-  return left.chunkIndex - right.chunkIndex || left.id.localeCompare(right.id);
+function byChunkIndexAsc<T extends { chunkIndex: number; updatedAt: string }>(left: T, right: T) {
+  return left.chunkIndex - right.chunkIndex || left.updatedAt.localeCompare(right.updatedAt);
 }
 
 async function pathExists(targetPath: string) {

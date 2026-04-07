@@ -21,6 +21,7 @@ export class WorkerLeaseManager {
     workspacePath: string;
     branch: BranchRecord;
     taskId: string;
+    mode: "write" | "read";
   }): Promise<{ branch: BranchRecord; lease: WorktreeLeaseRecord }> {
     const branch = await this.ensureBranchWorkspace(input.workspacePath, input.branch);
     const paths = buildProjectPaths(input.workspacePath);
@@ -36,6 +37,7 @@ export class WorkerLeaseManager {
         branchId: branch.id,
         worktreePath: branch.worktreePath!,
         tempDir,
+        mode: input.mode,
         status: "active",
         createdAt: now,
         updatedAt: now
@@ -66,7 +68,7 @@ export class WorkerLeaseManager {
   async ensureBranchWorkspace(workspacePath: string, branch: BranchRecord) {
     const gitRoot = await resolveWorkspaceGitRoot(workspacePath);
     if (!gitRoot) {
-      throw new Error("Lithium V4 requires a git-backed workspace for build and experiment tasks.");
+      throw new Error("Lithium V5 requires a git-backed workspace for build and experiment tasks.");
     }
 
     const paths = buildProjectPaths(workspacePath);
@@ -160,6 +162,23 @@ export class WorkerLeaseManager {
     };
   }
 
+  async buildWorkingTreePatch(branch: BranchRecord) {
+    if (!branch.worktreePath) {
+      return {
+        changed: false,
+        patch: ""
+      };
+    }
+    const { stdout } = await execFileAsync("git", ["diff", "--binary", "HEAD"], {
+      cwd: branch.worktreePath,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return {
+      changed: Boolean(stdout.trim()),
+      patch: stdout
+    };
+  }
+
   async promotePatchArtifact(workspacePath: string, patchPath: string) {
     const gitRoot = await resolveWorkspaceGitRoot(workspacePath);
     if (!gitRoot) {
@@ -180,13 +199,38 @@ export class WorkerLeaseManager {
     };
   }
 
-  async listChangedFiles(worktreePath: string) {
+  async restoreBranchWorkspace(workspacePath: string, branch: BranchRecord) {
+    const gitRoot = await resolveWorkspaceGitRoot(workspacePath);
+    if (!gitRoot) {
+      throw new Error("Restoring a lease requires a git-backed workspace.");
+    }
+    if (!branch.worktreePath || !branch.gitRef) {
+      return await this.ensureBranchWorkspace(workspacePath, branch);
+    }
+
+    await execFileAsync("git", ["worktree", "remove", "--force", branch.worktreePath], { cwd: gitRoot }).catch(() => undefined);
+    await rm(branch.worktreePath, { recursive: true, force: true }).catch(() => undefined);
+    await execFileAsync("git", ["worktree", "add", "--force", branch.worktreePath, branch.gitRef], { cwd: gitRoot });
+    return await this.refreshBranchHead(workspacePath, branch);
+  }
+
+  async listChangedFiles(worktreePath: string, options?: { trackedOnly?: boolean }) {
     const { stdout } = await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: worktreePath });
     return stdout
       .split("\n")
+      .map((line) => line.trimEnd())
+      .filter(Boolean)
+      .filter((line) => !(options?.trackedOnly && line.startsWith("??")))
       .map((line) => line.slice(3).trim())
       .filter(Boolean)
       .map((entry) => entry.replaceAll(path.sep, "/"));
+  }
+
+  async hasTrackedChanges(worktreePath: string) {
+    const files = await this.listChangedFiles(worktreePath, {
+      trackedOnly: true
+    });
+    return files.length > 0;
   }
 
   buildRuntimeEnv(tempDir: string) {

@@ -13,8 +13,13 @@ import { RunManager } from "./run-manager";
 import { SourceIngest } from "./source-ingest";
 import { ResearchStore } from "./store";
 import { WorkerLeaseManager } from "./worker-lease-manager";
+import { DEFAULT_APP_SETTINGS, type AppSettings } from "../../shared/types";
 
-export function createWorkspaceDaemon(workspacePath: string) {
+export function createWorkspaceDaemon(workspacePath: string, options?: { appSettings?: Partial<AppSettings> }) {
+  const appSettings: AppSettings = {
+    ...DEFAULT_APP_SETTINGS,
+    ...options?.appSettings
+  };
   const store = new ResearchStore();
   const artifactStore = new ArtifactStore();
   const policy = new PolicyEngine();
@@ -32,20 +37,24 @@ export function createWorkspaceDaemon(workspacePath: string) {
     new StrategistProvider({
       oracleRunner: new OracleRunner(),
       artifactStore,
-      store
+      store,
+      settings: appSettings
     }),
     new BuilderProvider({
       codexRunner: new CodexRunner(),
       artifactStore,
       store,
-      leaseManager
+      leaseManager,
+      settings: appSettings
     }),
     new ExperimentProvider({
       artifactStore,
-      leaseManager
+      leaseManager,
+      store
     }),
     new EvaluatorProvider({
-      artifactStore
+      artifactStore,
+      store
     })
   ];
   const dispatcher = new Dispatcher({
@@ -56,7 +65,8 @@ export function createWorkspaceDaemon(workspacePath: string) {
     store,
     policy,
     sourceIngest,
-    leaseManager
+    leaseManager,
+    artifactStore
   });
 
   return new WorkspaceDaemon(workspacePath, {

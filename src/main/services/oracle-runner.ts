@@ -143,17 +143,35 @@ export class OracleRunner {
       sessionLogPath: await resolveOracleSessionLogPath(sessionId),
       startedAt: session.startedAt,
       pid: session.pid,
-      terminate: session.terminate,
-      result: session.result.then(async (result) => ({
-        command,
-        chromePath,
-        sessionId,
-        sessionLogPath: await resolveOracleSessionLogPath(sessionId),
-        outputText:
+      terminate: (signal) => {
+        session.terminate(signal);
+        void this.terminateSession(options.slug).catch(() => undefined);
+      },
+      result: session.result.then(async (result) => {
+        const initialOutput =
           (await readTextFileIfExists(options.outputPath)).trim() ||
-          [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim(),
-        ...result
-      })),
+          [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim();
+        const outputIssue = describeIncompletePlannerOutput(initialOutput);
+        if (result.exitCode === 0 && initialOutput && !outputIssue) {
+          return {
+            command,
+            chromePath,
+            sessionId,
+            sessionLogPath: await resolveOracleSessionLogPath(sessionId),
+            outputText: initialOutput,
+            ...result
+          };
+        }
+        const recovered = await this.consult(options).catch(async () => ({
+          command,
+          chromePath,
+          sessionId,
+          sessionLogPath: await resolveOracleSessionLogPath(sessionId),
+          outputText: initialOutput,
+          ...result
+        }));
+        return recovered;
+      }),
       slug: options.slug,
       model: options.model,
       files: options.files,

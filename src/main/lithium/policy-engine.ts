@@ -1,10 +1,10 @@
 import type {
   BranchRecord,
+  PlanStepProposal,
   PlannerProposal,
   PriorityScore,
   RunRecord,
   TaskBudgetBucket,
-  TaskProposal,
   TaskRecord
 } from "../../shared/types";
 import { clamp01, roundScore } from "./utils";
@@ -15,6 +15,15 @@ const PROVIDER_CAPACITY = {
   experimenter: 1,
   evaluator: 1
 } as const;
+
+const BRANCH_ACTION_KINDS = new Set([
+  "discover",
+  "read_synthesize",
+  "build_change",
+  "verify_change",
+  "run_experiment",
+  "promote_patch"
+] as const);
 
 export class PolicyEngine {
   shouldCreatePlanTask(input: {
@@ -28,7 +37,7 @@ export class PolicyEngine {
     if (hasBudgetExceeded(input.run, "planning")) {
       return false;
     }
-    if (input.branches.length === 0) {
+    if (input.branches.filter((entry) => isBranchSchedulable(entry.status)).length === 0) {
       return false;
     }
     const pendingOrRunningPlan = input.tasks.some(
@@ -64,7 +73,7 @@ export class PolicyEngine {
     };
   }
 
-  selectRunnableTasks(input: {
+  reserveRunnableTasks(input: {
     run: RunRecord;
     tasks: TaskRecord[];
     branches: BranchRecord[];
@@ -74,27 +83,21 @@ export class PolicyEngine {
       return [];
     }
 
+    const branchById = new Map(input.branches.map((entry) => [entry.id, entry] as const));
     const activeByExecutor = countByExecutor(input.activeTasks);
-    const mutatingBranches = new Set(
-      input.activeTasks
-        .filter((entry) => entry.kind === "build_change" || entry.kind === "run_experiment")
+    const writeLockedBranches = new Set(
+      input.activeTasks.filter((entry) => entry.kind === "build_change").map((entry) => entry.branchId)
+    );
+    const evaluationBarrierBranches = new Set(
+      input.tasks
+        .filter((entry) => (entry.status === "pending" || entry.status === "running") && entry.kind === "evaluate_branch")
         .map((entry) => entry.branchId)
     );
 
-    return input.tasks
+    const pending = input.tasks
       .filter((entry) => entry.runId === input.run.id && entry.status === "pending")
       .filter((entry) => dependenciesSatisfied(input.tasks, entry))
       .filter((entry) => !hasBudgetExceeded(input.run, bucketForTask(entry.kind)))
-      .filter((entry) => {
-        const executor = executorForTask(entry.kind);
-        if (activeByExecutor[executor] >= PROVIDER_CAPACITY[executor]) {
-          return false;
-        }
-        if ((entry.kind === "build_change" || entry.kind === "run_experiment") && mutatingBranches.has(entry.branchId)) {
-          return false;
-        }
-        return true;
-      })
       .sort((left, right) => {
         return (
           right.priority.total - left.priority.total ||
@@ -102,14 +105,50 @@ export class PolicyEngine {
           left.id.localeCompare(right.id)
         );
       });
+
+    const selected: TaskRecord[] = [];
+    for (const task of pending) {
+      const branch = branchById.get(task.branchId) ?? null;
+      if (!branch || !isBranchSchedulable(branch.status)) {
+        continue;
+      }
+
+      if (
+        evaluationBarrierBranches.has(task.branchId) &&
+        task.kind !== "evaluate_branch" &&
+        task.kind !== "plan" &&
+        BRANCH_ACTION_KINDS.has(task.kind)
+      ) {
+        continue;
+      }
+
+      const executor = executorForTask(task.kind);
+      if (activeByExecutor[executor] >= PROVIDER_CAPACITY[executor]) {
+        continue;
+      }
+
+      if (writeLockedBranches.has(task.branchId) && task.kind !== "discover" && task.kind !== "read_synthesize") {
+        continue;
+      }
+
+      selected.push(task);
+      activeByExecutor[executor] += 1;
+      if (task.kind === "build_change") {
+        writeLockedBranches.add(task.branchId);
+      }
+      if (task.kind === "evaluate_branch") {
+        evaluationBarrierBranches.add(task.branchId);
+      }
+    }
+    return selected;
   }
 
-  buildPriority(task: TaskProposal | { kind: TaskRecord["kind"]; title: string }, branch?: BranchRecord | null): PriorityScore {
+  buildPriority(task: PlanStepProposal | { kind: TaskRecord["kind"]; title: string }, branch?: BranchRecord | null): PriorityScore {
     const expectedInfoGain = clamp01("expectedInfoGain" in task ? task.expectedInfoGain : defaultInfoGain(task.kind));
     const estimatedCost = clamp01("estimatedCost" in task ? task.estimatedCost : defaultCost(task.kind));
-    const objectiveAlignment = clamp01(task.kind === "evaluate_branch" ? 0.82 : 0.74);
-    const feasibility = clamp01(task.kind === "build_change" ? 0.68 : task.kind === "run_experiment" ? 0.8 : 0.86);
-    const evidenceStrength = clamp01(branch && branch.findingIds.length + branch.sourceIds.length > 0 ? 0.75 : 0.3);
+    const objectiveAlignment = clamp01(task.kind === "evaluate_branch" ? 0.82 : task.kind === "promote_patch" ? 0.9 : 0.74);
+    const feasibility = clamp01(task.kind === "build_change" ? 0.68 : task.kind === "run_experiment" || task.kind === "verify_change" ? 0.8 : 0.86);
+    const evidenceStrength = clamp01(branch && branch.findingIds.length > 0 ? 0.75 : 0.3);
     const duplicationPenalty = 0;
     const total = roundScore(
       objectiveAlignment * 2.5 +
@@ -149,7 +188,7 @@ export class PolicyEngine {
     return "needs-human" as const;
   }
 
-  private acceptProposalTask(input: TaskProposal, state: {
+  private acceptProposalTask(input: PlanStepProposal, state: {
     run: RunRecord;
     branches: BranchRecord[];
     tasks: TaskRecord[];
@@ -169,15 +208,16 @@ export class PolicyEngine {
       return false;
     }
 
-    if (input.kind === "build_change" || input.kind === "run_experiment") {
-      const branch =
-        (input.branchTitle
-          ? state.branches.find((entry) => entry.title.trim().toLowerCase() === input.branchTitle?.trim().toLowerCase())
-          : state.branches[0]) ?? null;
-      const hasEvidence = Boolean(branch && (branch.sourceIds.length > 0 || branch.findingIds.length > 0));
-      if (!hasEvidence) {
-        return false;
-      }
+    const branch =
+      (input.branchTitle
+        ? state.branches.find((entry) => entry.title.trim().toLowerCase() === input.branchTitle?.trim().toLowerCase())
+        : state.branches[0]) ?? null;
+    if (!branch || !isBranchSchedulable(branch.status)) {
+      return false;
+    }
+
+    if ((input.kind === "run_experiment" || input.kind === "verify_change") && !input.experimentSpec) {
+      return false;
     }
 
     return true;
@@ -193,7 +233,9 @@ export function bucketForTask(kind: TaskRecord["kind"]): TaskBudgetBucket {
       return "discovery";
     case "build_change":
       return "build";
+    case "verify_change":
     case "run_experiment":
+    case "promote_patch":
       return "experiment";
     case "evaluate_branch":
       return "evaluation";
@@ -208,7 +250,9 @@ export function executorForTask(kind: TaskRecord["kind"]) {
       return "strategist";
     case "build_change":
       return "builder";
+    case "verify_change":
     case "run_experiment":
+    case "promote_patch":
       return "experimenter";
     case "evaluate_branch":
       return "evaluator";
@@ -237,6 +281,10 @@ export function hasBudgetExceeded(run: RunRecord, bucket: TaskBudgetBucket) {
   return run.budgetUsage[bucket] >= run.budget[bucket];
 }
 
+export function isBranchSchedulable(status: BranchRecord["status"]) {
+  return status === "candidate" || status === "active";
+}
+
 function countByExecutor(tasks: TaskRecord[]) {
   return tasks.reduce(
     (counts, task) => {
@@ -258,31 +306,39 @@ function defaultInfoGain(kind: TaskRecord["kind"]) {
     case "plan":
       return 0.72;
     case "discover":
-      return 0.9;
+      return 0.84;
     case "read_synthesize":
-      return 0.78;
+      return 0.7;
     case "build_change":
       return 0.64;
+    case "verify_change":
+      return 0.78;
     case "run_experiment":
-      return 0.88;
+      return 0.78;
     case "evaluate_branch":
-      return 0.7;
+      return 0.61;
+    case "promote_patch":
+      return 0.55;
   }
 }
 
 function defaultCost(kind: TaskRecord["kind"]) {
   switch (kind) {
     case "plan":
-      return 0.25;
+      return 0.22;
     case "discover":
-      return 0.4;
+      return 0.28;
     case "read_synthesize":
-      return 0.42;
+      return 0.36;
     case "build_change":
-      return 0.68;
+      return 0.62;
+    case "verify_change":
+      return 0.48;
     case "run_experiment":
       return 0.58;
     case "evaluate_branch":
-      return 0.3;
+      return 0.2;
+    case "promote_patch":
+      return 0.18;
   }
 }

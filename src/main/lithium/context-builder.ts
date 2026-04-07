@@ -26,6 +26,11 @@ export class ContextBuilder {
     task: TaskRecord;
   }) {
     const projection = this.deps.store.getProjection(input.workspacePath);
+    const linkedSourceIds = this.deps.sourceIngest.listLinkedSourceIds(
+      input.workspacePath,
+      input.objective.id,
+      input.branch?.id
+    );
     const retrievalChunks = await this.deps.sourceIngest.search({
       workspacePath: input.workspacePath,
       objectiveId: input.objective.id,
@@ -38,16 +43,19 @@ export class ContextBuilder {
       `- title: ${input.objective.title}`,
       `- summary: ${input.objective.summary || input.objective.objective}`,
       `- success criteria: ${input.objective.successCriteria.join(" | ") || "none"}`,
+      input.objective.baselineExperimentId ? `- baseline experiment: ${input.objective.baselineExperimentId}` : null,
       "",
       "RUN",
       `- status: ${input.run.status}`,
       `- budget usage: planning=${input.run.budgetUsage.planning}/${input.run.budget.planning}, discovery=${input.run.budgetUsage.discovery}/${input.run.budget.discovery}, build=${input.run.budgetUsage.build}/${input.run.budget.build}, experiment=${input.run.budgetUsage.experiment}/${input.run.budget.experiment}, evaluation=${input.run.budgetUsage.evaluation}/${input.run.budget.evaluation}`,
+      input.run.totalPausedMs ? `- paused ms: ${input.run.totalPausedMs}` : null,
       "",
       "BRANCH",
       input.branch
         ? `- ${input.branch.title} [${input.branch.status}] score=${input.branch.score.toFixed(3)}`
         : "- none",
       input.branch ? `- hypothesis: ${input.branch.hypothesis}` : null,
+      input.branch?.parentBranchId ? `- parent branch: ${input.branch.parentBranchId}` : null,
       "",
       "QUEUE",
       ...projection.tasks
@@ -61,6 +69,9 @@ export class ContextBuilder {
         .filter((entry) => !input.branch || entry.branchId === input.branch.id)
         .slice(0, 5)
         .map((entry) => `- ${entry.summary}`),
+      "",
+      "LINKED_SOURCES",
+      ...(linkedSourceIds.length > 0 ? linkedSourceIds.slice(0, 8).map((entry) => `- ${entry}`) : ["- none"]),
       "",
       "RETRIEVAL",
       ...(retrievalChunks.length > 0
@@ -112,6 +123,9 @@ export class ContextBuilder {
     const metrics = projection.metrics
       .filter((entry) => payload.metricRefs.includes(entry.id))
       .map((entry) => `- ${entry.name}: ${entry.value}${entry.unit ? ` ${entry.unit}` : ""}`);
+    const experimentRuns = projection.experiments
+      .filter((entry) => payload.experimentResultIds.includes(entry.id))
+      .map((entry) => `- ${entry.id}: ${entry.status} (${entry.summary})`);
 
     return [
       `- focus: ${payload.focus}`,
@@ -119,6 +133,8 @@ export class ContextBuilder {
       `- subject status: ${payload.subjectTaskStatus}`,
       payload.changedFiles.length > 0 ? `- changed files: ${payload.changedFiles.join(", ")}` : "- changed files: none",
       payload.successCriteria.length > 0 ? `- success criteria: ${payload.successCriteria.join(" | ")}` : "- success criteria: none",
+      payload.baselineExperimentId ? `- baseline experiment: ${payload.baselineExperimentId}` : "- baseline experiment: none",
+      experimentRuns.length > 0 ? experimentRuns.join("\n") : "- experiments: none",
       metrics.length > 0 ? metrics.join("\n") : "- metrics: none",
       patch ? `- patch excerpt: ${patch.slice(0, 600)}` : "- patch excerpt: none",
       stdout ? `- stdout tail: ${stdout.slice(-600)}` : "- stdout tail: none",

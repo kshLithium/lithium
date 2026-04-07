@@ -14,7 +14,7 @@ import type {
 import { buildProjectPaths } from "../services/workspace-layout";
 import { Dispatcher } from "./dispatcher";
 import { PolicyEngine } from "./policy-engine";
-import { RunManager } from "./run-manager";
+import { effectiveElapsedMs, RunManager } from "./run-manager";
 import { ResearchStore } from "./store";
 import { coerceErrorMessage, nowIso } from "./utils";
 
@@ -117,7 +117,13 @@ export class WorkspaceDaemon {
         const freshRun = this.deps.store.readProjection(this.workspacePath, "run", completion.handle.run.id);
         const freshTask = this.deps.store.readProjection(this.workspacePath, "task", completion.handle.task.id);
         const freshWorkerRun = this.deps.store.readProjection(this.workspacePath, "worker_run", completion.handle.workerRun.id);
-        if (freshRun && freshTask && freshWorkerRun) {
+        if (
+          freshRun &&
+          freshTask &&
+          freshWorkerRun &&
+          freshTask.status === "running" &&
+          freshTask.workerRunId === completion.handle.workerRun.id
+        ) {
           await this.deps.runManager.handleTaskOutcome({
             workspacePath: this.workspacePath,
             task: freshTask,
@@ -135,17 +141,9 @@ export class WorkspaceDaemon {
   }
 
   private async tickRun(run: RunRecord) {
-    if (run.startedAt) {
-      const elapsed = Date.now() - new Date(run.startedAt).getTime();
-      if (elapsed >= run.budget.wallClockMs) {
-        this.deps.store.upsertProjection(this.workspacePath, "run", {
-          ...run,
-          status: "paused",
-          stopReason: "Run reached the wall clock budget.",
-          updatedAt: nowIso()
-        });
-        return;
-      }
+    if (run.startedAt && effectiveElapsedMs(run) >= run.budget.wallClockMs) {
+      await this.pauseRunById(run.id, "Run reached the wall clock budget.");
+      return;
     }
 
     const projection = this.deps.store.getProjection(this.workspacePath);
@@ -158,7 +156,7 @@ export class WorkspaceDaemon {
     const tasks = refreshed.tasks.filter((entry) => entry.runId === run.id);
     const branches = refreshed.branches.filter((entry) => entry.objectiveId === objective.id);
     const activeTasks = this.deps.dispatcher.listActive(run.id).map((entry) => entry.task);
-    const runnable = this.deps.policy.selectRunnableTasks({
+    const runnable = this.deps.policy.reserveRunnableTasks({
       run,
       tasks,
       branches,
@@ -305,12 +303,21 @@ export class WorkspaceDaemon {
       case "run.start":
         return this.deps.runManager.startRun(this.workspacePath, readOptionalString(params.objectiveId));
       case "run.pause":
-        return this.deps.runManager.pauseRun(this.workspacePath, readOptionalString(params.objectiveId));
+        return await this.pauseRunBySelector({
+          objectiveId: readOptionalString(params.objectiveId),
+          runId: readOptionalString(params.runId)
+        });
       case "run.resume":
-        return this.deps.runManager.resumeRun(this.workspacePath, readOptionalString(params.objectiveId));
+        return this.deps.runManager.resumeRun(
+          this.workspacePath,
+          readOptionalString(params.objectiveId),
+          readOptionalString(params.runId)
+        );
       case "run.stop":
-        this.deps.dispatcher.terminateRun(readOptionalString(params.runId) ?? "");
-        return this.deps.runManager.stopRun(this.workspacePath, readOptionalString(params.objectiveId));
+        return await this.stopRunBySelector({
+          objectiveId: readOptionalString(params.objectiveId),
+          runId: readOptionalString(params.runId)
+        });
       case "source.add":
         return await this.deps.runManager.addSources(this.workspacePath, params as unknown as SourceAddInput);
     }
@@ -324,6 +331,36 @@ export class WorkspaceDaemon {
   private async log(message: string) {
     const paths = buildProjectPaths(this.workspacePath);
     await appendFile(paths.daemonLogFile, `[${nowIso()}] ${message}\n`, "utf8").catch(() => undefined);
+  }
+
+  private async pauseRunBySelector(input: { objectiveId?: string; runId?: string }) {
+    const { run } = this.deps.runManager.resolveRunControl(this.workspacePath, input);
+    return await this.pauseRunById(run.id, "Paused by the user.", input.objectiveId);
+  }
+
+  private async stopRunBySelector(input: { objectiveId?: string; runId?: string }) {
+    const { run } = this.deps.runManager.resolveRunControl(this.workspacePath, input);
+    const activeHandles = this.deps.dispatcher.listActive(run.id);
+    for (const handle of activeHandles) {
+      handle.terminate();
+    }
+    return await this.deps.runManager.stopRun(this.workspacePath, input.objectiveId, run.id, activeHandles);
+  }
+
+  private async pauseRunById(runId: string, reason: string, objectiveId?: string) {
+    const activeHandles = this.deps.dispatcher.listActive(runId);
+    for (const handle of activeHandles) {
+      handle.terminate();
+    }
+    const paused = await this.deps.runManager.pauseRun(this.workspacePath, objectiveId, runId, activeHandles);
+    if (reason !== "Paused by the user.") {
+      this.deps.store.upsertProjection(this.workspacePath, "run", {
+        ...paused,
+        stopReason: reason,
+        updatedAt: nowIso()
+      });
+    }
+    return paused;
   }
 }
 

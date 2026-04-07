@@ -15,7 +15,7 @@ describe("WorkspaceDaemon RPC", () => {
   });
 
   it("serves objective creation and status over the local socket", async () => {
-    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-v4-daemon-"));
+    const workspacePath = await mkdtemp(path.join(os.tmpdir(), "lithium-v5-daemon-"));
     const daemon = createWorkspaceDaemon(workspacePath);
     activeDaemons.push(daemon);
     await daemon.start();

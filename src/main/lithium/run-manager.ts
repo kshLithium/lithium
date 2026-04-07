@@ -1,13 +1,20 @@
 import type {
   ArtifactRef,
   BranchRecord,
-  EvaluationRecord,
+  BuildTaskPayload,
+  EvaluationDecisionRecord,
   EvaluateTaskPayload,
-  ExperimentRecord,
+  ExperimentRunRecord,
+  ExperimentSpecInput,
+  ExperimentSpecRecord,
   ExperimentTaskPayload,
+  FindingRecord,
   MetricRecord,
   ObjectiveCreateInput,
   ObjectiveRecord,
+  PlanStepProposal,
+  PromotionRecord,
+  PromoteTaskPayload,
   RunBudget,
   RunBudgetUsage,
   RunRecord,
@@ -17,16 +24,26 @@ import type {
   TaskDependency,
   TaskOutcome,
   TaskPayload,
-  TaskProposal,
   TaskRecord,
   WorkerRunRecord,
   WorktreeLeaseRecord
 } from "../../shared/types";
-import { bucketForTask, executorForTask, PolicyEngine } from "./policy-engine";
+import { ArtifactStore } from "./artifact-store";
+import { bucketForTask, executorForTask, PolicyEngine, isBranchSchedulable } from "./policy-engine";
 import { SourceIngest } from "./source-ingest";
-import { ResearchStore } from "./store";
+import { type ProjectionMutation, ResearchStore } from "./store";
 import { createId, nowIso, roundScore } from "./utils";
 import { WorkerLeaseManager } from "./worker-lease-manager";
+
+type InterruptMode = "pause" | "stop";
+
+type InterruptibleTaskHandle = {
+  task: TaskRecord;
+  run: RunRecord;
+  workerRun: WorkerRunRecord;
+  branch?: BranchRecord | null;
+  lease?: WorktreeLeaseRecord;
+};
 
 export class RunManager {
   constructor(
@@ -35,6 +52,7 @@ export class RunManager {
       policy: PolicyEngine;
       sourceIngest: SourceIngest;
       leaseManager: WorkerLeaseManager;
+      artifactStore: ArtifactStore;
     }
   ) {}
 
@@ -51,15 +69,23 @@ export class RunManager {
       createdAt: now,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "objective", objective);
-    this.deps.store.appendEvent(
-      workspacePath,
-      this.deps.store.createEvent({
-        type: "objective.created",
-        objectiveId: objective.id,
-        payload: objective
-      })
-    );
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "objective",
+        value: objective
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "objective.created",
+          objectiveId: objective.id,
+          payload: {
+            title: objective.title
+          }
+        })
+      }
+    ]);
     return objective;
   }
 
@@ -81,22 +107,34 @@ export class RunManager {
     const branch =
       (input.branchId ? projection.branches.find((entry) => entry.id === input.branchId) : null) ??
       projection.branches.find((entry) => entry.id === objective.activeBranchId) ??
-      projection.branches.find((entry) => entry.objectiveId === objective.id) ??
+      projection.branches.find((entry) => entry.objectiveId === objective.id && isBranchSchedulable(entry.status)) ??
       null;
-    const sources = await this.deps.sourceIngest.addInputs({
+    return await this.deps.sourceIngest.addInputs({
       workspacePath,
       objective,
       branch,
       inputs: input.inputs
     });
-    if (branch && sources.length > 0) {
-      this.attachSourcesToBranch(workspacePath, branch, sources);
-    }
-    return sources;
   }
 
   getStatusSnapshot(workspacePath: string, daemon: { running: boolean; pid?: number; socketPath: string }): StatusSnapshot {
     return this.deps.store.getStatusSnapshot(workspacePath, daemon);
+  }
+
+  resolveRunControl(workspacePath: string, input: { objectiveId?: string; runId?: string }) {
+    const projection = this.deps.store.getProjection(workspacePath);
+    const objective = resolveObjective(projection.objectives, input.objectiveId);
+    const run =
+      (input.runId ? projection.runs.find((entry) => entry.id === input.runId) : null) ??
+      (objective ? projection.runs.find((entry) => entry.id === objective.activeRunId) : null) ??
+      null;
+    if (!run) {
+      throw new Error("No run exists.");
+    }
+    return {
+      objective: objective ?? projection.objectives.find((entry) => entry.id === run.objectiveId) ?? null,
+      run
+    };
   }
 
   startRun(workspacePath: string, objectiveId?: string) {
@@ -107,26 +145,15 @@ export class RunManager {
     }
 
     const existing = projection.runs.find(
-      (entry) => entry.objectiveId === objective.id && (entry.status === "active" || entry.status === "paused" || entry.status === "needs-human")
+      (entry) =>
+        entry.objectiveId === objective.id &&
+        (entry.status === "active" || entry.status === "paused" || entry.status === "needs-human")
     );
     if (existing?.status === "active") {
       return existing;
     }
     if (existing?.status === "paused") {
-      const resumed = {
-        ...existing,
-        status: "active" as const,
-        stopReason: undefined,
-        updatedAt: nowIso()
-      };
-      this.deps.store.upsertProjection(workspacePath, "run", resumed);
-      this.deps.store.upsertProjection(workspacePath, "objective", {
-        ...objective,
-        status: "active",
-        activeRunId: resumed.id,
-        updatedAt: resumed.updatedAt
-      });
-      return resumed;
+      return this.resumeRun(workspacePath, objective.id, existing.id);
     }
     if (existing?.status === "needs-human") {
       throw new Error("The active run needs human attention. Stop it or resolve the blocking task before restarting.");
@@ -143,75 +170,221 @@ export class RunManager {
       activeTaskIds: [],
       createdAt: now,
       updatedAt: now,
-      startedAt: now
+      startedAt: now,
+      totalPausedMs: 0
     };
-    this.deps.store.upsertProjection(workspacePath, "run", run);
-    this.deps.store.upsertProjection(workspacePath, "objective", {
-      ...objective,
-      status: "active",
-      activeBranchId: seededBranch.id,
-      activeRunId: run.id,
-      branchIds: Array.from(new Set([...objective.branchIds, seededBranch.id])),
-      updatedAt: now
-    });
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "run",
+        value: run
+      },
+      {
+        type: "upsert",
+        kind: "objective",
+        value: {
+          ...objective,
+          status: "active",
+          activeBranchId: seededBranch.id,
+          activeRunId: run.id,
+          branchIds: Array.from(new Set([...objective.branchIds, seededBranch.id])),
+          updatedAt: now
+        }
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "run.started",
+          objectiveId: objective.id,
+          runId: run.id,
+          branchId: seededBranch.id,
+          payload: {
+            branchId: seededBranch.id
+          }
+        })
+      }
+    ]);
     this.enqueuePlanIfNeeded(workspacePath, run.id, objective.id);
     return run;
   }
 
-  pauseRun(workspacePath: string, objectiveId?: string) {
-    const projection = this.deps.store.getProjection(workspacePath);
-    const objective = resolveObjective(projection.objectives, objectiveId);
-    const run = objective ? projection.runs.find((entry) => entry.id === objective.activeRunId) : null;
-    if (!run) {
+  async pauseRun(
+    workspacePath: string,
+    objectiveId?: string,
+    runId?: string,
+    activeHandles: InterruptibleTaskHandle[] = []
+  ) {
+    const { run } = this.resolveRunControl(workspacePath, {
+      objectiveId,
+      runId
+    });
+    if (run.status !== "active" && run.status !== "pausing") {
       throw new Error("No active run exists.");
     }
-    const paused = {
+    const pausedAt = nowIso();
+    const pausingRun: RunRecord = {
       ...run,
-      status: "paused" as const,
-      stopReason: "Paused by the user.",
-      updatedAt: nowIso()
+      status: "pausing",
+      stopReason: "Pausing run and draining active tasks.",
+      updatedAt: pausedAt
     };
-    this.deps.store.upsertProjection(workspacePath, "run", paused);
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "run",
+        value: pausingRun
+      }
+    ]);
+
+    for (const handle of activeHandles) {
+      await this.interruptActiveTask(workspacePath, handle, "pause", "Paused by the user.");
+    }
+
+    const refreshed = this.deps.store.readProjection(workspacePath, "run", run.id) ?? pausingRun;
+    const paused: RunRecord = {
+      ...refreshed,
+      status: "paused",
+      stopReason: "Paused by the user.",
+      pausedAt,
+      activeTaskIds: [],
+      updatedAt: pausedAt
+    };
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "run",
+        value: paused
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "run.paused",
+          objectiveId: paused.objectiveId,
+          runId: paused.id,
+          payload: {
+            activeTaskIds: []
+          }
+        })
+      }
+    ]);
     return paused;
   }
 
-  resumeRun(workspacePath: string, objectiveId?: string) {
-    const projection = this.deps.store.getProjection(workspacePath);
-    const objective = resolveObjective(projection.objectives, objectiveId);
-    const run = objective ? projection.runs.find((entry) => entry.id === objective.activeRunId) : null;
-    if (!run) {
-      throw new Error("No paused run exists.");
-    }
+  resumeRun(workspacePath: string, objectiveId?: string, runId?: string) {
+    const { objective, run } = this.resolveRunControl(workspacePath, {
+      objectiveId,
+      runId
+    });
     if (run.status !== "paused") {
       return run;
     }
-    const resumed = {
+    const now = nowIso();
+    const pausedDelta =
+      run.pausedAt && Number.isFinite(new Date(run.pausedAt).getTime())
+        ? Math.max(0, Date.now() - new Date(run.pausedAt).getTime())
+        : 0;
+    const resumed: RunRecord = {
       ...run,
-      status: "active" as const,
+      status: "active",
       stopReason: undefined,
-      updatedAt: nowIso()
+      pausedAt: undefined,
+      totalPausedMs: (run.totalPausedMs ?? 0) + pausedDelta,
+      updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "run", resumed);
-    this.enqueuePlanIfNeeded(workspacePath, resumed.id, objective!.id);
+    const mutations: ProjectionMutation[] = [
+      {
+        type: "upsert",
+        kind: "run",
+        value: resumed
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "run.resumed",
+          objectiveId: resumed.objectiveId,
+          runId: resumed.id,
+          payload: {
+            totalPausedMs: resumed.totalPausedMs ?? 0
+          }
+        })
+      }
+    ];
+    if (objective) {
+      mutations.push({
+        type: "upsert",
+        kind: "objective",
+        value: {
+          ...objective,
+          status: "active",
+          activeRunId: resumed.id,
+          updatedAt: now
+        }
+      });
+    }
+    this.deps.store.applyMutations(workspacePath, mutations);
+    this.enqueuePlanIfNeeded(workspacePath, resumed.id, objective?.id ?? resumed.objectiveId);
     return resumed;
   }
 
-  stopRun(workspacePath: string, objectiveId?: string) {
-    const projection = this.deps.store.getProjection(workspacePath);
-    const objective = resolveObjective(projection.objectives, objectiveId);
-    const run = objective ? projection.runs.find((entry) => entry.id === objective.activeRunId) : null;
-    if (!run) {
-      throw new Error("No run exists.");
+  async stopRun(
+    workspacePath: string,
+    objectiveId?: string,
+    runId?: string,
+    activeHandles: InterruptibleTaskHandle[] = []
+  ) {
+    const { run } = this.resolveRunControl(workspacePath, {
+      objectiveId,
+      runId
+    });
+    if (run.status === "stopped" || run.status === "completed") {
+      return run;
     }
-    const stopped = {
+    const stoppingAt = nowIso();
+    const stopping: RunRecord = {
       ...run,
-      status: "stopped" as const,
+      status: "stopping",
+      stopReason: "Stopping run and interrupting active tasks.",
+      updatedAt: stoppingAt
+    };
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "run",
+        value: stopping
+      }
+    ]);
+
+    for (const handle of activeHandles) {
+      await this.interruptActiveTask(workspacePath, handle, "stop", "Stopped by the user.");
+    }
+
+    const stoppedAt = nowIso();
+    const stopped: RunRecord = {
+      ...(this.deps.store.readProjection(workspacePath, "run", run.id) ?? stopping),
+      status: "stopped",
       stopReason: "Stopped by the user.",
       activeTaskIds: [],
-      updatedAt: nowIso(),
-      endedAt: nowIso()
+      updatedAt: stoppedAt,
+      endedAt: stoppedAt
     };
-    this.deps.store.upsertProjection(workspacePath, "run", stopped);
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "run",
+        value: stopped
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "run.stopped",
+          objectiveId: stopped.objectiveId,
+          runId: stopped.id,
+          payload: {
+            stoppedAt
+          }
+        })
+      }
+    ]);
     return stopped;
   }
 
@@ -232,31 +405,53 @@ export class RunManager {
       startedAt: now,
       updatedAt: now
     };
-    const updatedRun = this.deps.policy.incrementBudget({
-      ...input.run,
-      activeTaskIds: Array.from(new Set([...input.run.activeTaskIds, input.task.id])),
-      updatedAt: now
-    }, input.task.kind);
-    this.deps.store.upsertProjection(input.workspacePath, "task", updatedTask);
-    this.deps.store.upsertProjection(input.workspacePath, "run", updatedRun);
-    this.deps.store.upsertProjection(input.workspacePath, "worker_run", input.workerRun);
-    if (input.lease) {
-      this.deps.store.upsertProjection(input.workspacePath, "lease", input.lease);
-    }
-    this.deps.store.appendEvent(
-      input.workspacePath,
-      this.deps.store.createEvent({
-        type: "task.dispatched",
-        objectiveId: updatedTask.objectiveId,
-        branchId: updatedTask.branchId,
-        runId: updatedTask.runId,
-        taskId: updatedTask.id,
-        payload: {
-          workerRunId: input.workerRun.id,
-          leaseId: input.lease?.id
-        }
-      })
+    const updatedRun = this.deps.policy.incrementBudget(
+      {
+        ...input.run,
+        activeTaskIds: Array.from(new Set([...input.run.activeTaskIds, input.task.id])),
+        updatedAt: now
+      },
+      input.task.kind
     );
+    const operations: ProjectionMutation[] = [
+      {
+        type: "upsert",
+        kind: "task",
+        value: updatedTask
+      },
+      {
+        type: "upsert",
+        kind: "run",
+        value: updatedRun
+      },
+      {
+        type: "upsert",
+        kind: "worker_run",
+        value: input.workerRun
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "task.dispatched",
+          objectiveId: updatedTask.objectiveId,
+          branchId: updatedTask.branchId,
+          runId: updatedTask.runId,
+          taskId: updatedTask.id,
+          payload: {
+            workerRunId: input.workerRun.id,
+            leaseId: input.lease?.id
+          }
+        })
+      }
+    ];
+    if (input.lease) {
+      operations.push({
+        type: "upsert",
+        kind: "lease",
+        value: input.lease
+      });
+    }
+    this.deps.store.applyMutations(input.workspacePath, operations);
     return {
       task: updatedTask,
       run: updatedRun
@@ -271,6 +466,8 @@ export class RunManager {
         ...task,
         status: "pending",
         recoveryAction: "retryable",
+        summary: reason,
+        workerRunId: undefined,
         updatedAt: now
       };
       const updatedRun: RunRecord = {
@@ -278,8 +475,32 @@ export class RunManager {
         activeTaskIds: run.activeTaskIds.filter((id) => id !== task.id),
         updatedAt: now
       };
-      this.deps.store.upsertProjection(workspacePath, "task", updatedTask);
-      this.deps.store.upsertProjection(workspacePath, "run", updatedRun);
+      this.deps.store.applyMutations(workspacePath, [
+        {
+          type: "upsert",
+          kind: "task",
+          value: updatedTask
+        },
+        {
+          type: "upsert",
+          kind: "run",
+          value: updatedRun
+        },
+        {
+          type: "event",
+          value: this.deps.store.createEvent({
+            type: "task.interrupted",
+            objectiveId: updatedTask.objectiveId,
+            branchId: updatedTask.branchId,
+            runId: updatedTask.runId,
+            taskId: updatedTask.id,
+            payload: {
+              reason,
+              mode: "retry"
+            }
+          })
+        }
+      ]);
       return updatedTask;
     }
 
@@ -298,9 +519,143 @@ export class RunManager {
       activeTaskIds: run.activeTaskIds.filter((id) => id !== task.id),
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "task", updatedTask);
-    this.deps.store.upsertProjection(workspacePath, "run", updatedRun);
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "task",
+        value: updatedTask
+      },
+      {
+        type: "upsert",
+        kind: "run",
+        value: updatedRun
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "task.interrupted",
+          objectiveId: updatedTask.objectiveId,
+          branchId: updatedTask.branchId,
+          runId: updatedTask.runId,
+          taskId: updatedTask.id,
+          payload: {
+            reason,
+            mode: "needs-human"
+          }
+        })
+      }
+    ]);
     return updatedTask;
+  }
+
+  async interruptActiveTask(
+    workspacePath: string,
+    handle: InterruptibleTaskHandle,
+    mode: InterruptMode,
+    reason: string
+  ) {
+    const branch =
+      handle.branch ?? this.deps.store.readProjection(workspacePath, "branch", handle.task.branchId) ?? null;
+    const operations: ProjectionMutation[] = [];
+    let refreshedBranch = branch;
+    let patchRef: ArtifactRef | undefined;
+    let changedFiles: string[] = [];
+    if (handle.lease?.worktreePath && branch) {
+      changedFiles = await this.deps.leaseManager.listChangedFiles(handle.lease.worktreePath, {
+        trackedOnly: true
+      }).catch(() => []);
+      if (changedFiles.length > 0) {
+        const workingTreePatch = await this.deps.leaseManager.buildWorkingTreePatch(branch);
+        if (workingTreePatch.changed && workingTreePatch.patch) {
+          patchRef = await this.deps.artifactStore.writePatchArtifact(workspacePath, `${handle.task.id}-interrupt`, workingTreePatch.patch);
+        }
+        refreshedBranch = await this.deps.leaseManager.restoreBranchWorkspace(workspacePath, branch);
+        operations.push({
+          type: "upsert",
+          kind: "branch",
+          value: refreshedBranch
+        });
+      }
+    }
+
+    if (handle.lease) {
+      const released = await this.deps.leaseManager.releaseLease(handle.lease);
+      operations.push({
+        type: "upsert",
+        kind: "lease",
+        value: released
+      });
+    }
+
+    const now = nowIso();
+    const nextTask: TaskRecord =
+      mode === "pause"
+        ? {
+            ...handle.task,
+            status: "pending",
+            summary: reason,
+            lastInterruptionReason: reason,
+            artifactRefs: patchRef ? Array.from(new Set([...(handle.task.artifactRefs ?? []), patchRef])) : handle.task.artifactRefs,
+            changedFiles: changedFiles.length > 0 ? changedFiles : handle.task.changedFiles,
+            workerRunId: undefined,
+            startedAt: undefined,
+            updatedAt: now
+          }
+        : {
+            ...handle.task,
+            status: "cancelled",
+            summary: reason,
+            lastInterruptionReason: reason,
+            artifactRefs: patchRef ? Array.from(new Set([...(handle.task.artifactRefs ?? []), patchRef])) : handle.task.artifactRefs,
+            changedFiles: changedFiles.length > 0 ? changedFiles : handle.task.changedFiles,
+            workerRunId: undefined,
+            completedAt: now,
+            updatedAt: now
+          };
+    const nextRun: RunRecord = {
+      ...handle.run,
+      activeTaskIds: handle.run.activeTaskIds.filter((id) => id !== handle.task.id),
+      updatedAt: now
+    };
+    const nextWorkerRun: WorkerRunRecord = {
+      ...handle.workerRun,
+      status: "cancelled",
+      updatedAt: now,
+      endedAt: now
+    };
+    operations.push(
+      {
+        type: "upsert",
+        kind: "task",
+        value: nextTask
+      },
+      {
+        type: "upsert",
+        kind: "run",
+        value: nextRun
+      },
+      {
+        type: "upsert",
+        kind: "worker_run",
+        value: nextWorkerRun
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "task.interrupted",
+          objectiveId: nextTask.objectiveId,
+          branchId: nextTask.branchId,
+          runId: nextTask.runId,
+          taskId: nextTask.id,
+          payload: {
+            reason,
+            mode
+          }
+        })
+      }
+    );
+    this.deps.store.applyMutations(workspacePath, operations);
+    return nextTask;
   }
 
   async handleTaskOutcome(input: {
@@ -313,9 +668,83 @@ export class RunManager {
   }) {
     const projection = this.deps.store.getProjection(input.workspacePath);
     const objective = projection.objectives.find((entry) => entry.id === input.task.objectiveId);
-    const branch = projection.branches.find((entry) => entry.id === input.task.branchId) ?? null;
+    let branch = projection.branches.find((entry) => entry.id === input.task.branchId) ?? null;
     if (!objective) {
       throw new Error(`Objective ${input.task.objectiveId} is missing.`);
+    }
+
+    const metadataBranch = readBranchFromProviderMetadata(input.outcome.providerMetadata, branch?.id);
+    if (metadataBranch) {
+      branch = metadataBranch;
+    }
+
+    if (input.outcome.status === "failed" && input.outcome.retryability === "retryable" && input.task.attemptCount < input.task.maxAttempts) {
+      const now = nowIso();
+      const operations: ProjectionMutation[] = [
+        {
+          type: "upsert",
+          kind: "task",
+          value: {
+            ...input.task,
+            status: "pending",
+            summary: input.outcome.failureReason ?? input.outcome.summary,
+            artifactRefs: input.outcome.artifactRefs,
+            changedFiles: input.outcome.changedFiles,
+            workerRunId: undefined,
+            updatedAt: now
+          }
+        },
+        {
+          type: "upsert",
+          kind: "run",
+          value: {
+            ...input.run,
+            activeTaskIds: input.run.activeTaskIds.filter((id) => id !== input.task.id),
+            updatedAt: now
+          }
+        },
+        {
+          type: "upsert",
+          kind: "worker_run",
+          value: {
+            ...input.workerRun,
+            status: "failed",
+            updatedAt: now,
+            endedAt: now
+          }
+        },
+        {
+          type: "event",
+          value: this.deps.store.createEvent({
+            type: "task.interrupted",
+            objectiveId: input.task.objectiveId,
+            branchId: input.task.branchId,
+            runId: input.task.runId,
+            taskId: input.task.id,
+            payload: {
+              reason: input.outcome.failureReason ?? input.outcome.summary,
+              mode: "retry"
+            }
+          })
+        }
+      ];
+      if (input.lease) {
+        const released = await this.deps.leaseManager.releaseLease(input.lease);
+        operations.push({
+          type: "upsert",
+          kind: "lease",
+          value: released
+        });
+      }
+      if (metadataBranch) {
+        operations.push({
+          type: "upsert",
+          kind: "branch",
+          value: metadataBranch
+        });
+      }
+      this.deps.store.applyMutations(input.workspacePath, operations);
+      return;
     }
 
     const now = nowIso();
@@ -339,32 +768,54 @@ export class RunManager {
       updatedAt: now,
       endedAt: now
     };
-    this.deps.store.upsertProjection(input.workspacePath, "task", updatedTask);
-    this.deps.store.upsertProjection(input.workspacePath, "run", updatedRun);
-    this.deps.store.upsertProjection(input.workspacePath, "worker_run", updatedWorkerRun);
+    const operations: ProjectionMutation[] = [
+      {
+        type: "upsert",
+        kind: "task",
+        value: updatedTask
+      },
+      {
+        type: "upsert",
+        kind: "run",
+        value: updatedRun
+      },
+      {
+        type: "upsert",
+        kind: "worker_run",
+        value: updatedWorkerRun
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "task.completed",
+          objectiveId: updatedTask.objectiveId,
+          branchId: updatedTask.branchId,
+          runId: updatedTask.runId,
+          taskId: updatedTask.id,
+          payload: {
+            status: updatedTask.status,
+            summary: updatedTask.summary
+          }
+        })
+      }
+    ];
     if (input.lease) {
       const released = await this.deps.leaseManager.releaseLease(input.lease);
-      this.deps.store.upsertProjection(input.workspacePath, "lease", released);
+      operations.push({
+        type: "upsert",
+        kind: "lease",
+        value: released
+      });
     }
-    this.deps.store.appendEvent(
-      input.workspacePath,
-      this.deps.store.createEvent({
-        type: "task.completed",
-        objectiveId: updatedTask.objectiveId,
-        branchId: updatedTask.branchId,
-        runId: updatedTask.runId,
-        taskId: updatedTask.id,
-        payload: {
-          status: updatedTask.status,
-          summary: updatedTask.summary
-        }
-      })
-    );
-
-    const updatedBranch = readBranchFromOutcome(input.outcome, branch);
-    if (updatedBranch) {
-      this.deps.store.upsertProjection(input.workspacePath, "branch", updatedBranch);
+    if (metadataBranch) {
+      operations.push({
+        type: "upsert",
+        kind: "branch",
+        value: metadataBranch
+      });
+      branch = metadataBranch;
     }
+    this.deps.store.applyMutations(input.workspacePath, operations);
 
     switch (updatedTask.kind) {
       case "plan":
@@ -379,11 +830,15 @@ export class RunManager {
       case "build_change":
         this.applyBuildOutcome(input.workspacePath, objective, updatedTask, input.outcome);
         break;
+      case "verify_change":
       case "run_experiment":
         this.applyExperimentOutcome(input.workspacePath, objective, updatedTask, input.outcome);
         break;
       case "evaluate_branch":
         await this.applyEvaluationOutcome(input.workspacePath, objective, updatedRun, updatedTask, input.outcome);
+        break;
+      case "promote_patch":
+        this.applyPromotionOutcome(input.workspacePath, objective, updatedTask, input.outcome);
         break;
     }
   }
@@ -401,8 +856,8 @@ export class RunManager {
       return null;
     }
     const activeBranch =
-      branches.find((entry) => entry.id === objective.activeBranchId) ??
-      branches.sort((left, right) => right.score - left.score)[0] ??
+      branches.find((entry) => entry.id === objective.activeBranchId && isBranchSchedulable(entry.status)) ??
+      branches.filter((entry) => isBranchSchedulable(entry.status)).sort((left, right) => right.score - left.score)[0] ??
       null;
     if (!activeBranch) {
       return null;
@@ -443,19 +898,40 @@ export class RunManager {
       hypothesis: objective.objective,
       status: "active",
       score: 0.5,
-      sourceIds: [],
       findingIds: [],
       taskIds: [],
       createdAt: now,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "branch", branch);
-    this.deps.store.upsertProjection(workspacePath, "objective", {
-      ...objective,
-      activeBranchId: branch.id,
-      branchIds: Array.from(new Set([...objective.branchIds, branch.id])),
-      updatedAt: now
-    });
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "branch",
+        value: branch
+      },
+      {
+        type: "upsert",
+        kind: "objective",
+        value: {
+          ...objective,
+          activeBranchId: branch.id,
+          branchIds: Array.from(new Set([...objective.branchIds, branch.id])),
+          updatedAt: now
+        }
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "branch.created",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          payload: {
+            title: branch.title,
+            hypothesis: branch.hypothesis
+          }
+        })
+      }
+    ]);
     return branch;
   }
 
@@ -479,7 +955,7 @@ export class RunManager {
     );
     let refreshedObjective = objective;
     for (const proposal of validated.proposedBranches) {
-      const branch = this.createBranch(workspacePath, objective, proposal.title, proposal.hypothesis);
+      const branch = this.createBranch(workspacePath, refreshedObjective, proposal.title, proposal.hypothesis);
       branchByTitle.set(branch.title.trim().toLowerCase(), branch);
       refreshedObjective = this.deps.store.readProjection(workspacePath, "objective", objective.id) ?? refreshedObjective;
     }
@@ -487,8 +963,13 @@ export class RunManager {
     const projectionAfterBranches = this.deps.store.getProjection(workspacePath);
     const defaultBranch =
       projectionAfterBranches.branches.find((entry) => entry.id === refreshedObjective.activeBranchId) ??
-      projectionAfterBranches.branches.find((entry) => entry.objectiveId === objective.id) ??
+      projectionAfterBranches.branches.find((entry) => entry.objectiveId === objective.id && isBranchSchedulable(entry.status)) ??
       null;
+    const taskIdByStepId = new Map<string, string>();
+    for (const proposal of validated.proposedTasks) {
+      taskIdByStepId.set(proposal.stepId, createId("task"));
+    }
+
     for (const proposal of validated.proposedTasks) {
       const branch =
         (proposal.branchTitle ? branchByTitle.get(proposal.branchTitle.trim().toLowerCase()) : null) ??
@@ -496,19 +977,28 @@ export class RunManager {
       if (!branch) {
         continue;
       }
-      const dependencies: TaskDependency[] = proposal.kind === "evaluate_branch" ? [] : [];
+      const dependencies: TaskDependency[] = proposal.dependsOn
+        .map((stepId) => taskIdByStepId.get(stepId))
+        .filter((entry): entry is string => Boolean(entry))
+        .map((taskId) => ({
+          taskId,
+          on: "success"
+        }));
+      const payload = this.buildPayloadForProposal(workspacePath, refreshedObjective, branch, proposal);
       this.enqueueTask({
         workspacePath,
+        id: taskIdByStepId.get(proposal.stepId),
         objective: refreshedObjective,
         run,
         branch,
         title: proposal.title,
         prompt: proposal.prompt,
         kind: proposal.kind,
-        payload: this.buildPayloadForProposal(workspacePath, refreshedObjective, branch, proposal),
+        payload,
         dependencies,
-        maxAttempts: proposal.kind === "build_change" || proposal.kind === "run_experiment" ? 2 : 1,
-        priority: this.deps.policy.buildPriority(proposal, branch)
+        maxAttempts: proposal.kind === "build_change" || proposal.kind === "verify_change" || proposal.kind === "run_experiment" ? 2 : 1,
+        priority: this.deps.policy.buildPriority(proposal, branch),
+        planStepId: proposal.stepId
       });
     }
   }
@@ -524,7 +1014,6 @@ export class RunManager {
       branch,
       sources: outcome.discoveredSources
     });
-    const nextBranch = this.attachSourcesToBranch(workspacePath, branch, sources);
     if (sources.length === 0) {
       return;
     }
@@ -536,14 +1025,14 @@ export class RunManager {
       workspacePath,
       objective,
       run,
-      branch: nextBranch,
-      title: `Synthesize evidence for ${nextBranch.title}`,
-      prompt: `Read the newly discovered sources and synthesize the strongest evidence for branch "${nextBranch.title}".`,
+      branch,
+      title: `Synthesize evidence for ${branch.title}`,
+      prompt: `Read the newly discovered sources and synthesize the strongest evidence for branch "${branch.title}".`,
       kind: "read_synthesize",
       payload: {
-        branchId: nextBranch.id,
+        branchId: branch.id,
         sourceIds: sources.map((entry) => entry.id),
-        questions: [`What evidence strengthens or weakens the hypothesis "${nextBranch.hypothesis}"?`]
+        questions: [`What evidence strengthens or weakens the hypothesis "${branch.hypothesis}"?`]
       },
       dependencies: [
         {
@@ -562,11 +1051,12 @@ export class RunManager {
       return;
     }
     const projection = this.deps.store.getProjection(workspacePath);
+    const now = nowIso();
     const newFindings = outcome.findings.map((finding) => {
       const source = projection.sources.find(
         (entry) => entry.locator === finding.sourceLocator || entry.canonicalLocator === finding.sourceLocator
       );
-      const record = {
+      return {
         id: createId("find"),
         objectiveId: objective.id,
         branchId: branch.id,
@@ -578,17 +1068,29 @@ export class RunManager {
         summary: finding.summary,
         detail: finding.detail,
         evidence: [finding.citationText ?? finding.sourceLocator].filter(Boolean),
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      this.deps.store.upsertProjection(workspacePath, "finding", record);
-      return record;
+        createdAt: now,
+        updatedAt: now
+      } satisfies FindingRecord;
     });
-    this.deps.store.upsertProjection(workspacePath, "branch", {
-      ...branch,
-      findingIds: Array.from(new Set([...branch.findingIds, ...newFindings.map((entry) => entry.id)])),
-      updatedAt: nowIso()
-    });
+    this.deps.store.applyMutations(workspacePath, [
+      ...newFindings.map(
+        (entry) =>
+          ({
+            type: "upsert",
+            kind: "finding",
+            value: entry
+          }) satisfies ProjectionMutation
+      ),
+      {
+        type: "upsert",
+        kind: "branch",
+        value: {
+          ...branch,
+          findingIds: Array.from(new Set([...branch.findingIds, ...newFindings.map((entry) => entry.id)])),
+          updatedAt: now
+        }
+      }
+    ]);
     this.enqueueEvaluationTask({
       workspacePath,
       objective,
@@ -613,23 +1115,20 @@ export class RunManager {
     if (!run || !branch) {
       return;
     }
-    const payload = task.payload as TaskPayload & { verificationCommands?: string[]; successCriteria?: string[] };
-    const verificationCommands = "verificationCommands" in payload ? payload.verificationCommands ?? [] : [];
-    if (outcome.status === "completed" && verificationCommands.length > 0) {
+    const payload = task.payload as BuildTaskPayload;
+    if (outcome.status === "completed" && payload.verificationSpecId) {
       this.enqueueTask({
         workspacePath,
         objective,
         run,
         branch,
-        title: `Run verification for ${branch.title}`,
-        prompt: verificationCommands.join("\n"),
-        kind: "run_experiment",
+        title: `Verify ${branch.title}`,
+        prompt: `Run verification for branch "${branch.title}".`,
+        kind: "verify_change",
         payload: {
           branchId: branch.id,
-          commands: verificationCommands,
-          timeoutMs: 20 * 60_000,
-          expectedMetrics: []
-        } satisfies ExperimentTaskPayload,
+          experimentSpecId: payload.verificationSpecId
+        },
         dependencies: [
           {
             taskId: task.id,
@@ -651,7 +1150,7 @@ export class RunManager {
         artifactRefs: outcome.artifactRefs,
         changedFiles: outcome.changedFiles
       },
-      sourceRefs: branch.sourceIds.slice(-5),
+      sourceRefs: this.deps.sourceIngest.listLinkedSourceIds(workspacePath, objective.id, branch.id).slice(-5),
       focus: `Evaluate the latest code change for branch "${branch.title}".`
     });
   }
@@ -659,16 +1158,19 @@ export class RunManager {
   private applyExperimentOutcome(workspacePath: string, objective: ObjectiveRecord, task: TaskRecord, outcome: TaskOutcome) {
     const run = this.deps.store.readProjection(workspacePath, "run", task.runId);
     const branch = this.deps.store.readProjection(workspacePath, "branch", task.branchId);
-    if (!run || !branch || !outcome.experimentManifest) {
+    const payload = task.payload as ExperimentTaskPayload;
+    const experimentSpec = this.deps.store.readProjection(workspacePath, "experiment_spec", payload.experimentSpecId);
+    if (!run || !branch || !outcome.experimentManifest || !experimentSpec) {
       return;
     }
 
     const now = nowIso();
-    const experiment: ExperimentRecord = {
+    const experiment: ExperimentRunRecord = {
       id: createId("exp"),
       objectiveId: objective.id,
       branchId: branch.id,
       taskId: task.id,
+      experimentSpecId: experimentSpec.id,
       status: outcome.status,
       summary: outcome.summary,
       manifestRef: outcome.artifactRefs.find((entry) => entry.kind === "manifest"),
@@ -677,27 +1179,52 @@ export class RunManager {
       patchArtifactRef: outcome.artifactRefs.find((entry) => entry.kind === "patch"),
       changedFiles: outcome.changedFiles,
       metrics: outcome.metrics,
+      contractViolation: outcome.experimentManifest.contractViolation,
       createdAt: now,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "experiment", experiment);
-    const metricRefs: string[] = [];
-    for (const metric of outcome.metrics) {
-      const record: MetricRecord = {
-        id: createId("metric"),
-        objectiveId: objective.id,
-        branchId: branch.id,
-        taskId: task.id,
-        experimentId: experiment.id,
-        name: metric.name,
-        value: metric.value,
-        unit: metric.unit,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.deps.store.upsertProjection(workspacePath, "metric", record);
-      metricRefs.push(record.id);
-    }
+    const metricRecords = outcome.metrics.map((metric) => ({
+      id: createId("metric"),
+      objectiveId: objective.id,
+      branchId: branch.id,
+      taskId: task.id,
+      experimentId: experiment.id,
+      name: metric.name,
+      value: metric.value,
+      unit: metric.unit,
+      createdAt: now,
+      updatedAt: now
+    } satisfies MetricRecord));
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "experiment",
+        value: experiment
+      },
+      ...metricRecords.map(
+        (record) =>
+          ({
+            type: "upsert",
+            kind: "metric",
+            value: record
+          }) satisfies ProjectionMutation
+      ),
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "experiment.run_completed",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          runId: run.id,
+          taskId: task.id,
+          payload: {
+            experimentId: experiment.id,
+            status: experiment.status,
+            experimentSpecId: experiment.experimentSpecId
+          }
+        })
+      }
+    ]);
 
     this.enqueueEvaluationTask({
       workspacePath,
@@ -710,8 +1237,8 @@ export class RunManager {
         changedFiles: outcome.changedFiles
       },
       experimentIds: [experiment.id],
-      metricRefs,
-      sourceRefs: branch.sourceIds.slice(-5),
+      metricRefs: metricRecords.map((entry) => entry.id),
+      sourceRefs: this.deps.sourceIngest.listLinkedSourceIds(workspacePath, objective.id, branch.id).slice(-5),
       focus: `Evaluate the latest experiment results for branch "${branch.title}".`
     });
   }
@@ -723,23 +1250,24 @@ export class RunManager {
     }
 
     const now = nowIso();
-    const evaluation: EvaluationRecord = {
+    const evaluation: EvaluationDecisionRecord = {
       id: createId("eval"),
       objectiveId: objective.id,
       branchId: branch.id,
       taskId: task.id,
       verdict: outcome.evaluation.verdict,
+      gateStatus: outcome.evaluation.gateStatus,
       scoreDelta: outcome.evaluation.scoreDelta,
       summary: outcome.evaluation.summary,
       rationale: outcome.evaluation.rationale,
       followupPrompt: outcome.evaluation.followupPrompt,
+      comparator: outcome.evaluation.comparator,
       createdAt: now,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "evaluation", evaluation);
     const subjectTaskId = (task.payload as EvaluateTaskPayload).subjectTaskId;
     const subjectTask = this.deps.store.readProjection(workspacePath, "task", subjectTaskId);
-    const nextBranch: BranchRecord = {
+    let nextBranch: BranchRecord = {
       ...branch,
       latestEvaluationId: evaluation.id,
       score: roundScore(branch.score + evaluation.scoreDelta),
@@ -754,70 +1282,212 @@ export class RunManager {
       lastFailureReason: subjectTask?.status === "failed" ? subjectTask.summary : branch.lastFailureReason,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "branch", nextBranch);
-    this.deps.store.upsertProjection(workspacePath, "task", {
-      ...task,
-      evaluationId: evaluation.id,
-      updatedAt: now
-    });
-
-    if (evaluation.verdict === "continue" || evaluation.verdict === "complete") {
-      const patchRef = subjectTask?.artifactRefs?.find((entry) => entry.kind === "patch");
-      if (subjectTask?.kind === "build_change" && patchRef?.path) {
-        const promotion = await this.deps.leaseManager.promotePatchArtifact(workspacePath, patchRef.path).catch((error) => ({
-          promotionStatus: "failed" as const,
-          promotionError: error instanceof Error ? error.message : String(error)
-        }));
-        if (promotion.promotionStatus === "promoted") {
-          this.deps.store.upsertProjection(workspacePath, "branch", {
-            ...nextBranch,
-            promotionHeadCommit: nextBranch.headCommit,
-            updatedAt: nowIso()
-          });
+    const operations: ProjectionMutation[] = [
+      {
+        type: "upsert",
+        kind: "evaluation",
+        value: evaluation
+      },
+      {
+        type: "upsert",
+        kind: "branch",
+        value: nextBranch
+      },
+      {
+        type: "upsert",
+        kind: "task",
+        value: {
+          ...task,
+          evaluationId: evaluation.id,
+          updatedAt: now
         }
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "evaluation.decided",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          runId: run.id,
+          taskId: task.id,
+          payload: {
+            evaluationId: evaluation.id,
+            verdict: evaluation.verdict,
+            gateStatus: evaluation.gateStatus
+          }
+        })
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "branch.status_changed",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          payload: {
+            status: nextBranch.status
+          }
+        })
       }
+    ];
+
+    let successorBranch: BranchRecord | null = null;
+    if (evaluation.verdict === "pivot") {
+      successorBranch = this.createBranch(
+        workspacePath,
+        objective,
+        `${branch.title} Pivot`,
+        evaluation.followupPrompt || `Pivot of ${branch.hypothesis}`,
+        branch.id
+      );
+      nextBranch = {
+        ...nextBranch,
+        successorBranchId: successorBranch.id,
+        updatedAt: nowIso()
+      };
+      operations.push({
+        type: "upsert",
+        kind: "branch",
+        value: nextBranch
+      });
     }
 
     if (evaluation.verdict === "complete") {
-      this.deps.store.upsertProjection(workspacePath, "objective", {
-        ...objective,
-        status: "completed",
-        summary: evaluation.summary,
-        updatedAt: now
-      });
-      this.deps.store.upsertProjection(workspacePath, "run", {
-        ...run,
-        status: "completed",
-        stopReason: undefined,
-        updatedAt: now,
-        endedAt: now
-      });
-      return;
+      operations.push(
+        {
+          type: "upsert",
+          kind: "objective",
+          value: {
+            ...objective,
+            status: "completed",
+            summary: evaluation.summary,
+            updatedAt: now
+          }
+        },
+        {
+          type: "upsert",
+          kind: "run",
+          value: {
+            ...run,
+            status: "completed",
+            stopReason: undefined,
+            updatedAt: now,
+            endedAt: now
+          }
+        }
+      );
     }
 
-    if (evaluation.followupPrompt && run.status === "active") {
-      this.enqueueTask({
-        workspacePath,
-        objective,
-        run,
-        branch: nextBranch,
-        title: `Follow up ${nextBranch.title}`,
-        prompt: evaluation.followupPrompt,
-        kind: "discover",
-        payload: {
-          branchId: nextBranch.id,
-          goal: evaluation.followupPrompt,
-          maxResults: 5
-        },
-        dependencies: [
-          {
-            taskId: task.id,
-            on: "success"
+    this.deps.store.applyMutations(workspacePath, operations);
+
+    if ((evaluation.verdict === "continue" || evaluation.verdict === "complete") && subjectTask?.kind === "build_change") {
+      const patchRef = subjectTask.artifactRefs?.find((entry) => entry.kind === "patch");
+      if (patchRef) {
+        const targetBranch = this.deps.store.readProjection(workspacePath, "branch", branch.id) ?? nextBranch;
+        this.enqueueTask({
+          workspacePath,
+          objective,
+          run: this.deps.store.readProjection(workspacePath, "run", run.id) ?? run,
+          branch: targetBranch,
+          title: `Promote ${targetBranch.title}`,
+          prompt: `Promote the latest approved patch for branch "${targetBranch.title}".`,
+          kind: "promote_patch",
+          payload: {
+            branchId: targetBranch.id,
+            sourceTaskId: subjectTask.id,
+            patchArtifactRef: patchRef
+          },
+          dependencies: [
+            {
+              taskId: task.id,
+              on: "success"
+            }
+          ],
+          maxAttempts: 1
+        });
+      }
+    }
+
+    const followupBranch = successorBranch ?? nextBranch;
+    if (evaluation.followupPrompt && run.status === "active" && (evaluation.verdict === "continue" || evaluation.verdict === "pivot")) {
+      const freshRun = this.deps.store.readProjection(workspacePath, "run", run.id);
+      if (freshRun?.status === "active") {
+        this.enqueueTask({
+          workspacePath,
+          objective,
+          run: freshRun,
+          branch: followupBranch,
+          title: `Follow up ${followupBranch.title}`,
+          prompt: evaluation.followupPrompt,
+          kind: "discover",
+          payload: {
+            branchId: followupBranch.id,
+            goal: evaluation.followupPrompt,
+            maxResults: 5
+          },
+          dependencies: [
+            {
+              taskId: task.id,
+              on: "success"
+            }
+          ],
+          maxAttempts: 1
+        });
+      }
+    }
+  }
+
+  private applyPromotionOutcome(workspacePath: string, objective: ObjectiveRecord, task: TaskRecord, outcome: TaskOutcome) {
+    const branch = this.deps.store.readProjection(workspacePath, "branch", task.branchId);
+    if (!branch) {
+      return;
+    }
+    const payload = task.payload as PromoteTaskPayload;
+    const now = nowIso();
+    const record: PromotionRecord = {
+      id: createId("promo"),
+      objectiveId: objective.id,
+      branchId: branch.id,
+      taskId: task.id,
+      sourceTaskId: payload.sourceTaskId,
+      patchArtifactRef: payload.patchArtifactRef,
+      status: outcome.promotion?.status ?? (outcome.status === "completed" ? "promoted" : "failed"),
+      summary: outcome.promotion?.summary ?? outcome.summary,
+      createdAt: now,
+      updatedAt: now
+    };
+    const operations: ProjectionMutation[] = [
+      {
+        type: "upsert",
+        kind: "promotion",
+        value: record
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "promotion.applied",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          runId: task.runId,
+          taskId: task.id,
+          payload: {
+            promotionId: record.id,
+            status: record.status
           }
-        ],
-        maxAttempts: 1
+        })
+      }
+    ];
+    if (record.status === "promoted") {
+      operations.push({
+        type: "upsert",
+        kind: "branch",
+        value: {
+          ...branch,
+          promotionHeadCommit: branch.headCommit,
+          updatedAt: now
+        }
       });
     }
+    this.deps.store.applyMutations(workspacePath, operations);
   }
 
   private enqueueEvaluationTask(input: {
@@ -848,7 +1518,7 @@ export class RunManager {
       metricRefs: input.metricRefs ?? [],
       sourceRefs: input.sourceRefs,
       successCriteria: input.objective.successCriteria,
-      baselineRefs: [],
+      baselineExperimentId: input.objective.baselineExperimentId,
       focus: input.focus
     };
     return this.enqueueTask({
@@ -866,11 +1536,11 @@ export class RunManager {
           on: "terminal"
         }
       ],
-      maxAttempts: 1
+      maxAttempts: 2
     });
   }
 
-  private buildPayloadForProposal(workspacePath: string, objective: ObjectiveRecord, branch: BranchRecord, proposal: TaskProposal): TaskPayload {
+  private buildPayloadForProposal(workspacePath: string, objective: ObjectiveRecord, branch: BranchRecord, proposal: PlanStepProposal): TaskPayload {
     switch (proposal.kind) {
       case "discover":
         return {
@@ -881,51 +1551,83 @@ export class RunManager {
       case "read_synthesize":
         return {
           branchId: branch.id,
-          sourceIds: proposal.sourceIds?.length ? proposal.sourceIds : branch.sourceIds.slice(-6),
+          sourceIds: proposal.sourceIds?.length
+            ? proposal.sourceIds
+            : this.deps.sourceIngest.listLinkedSourceIds(workspacePath, objective.id, branch.id).slice(-6),
           questions: proposal.questions?.length ? proposal.questions : [proposal.prompt]
         };
-      case "build_change":
+      case "build_change": {
+        const verificationSpecId = proposal.verificationSpec
+          ? this.createExperimentSpec(workspacePath, objective, branch, proposal.verificationSpec)
+          : undefined;
         return {
           branchId: branch.id,
           goal: proposal.prompt,
           constraints: [],
-          verificationCommands: proposal.verificationCommands ?? [],
-          successCriteria: proposal.successRubric.length > 0 ? proposal.successRubric : objective.successCriteria
+          successCriteria: proposal.successRubric.length > 0 ? proposal.successRubric : objective.successCriteria,
+          verificationSpecId
         };
-      case "run_experiment":
+      }
+      case "verify_change":
+      case "run_experiment": {
+        if (!proposal.experimentSpec) {
+          throw new Error(`Proposal ${proposal.stepId} is missing an experimentSpec.`);
+        }
+        const experimentSpecId = this.createExperimentSpec(workspacePath, objective, branch, proposal.experimentSpec);
         return {
           branchId: branch.id,
-          commands: proposal.commands?.length ? proposal.commands : [proposal.prompt],
-          timeoutMs: 20 * 60_000,
-          expectedMetrics: []
-        };
+          experimentSpecId
+        } satisfies ExperimentTaskPayload;
+      }
       case "evaluate_branch": {
         const projection = this.deps.store.getProjection(workspacePath);
         const subjectTask =
           projection.tasks
-            .filter((entry) => entry.branchId === branch.id && entry.status === "completed")
+            .filter((entry) => entry.branchId === branch.id && entry.kind !== "evaluate_branch" && entry.status !== "pending")
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
         return {
           branchId: branch.id,
           subjectTaskId: subjectTask?.id ?? createId("task_missing"),
-          subjectTaskStatus: subjectTask?.status === "completed" ? "completed" : "failed",
+          subjectTaskStatus:
+            subjectTask?.status === "completed" ||
+            subjectTask?.status === "failed" ||
+            subjectTask?.status === "cancelled" ||
+            subjectTask?.status === "needs-human"
+              ? subjectTask.status
+              : "failed",
           workerRunId: subjectTask?.workerRunId,
           patchArtifactRef: subjectTask?.artifactRefs?.find((entry) => entry.kind === "patch"),
           changedFiles: subjectTask?.changedFiles ?? [],
           experimentResultIds: [],
           metricRefs: [],
-          sourceRefs: branch.sourceIds.slice(-5),
+          sourceRefs: this.deps.sourceIngest.listLinkedSourceIds(workspacePath, objective.id, branch.id).slice(-5),
           successCriteria: objective.successCriteria,
-          baselineRefs: [],
+          baselineExperimentId: objective.baselineExperimentId,
           focus: proposal.prompt
         };
       }
+      case "promote_patch": {
+        const projection = this.deps.store.getProjection(workspacePath);
+        const sourceTask =
+          projection.tasks
+            .filter((entry) => entry.branchId === branch.id && entry.kind === "build_change" && entry.status === "completed")
+            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+        const patchArtifactRef = sourceTask?.artifactRefs?.find((entry) => entry.kind === "patch");
+        if (!sourceTask || !patchArtifactRef) {
+          throw new Error(`Cannot create promote_patch payload for branch ${branch.id} without a completed build patch.`);
+        }
+        return {
+          branchId: branch.id,
+          sourceTaskId: sourceTask.id,
+          patchArtifactRef
+        };
+      }
     }
-    throw new Error(`Unsupported proposal kind: ${String(proposal.kind)}`);
   }
 
   private enqueueTask(input: {
     workspacePath: string;
+    id?: string;
     objective: ObjectiveRecord;
     run: RunRecord;
     branch: BranchRecord;
@@ -936,10 +1638,11 @@ export class RunManager {
     dependencies: TaskDependency[];
     maxAttempts: number;
     priority?: TaskRecord["priority"];
+    planStepId?: string;
   }) {
     const now = nowIso();
     const task: TaskRecord = {
-      id: createId("task"),
+      id: input.id ?? createId("task"),
       objectiveId: input.objective.id,
       branchId: input.branch.id,
       runId: input.run.id,
@@ -953,33 +1656,44 @@ export class RunManager {
       priority: input.priority ?? this.deps.policy.buildPriority({ kind: input.kind, title: input.title }, input.branch),
       attemptCount: 0,
       maxAttempts: input.maxAttempts,
+      planStepId: input.planStepId,
       createdAt: now,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(input.workspacePath, "task", task);
-    this.deps.store.upsertProjection(input.workspacePath, "branch", {
-      ...input.branch,
-      taskIds: Array.from(new Set([...input.branch.taskIds, task.id])),
-      updatedAt: now
-    });
-    this.deps.store.appendEvent(
-      input.workspacePath,
-      this.deps.store.createEvent({
-        type: "task.enqueued",
-        objectiveId: input.objective.id,
-        branchId: input.branch.id,
-        runId: input.run.id,
-        taskId: task.id,
-        payload: {
-          kind: task.kind,
-          title: task.title
+    this.deps.store.applyMutations(input.workspacePath, [
+      {
+        type: "upsert",
+        kind: "task",
+        value: task
+      },
+      {
+        type: "upsert",
+        kind: "branch",
+        value: {
+          ...input.branch,
+          taskIds: Array.from(new Set([...input.branch.taskIds, task.id])),
+          updatedAt: now
         }
-      })
-    );
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "task.enqueued",
+          objectiveId: input.objective.id,
+          branchId: input.branch.id,
+          runId: input.run.id,
+          taskId: task.id,
+          payload: {
+            kind: task.kind,
+            title: task.title
+          }
+        })
+      }
+    ]);
     return task;
   }
 
-  private createBranch(workspacePath: string, objective: ObjectiveRecord, title: string, hypothesis: string) {
+  private createBranch(workspacePath: string, objective: ObjectiveRecord, title: string, hypothesis: string, parentBranchId?: string) {
     const now = nowIso();
     const branch: BranchRecord = {
       id: createId("br"),
@@ -988,29 +1702,96 @@ export class RunManager {
       hypothesis: hypothesis.trim(),
       status: "candidate",
       score: 0.55,
-      sourceIds: [],
+      parentBranchId,
       findingIds: [],
       taskIds: [],
       createdAt: now,
       updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "branch", branch);
-    this.deps.store.upsertProjection(workspacePath, "objective", {
-      ...objective,
-      branchIds: Array.from(new Set([...objective.branchIds, branch.id])),
-      updatedAt: now
-    });
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "branch",
+        value: branch
+      },
+      {
+        type: "upsert",
+        kind: "objective",
+        value: {
+          ...objective,
+          branchIds: Array.from(new Set([...objective.branchIds, branch.id])),
+          updatedAt: now
+        }
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "branch.created",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          payload: {
+            title: branch.title,
+            hypothesis: branch.hypothesis,
+            parentBranchId
+          }
+        })
+      }
+    ]);
     return branch;
   }
 
-  private attachSourcesToBranch(workspacePath: string, branch: BranchRecord, sources: SourceRecord[]) {
-    const updated: BranchRecord = {
-      ...branch,
-      sourceIds: Array.from(new Set([...branch.sourceIds, ...sources.map((entry) => entry.id)])),
-      updatedAt: nowIso()
+  private createExperimentSpec(workspacePath: string, objective: ObjectiveRecord, branch: BranchRecord, specInput: ExperimentSpecInput) {
+    const normalized = validateExperimentSpec(specInput);
+    const existing = this.deps.store
+      .listProjections(workspacePath, "experiment_spec")
+      .find(
+        (entry) =>
+          entry.objectiveId === objective.id &&
+          entry.branchId === branch.id &&
+          entry.cwd === normalized.cwd &&
+          JSON.stringify(entry.commands) === JSON.stringify(normalized.commands) &&
+          entry.timeoutMs === normalized.timeoutMs &&
+          entry.mode === normalized.mode
+      );
+    if (existing) {
+      return existing.id;
+    }
+    const now = nowIso();
+    const spec: ExperimentSpecRecord = {
+      id: createId("espec"),
+      objectiveId: objective.id,
+      branchId: branch.id,
+      title: normalized.title || `Spec for ${branch.title}`,
+      cwd: normalized.cwd,
+      commands: normalized.commands,
+      timeoutMs: normalized.timeoutMs,
+      mode: normalized.mode,
+      expectedMetrics: normalized.expectedMetrics,
+      artifactGlobs: normalized.artifactGlobs,
+      createdAt: now,
+      updatedAt: now
     };
-    this.deps.store.upsertProjection(workspacePath, "branch", updated);
-    return updated;
+    this.deps.store.applyMutations(workspacePath, [
+      {
+        type: "upsert",
+        kind: "experiment_spec",
+        value: spec
+      },
+      {
+        type: "event",
+        value: this.deps.store.createEvent({
+          type: "experiment.spec_created",
+          objectiveId: objective.id,
+          branchId: branch.id,
+          payload: {
+            experimentSpecId: spec.id,
+            cwd: spec.cwd,
+            mode: spec.mode
+          }
+        })
+      }
+    ]);
+    return spec.id;
   }
 }
 
@@ -1019,7 +1800,7 @@ function defaultRunBudget(): RunBudget {
     planning: 6,
     discovery: 12,
     build: 6,
-    experiment: 6,
+    experiment: 8,
     evaluation: 12,
     wallClockMs: 2 * 60 * 60 * 1000,
     maxBranches: 6
@@ -1037,6 +1818,15 @@ function defaultBudgetUsage(startedAt: string): RunBudgetUsage {
   };
 }
 
+export function effectiveElapsedMs(run: RunRecord) {
+  if (!run.startedAt) {
+    return 0;
+  }
+  const startedAtMs = new Date(run.startedAt).getTime();
+  const pausedMs = run.totalPausedMs ?? 0;
+  return Math.max(0, Date.now() - startedAtMs - pausedMs);
+}
+
 function resolveObjective(objectives: ObjectiveRecord[], objectiveId?: string) {
   if (objectiveId) {
     return objectives.find((entry) => entry.id === objectiveId) ?? null;
@@ -1045,15 +1835,34 @@ function resolveObjective(objectives: ObjectiveRecord[], objectiveId?: string) {
 }
 
 function summarizeObjective(objective: string) {
-  return objective.trim().split(/\s+/).slice(0, 8).join(" ");
+  return objective.trim().split(/\s+/).slice(0, 8).join(" ") || "Untitled objective";
 }
 
-function readBranchFromOutcome(outcome: TaskOutcome, branch: BranchRecord | null) {
-  const maybeBranch =
-    outcome.providerMetadata &&
-    typeof outcome.providerMetadata === "object" &&
-    "branch" in outcome.providerMetadata
-      ? (outcome.providerMetadata.branch as BranchRecord | undefined)
-      : undefined;
-  return maybeBranch ?? branch;
+function readBranchFromProviderMetadata(providerMetadata: Record<string, unknown> | undefined, branchId?: string | null) {
+  const candidate = providerMetadata?.branch;
+  if (!candidate || typeof candidate !== "object" || !branchId) {
+    return null;
+  }
+  const record = candidate as BranchRecord;
+  return record.id === branchId ? record : null;
+}
+
+function validateExperimentSpec(input: ExperimentSpecInput) {
+  const cwd = input.cwd.trim();
+  const commands = input.commands.map((entry) => entry.trim()).filter(Boolean);
+  if (!cwd || cwd.includes("..")) {
+    throw new Error(`ExperimentSpec.cwd must be a repo-relative path without '..': ${input.cwd}`);
+  }
+  if (commands.length === 0) {
+    throw new Error("ExperimentSpec.commands must contain at least one command.");
+  }
+  if (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0) {
+    throw new Error("ExperimentSpec.timeoutMs must be a positive number.");
+  }
+  return {
+    ...input,
+    title: input.title?.trim() || undefined,
+    cwd,
+    commands
+  };
 }

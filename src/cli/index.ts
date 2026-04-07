@@ -185,7 +185,11 @@ async function handleRunCommand(workspacePath: string, parsed: ParsedArgs) {
       await watchStatus(workspacePath, Number(parsed.flags.interval) || 1000);
       return;
     default:
-      throw new Error("Usage: lithium run start|pause|resume|stop|watch");
+      throw new Error(
+        "Usage: lithium run start|pause|resume [--workspace <path>] [--objective <id>]\n" +
+          "       lithium run stop [--workspace <path>] [--objective <id>] [--run <id>]\n" +
+          "       lithium run watch [--workspace <path>] [--interval <ms>]"
+      );
   }
 }
 
@@ -233,7 +237,10 @@ async function handleWorkspaceCommand(workspacePath: string, parsed: ParsedArgs)
 }
 
 async function serveDaemon(workspacePath: string, settingsStore?: AppSettingsStore) {
-  const daemon = createWorkspaceDaemon(workspacePath);
+  const appSettings = await settingsStore?.read();
+  const daemon = createWorkspaceDaemon(workspacePath, {
+    appSettings
+  });
   await daemon.start();
   await settingsStore?.update({
     lastWorkspacePath: workspacePath
@@ -397,7 +404,8 @@ function printUsage() {
       "  lithium daemon start|stop|status [--workspace <path>] [--foreground]",
       "  lithium objective create <goal> [--workspace <path>] [--title <title>] [--success <criterion> ...]",
       "  lithium objective list|show [objectiveId] [--workspace <path>]",
-      "  lithium run start|pause|resume|stop [--workspace <path>] [--objective <id>]",
+      "  lithium run start|pause|resume [--workspace <path>] [--objective <id>]",
+      "  lithium run stop [--workspace <path>] [--objective <id>] [--run <id>]",
       "  lithium run watch [--workspace <path>] [--interval <ms>]",
       "  lithium source add <path-or-url...> [--workspace <path>] [--objective <id>] [--branch <id>]",
       "  lithium status [--workspace <path>] [--json]",
